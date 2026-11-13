@@ -1,6 +1,6 @@
 // 端到端测试的本地环境：模拟 SMTP 服务器 + 几个 web 进程（server/web.js，和生产同一份代码：
 // 提供静态文件、按 server/http-rules.json 输出响应头、用 TCP 连接的地址写入 x-real-ip，/api 使用与生产相同的处理）
-// 端口：8080 主实例、8090 原型构建、8092 测试环境构建、8094 收付款（独立的数据和后台账号）、2525 SMTP
+// 端口：8080 主实例、8090 原型构建、8092 测试环境构建、8094 收付款（独立的数据和后台账号）、8096 钱包第 1 批页面（独立）、2525 SMTP
 // 收付款实例的数据库默认是内嵌 Postgres；设置 E2E_DATABASE_URL 时改用真实 Postgres（和生产同一个驱动 postgres.js）
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdirSync, rmSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
@@ -21,6 +21,8 @@ export const DATA_STG = resolve(TMP, 'data-staging');
 // 收付款端到端测试用的实例（内嵌 Postgres + TronGrid 替身），放在 8094 端口
 export const DATA_PAY = resolve(TMP, 'data-pay');
 export const PAY_ENV = { FAKE_TRON: '1', FAKE_SQL: '1' };
+// 钱包第 1 批页面（以太坊、BSC 合约钱包）端到端测试用的实例，放在 8096 端口：独立的数据和后台账号，一个用例失败不影响收付款用例
+export const DATA_WALLET = resolve(TMP, 'data-wallet');
 // 开户（KYB）测试用的密钥：只用于本地测试
 export const KYB_ENV = { APP_SECRET: 'e2e-app-secret-e2e-app-secret-0123456789ab', ADMIN_SETUP_TOKEN: 'e2e-setup-token' };
 const children = [];
@@ -85,7 +87,9 @@ export async function start() {
 
   startWeb(8094, DATA_PAY, { ...KYB_ENV, ...PAY_ENV, ...(process.env.E2E_DATABASE_URL ? { DATABASE_URL: process.env.E2E_DATABASE_URL } : {}) });
 
-  await Promise.all([8080, 8090, 8092, 8094].map((p) => waitFor(`http://127.0.0.1:${p}/api/health/`)));
+  startWeb(8096, DATA_WALLET, { ...KYB_ENV, ...PAY_ENV }); // 内嵌 Postgres
+
+  await Promise.all([8080, 8090, 8092, 8094, 8096].map((p) => waitFor(`http://127.0.0.1:${p}/api/health/`)));
   return async () => {
     for (const c of children) c.kill('SIGTERM');
     await new Promise((r) => smtp.close(r));

@@ -17,7 +17,7 @@ const U = 1_000_000;
 const OUT = process.env.WALKTHROUGH_OUT || resolve(TMP, 'walkthrough');
 const ADMIN_PW = 'walkthrough-admin-password';
 const M_EMAIL = 'finance@walk.example', M_PW = 'walkthrough merchant pw';
-const ADMIN_TABS = ['p-overview', 'apps', 'p-merchants', 'p-customers', 'p-sweep', 'p-withdrawals', 'p-anomalies', 'p-recon', 'p-wallet', 'p-status'];
+const ADMIN_TABS = ['p-overview', 'apps', 'p-merchants', 'p-customers', 'p-sweep', 'p-withdrawals', 'p-anomalies', 'p-recon', 'p-wallet', 'p-routes', 'p-status'];
 const MERCHANT_TABS = ['overview', 'customers', 'orders', 'transactions', 'withdraw', 'api', 'callbacks'];
 
 const lastStep: Record<string, number> = {};
