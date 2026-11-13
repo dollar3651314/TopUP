@@ -341,6 +341,15 @@ export async function clearAlert(db, key, notify, subject, text) {
 export async function confirmSweeps(db, { providers = {}, notify, now } = {}) {
   const out = { expired: 0, checked: 0, confirmed: 0, partial: 0, failed: 0, errors: [] };
   try { out.expired = await expireStale(db, { now }); } catch (e) { out.errors.push(e.message); }
+  // 确认后进程中断（停在"发送中"超过 15 分钟、没有交易号）：标为失败、地址放回待归集，发邮件让管理员到链上核对
+  try {
+    const stuck = await db.query(`update wallet_sweep_batches set status = 'failed', error = 'interrupted_while_sending', updated_at = now()
+      where status = 'sending' and updated_at < $1 returning id, chain`, [new Date(at(now).getTime() - 15 * 60_000)]);
+    for (const b of stuck) {
+      await db.query(`update wallet_sweep_items set status = 'released', reason = 'interrupted' where batch_id = $1 and status = 'pending'`, [b.id]);
+      if (notify) await notify(`归集失败：${CHAIN_NAMES[b.chain]} ${b.id}`, `批次 ${b.id} 确认后发送时中断（服务重启或节点无响应），已标为失败，地址放回待归集。钱只会进冷钱包；下一次凑批时系统会按链上余额重新列出。`);
+    }
+  } catch (e) { out.errors.push(e.message); }
   let sent = [];
   try { sent = await db.query(`select * from wallet_sweep_batches where status = 'sent' order by updated_at limit 20`); } catch (e) { out.errors.push(e.message); }
   for (const b of sent) {
