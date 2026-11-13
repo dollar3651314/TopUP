@@ -10,9 +10,11 @@ const root = document.getElementById('pay-root')!;
 const lang = (root.dataset.lang || 'en') as 'en' | 'zh';
 const PROTO = root.dataset.prototype === '1';
 const c = copy[lang].pay;
+const cn = copy[lang].chain;
+type Net = { chain: string; network: string; address: string };
 const $ = <T extends HTMLElement = HTMLElement>(s: string) => root.querySelector<T>(s)!;
 
-interface PayState { id: string; merchant: string; amount: number; received: number; address: string; expiresAt: number; status: OrderState; confirmations: number; low: number; high: number }
+interface PayState { nets?: Net[]; fixed?: boolean; id: string; merchant: string; amount: number; received: number; address: string; expiresAt: number; status: OrderState; confirmations: number; low: number; high: number }
 
 // 订单号：/pay/<订单号>/，也兼容 ?o=<订单号>
 const params = new URLSearchParams(location.search);
@@ -41,19 +43,70 @@ const open = (s: PayState) => s.status === 'pending' || s.status === 'partial';
 let st: PayState | null = PROTO ? protoOrder() : null;
 const initial = st ? { ...st } : null;
 
+// 多链：付款人选的网络（按订单记在本页的会话里，刷新不丢；付款前可以改选）
+const pickKey = `topup-pay-net:${id}`;
+let picked: string | null = (() => { try { return sessionStorage.getItem(pickKey); } catch { return null; } })();
+// K1：选了网络才向服务器要这条链的地址（服务器这时才生成），所以选完立刻查一次
+const setPick = (v: string | null) => { picked = v; try { if (v) sessionStorage.setItem(pickKey, v); else sessionStorage.removeItem(pickKey); } catch { /* 存不了也能用 */ } paint(); if (v && !PROTO) fetchOnce(); };
+const netName = (ch: string) => (cn.names as Record<string, string>)[ch] || ch;
+const netStd = (ch: string) => (cn.std as Record<string, string>)[ch] || '';
+/** 当前用的网络：只有一个可选（或商户指定了链）时直接用它；多个时要付款人先选 */
+function currentNet(s: PayState): Net | null {
+  const nets = s.nets || [];
+  if (!nets.length) return null;
+  if (nets.length === 1) return nets[0];
+  return nets.find((n) => n.chain === picked) || null;
+}
+function paintChoose(s: PayState) {
+  const box = $('[data-pay-chains]');
+  const nets = s.nets || [];
+  const rows = ['eth', 'bsc', 'tron'].map((ch) => {
+    const n = nets.find((x) => x.chain === ch);
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = `chain-choice${n ? '' : ' disabled'}`; b.disabled = !n; b.dataset.net = ch;
+    const dot = document.createElement('span'); dot.className = `chain-tag c-${ch}`; dot.textContent = netName(ch);
+    const txt = document.createElement('span'); txt.className = 'stack-sm';
+    const std = document.createElement('span'); std.className = 'muted'; std.textContent = netStd(ch);
+    const hint = document.createElement('span'); hint.className = 'hint muted'; hint.textContent = (c.netHint as Record<string, string>)[ch] || '';
+    txt.append(std, hint);
+    b.append(dot, txt);
+    if (!n) { const later = document.createElement('span'); later.className = 'later-tag'; later.textContent = cn.later; b.append(later); }
+    else b.addEventListener('click', () => setPick(ch));
+    return b;
+  });
+  box.replaceChildren(...rows);
+}
+
+// 查询状态失败（服务器 500、网络不通）：没拿到过订单时不能说成"链接写错"，提示"暂时查不到；已付款不要重复付"
+let unavailable = false;
 function paint() {
-  if (!st) { $('[data-pay-notfound]').hidden = false; $('[data-pay-card]').hidden = true; return; }
+  // 文字只在出错时放进去（藏起来的文字也算在页面文字里，恢复后要整段拿掉）
+  const un = $('[data-pay-unavailable]');
+  un.hidden = !unavailable; un.textContent = unavailable ? c.unavailable : '';
+  if (!st) { $('[data-pay-notfound]').hidden = unavailable; $('[data-pay-card]').hidden = true; return; }
+  const net = currentNet(st);
+  const multi = (st.nets?.length || 0) > 1;
+  if (net) st.address = net.address; // 正式模式下刚选完、地址还在路上时是空的
+  $('[data-pay-network]').textContent = net ? tpl(c.networkOf, { net: netName(net.chain), std: netStd(net.chain) }) : st.nets ? c.stepChoose : c.network;
+  $('[data-pay-network]').hidden = !net && !!st.nets;
+  $('[data-pay-warn]').textContent = net ? tpl(c.warnOf, { net: netName(net.chain), std: netStd(net.chain) }) : c.warn;
+  $('[data-pay-change]').hidden = !multi || !net;
+  $('[data-pay-change]').onclick = () => setPick(null);
+  const choosing = !!st.nets && !net && open(st);
+  $('[data-pay-choose]').hidden = !choosing;
+  if (choosing) paintChoose(st);
+  root.querySelector<HTMLElement>('[data-pay-step="choose"]')!.hidden = !multi;
   $('[data-pay-card]').hidden = false;
   $('[data-pay-merchant]').textContent = tpl(c.requests, { m: st.merchant });
   $('[data-pay-amount]').textContent = fmtUsdt(st.amount);
   $('[data-pay-address]').textContent = st.address;
   $('[data-pay-order]').textContent = st.id;
   const img = $<HTMLImageElement>('[data-pay-qr]');
-  if (!img.dataset.for || img.dataset.for !== st.address) { img.src = qrDataUrl(st.address); img.dataset.for = st.address; }
+  if (st.address && (!img.dataset.for || img.dataset.for !== st.address)) { img.src = qrDataUrl(st.address); img.dataset.for = st.address; }
 
   const confirming = open(st) && st.confirmations > 0;
   const finished = !open(st);
-  $('[data-pay-live]').hidden = finished || confirming;
+  $('[data-pay-live]').hidden = finished || confirming || choosing;
   const conf = $('[data-pay-confirming]');
   const partialOpen = st.status === 'partial' && !confirming;
   conf.hidden = !confirming && !partialOpen;
@@ -72,9 +125,10 @@ function paint() {
     $('[data-pay-icon]').className = `pay-icon ${icon}`;
   }
   const step = st.status === 'completed' || st.status === 'overpaid' ? 'completed' : confirming ? 'confirming' : 'waiting';
-  const order = ['waiting', 'confirming', 'completed'];
+  const order = ['choose', 'waiting', 'confirming', 'completed'];
+  const curStep = choosing ? 'choose' : step;
   root.querySelectorAll<HTMLElement>('[data-pay-step]').forEach((li) => {
-    const i = order.indexOf(li.dataset.payStep!), cur = order.indexOf(step);
+    const i = order.indexOf(li.dataset.payStep!), cur = order.indexOf(curStep);
     li.className = i < cur || (step === 'completed' && i === cur) ? 'done' : i === cur && open(st!) ? 'on' : '';
   });
   tick();
@@ -125,18 +179,31 @@ root.querySelectorAll<HTMLButtonElement>('[data-sim]').forEach((b) => b.addEvent
 }));
 
 // ---------- 正式模式：查询订单状态 ----------
+// K1：不带 chain 时只拿订单和能选的链（chains）；付款人选了网络后带上 chain，服务器为这条链生成（或复用）地址
+async function fetchOnce() {
+  if (PROTO || !id) return;
+  try {
+    const fixedChain = st?.fixed ? st.nets?.[0]?.chain : null;
+    const want = fixedChain || picked;
+    const r = await fetch(`/api/pay/?o=${encodeURIComponent(id)}${want && !fixedChain ? `&chain=${encodeURIComponent(want)}` : ''}`);
+    unavailable = !r.ok && r.status !== 404 && r.status !== 409 && r.status !== 422;
+    if (r.ok) {
+      const d = await r.json();
+      const chains: string[] = Array.isArray(d.chains) ? d.chains : (d.addresses || []).map((a: Net) => a.chain);
+      const addrs: Net[] = Array.isArray(d.addresses) ? d.addresses : [];
+      const nets = chains.map((ch) => ({ chain: ch, network: (addrs.find((a) => a.chain === ch) || {}).network || ch.toUpperCase(), address: (addrs.find((a) => a.chain === ch) || {}).address || '' }));
+      st = { id: d.order_no, merchant: d.merchant, amount: parseUsdt(d.amount) || 0, received: parseUsdt(d.matched) ?? 0, address: d.address || '', expiresAt: Date.parse(d.expires_at), status: d.status, confirmations: 0, low: d.low, high: d.high,
+        nets: nets.length ? nets : undefined, fixed: !!d.chain };
+      if (picked && !chains.includes(picked)) { picked = null; try { sessionStorage.removeItem(pickKey); } catch { /* 忽略 */ } }
+    } else if (r.status === 404) st = null;
+    else if ((r.status === 409 || r.status === 422) && picked) { picked = null; try { sessionStorage.removeItem(pickKey); } catch { /* 忽略 */ } return fetchOnce(); }
+  } catch { unavailable = true; /* 网络暂时不通：保持当前显示，并提示暂时查不到 */ }
+  paint();
+}
 async function poll() {
   if (PROTO || !id) return;
   if (document.visibilityState === 'visible') {
-    try {
-      const r = await fetch(`/api/pay/?o=${encodeURIComponent(id)}`);
-      if (r.ok) {
-        const d = await r.json();
-        st = { id: d.order_no, merchant: d.merchant, amount: parseUsdt(d.amount) || 0, received: parseUsdt(d.matched) ?? 0, address: d.address, expiresAt: Date.parse(d.expires_at), status: d.status, confirmations: 0, low: d.low, high: d.high };
-      }
-      else if (r.status === 404) st = null;
-    } catch { /* 网络暂时不通时保持当前显示 */ }
-    paint();
+    await fetchOnce();
     if (st && !open(st)) return;
   }
   setTimeout(poll, 5000);

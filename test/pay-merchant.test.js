@@ -10,6 +10,7 @@ import { createOps } from '../server/pay/ops.js';
 import { createMerchantApi, inviteMerchantUser } from '../server/pay/merchant-api.js';
 import { derivePayKeys } from '../server/pay/common.js';
 import { totpCode } from '../server/kyb/totp.js';
+import { legacyTronCustomer } from './legacy-tron.js'; // K1：新客户不再生成地址；要用 TRON 地址的用例先造已有 TRON 地址的老客户
 
 const U = 1_000_000;
 const XPUB = HDKey.fromMasterSeed(mnemonicToSeedSync('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about')).derive("m/44'/195'/0'").publicExtendedKey;
@@ -76,6 +77,7 @@ test('登录后：客户、订单、手动匹配、导出 CSV', async () => {
   await s.call('setup-confirm', { token, code: totpCode(b.secret, s.now()) });
   s.tick(31_000);
   await s.call('login', { email: 'finance@acme.example', password: 'correct horse battery', code: totpCode(b.secret, s.now()) });
+  await legacyTronCustomer(s.db, 'm1', '-cmd');
   const c = (await s.call('customer-save', { customer_id: '-cmd', name: 'Evil' })).body; // 防 CSV 公式注入
   await core.recordDeposit(s.db, { txid: 'd'.repeat(64), logIndex: 0, block: 1, to: c.address, amount: 40 * U, time: new Date(Date.now() - 30 * 3600_000) });
   const o = (await s.call('order-create', { customer_id: '-cmd', merchant_order_no: 'M-1', amount: '40' })).body;

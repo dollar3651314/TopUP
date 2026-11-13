@@ -8,6 +8,7 @@ import { migrate } from '../server/pay/schema.js';
 import * as core from '../server/pay/core.js';
 import { createFakeTron } from '../server/pay/fake-trongrid.js';
 import { runDaily } from '../server/pay/daily.js';
+import { legacyTronCustomer } from './legacy-tron.js'; // K1：新客户不再生成地址；TRON 老地址的用例用已有 TRON 地址的老客户
 
 const U = 1_000_000;
 const XPUB = HDKey.fromMasterSeed(mnemonicToSeedSync('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about')).derive("m/44'/195'/0'").publicExtendedKey;
@@ -18,7 +19,7 @@ test('对账一致时不发邮件；链上少了钱时发邮件；发现其他�
   await core.setMeta(db, 'xpub', XPUB);
   const tron = createFakeTron();
   const m = await core.createMerchant(db, { id: 'm1', name: 'Acme', feeIn: { ppm: 10_000, fixed: 0, min: 0 }, feeOut: { ppm: 0, fixed: 2 * U, min: 0 } });
-  const c = await db.tx((t) => core.ensureCustomer(t, 'm1', 'u1'));
+  const c = await legacyTronCustomer(db, 'm1', 'u1');
   await core.recordDeposit(db, { txid: 'a'.repeat(64), logIndex: 0, block: 1, to: c.address, amount: 1000 * U, time: new Date() });
   await core.recordDeposit(db, { txid: 'b'.repeat(64), logIndex: 0, block: 1, to: c.address, amount: 500_000, time: new Date() }); // 低于 1 USDT
   const w = await core.requestWithdrawal(db, m, { kind: 'payout', to: HOT, amount: 100 * U, source: 'web' });

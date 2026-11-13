@@ -48,12 +48,13 @@ const WALLET_ENV = IS_STAGING ? 'staging' : !IS_PROTOTYPE && process.env.APP_ENV
         <span class="nav-group">收付款</span>
         <button type="button" data-tab="p-merchants">商户 <span class="badge" data-pcount="merchants"></span></button>
         <button type="button" data-tab="p-customers">客户</button>
-        <button type="button" data-tab="p-sweep">归集</button>
+        <button type="button" data-tab="p-sweep">归集 <span class="badge" data-pcount="sweep"></span></button>
         <button type="button" data-tab="p-withdrawals">提币审核 <span class="badge" data-pcount="withdrawals"></span></button>
         <button type="button" data-tab="p-anomalies">异常到账 <span class="badge" data-pcount="anomalies"></span></button>
         <button type="button" data-tab="p-recon">对账</button>
         <button type="button" data-tab="p-wallet">钱包设置</button>
-        <button type="button" data-tab="p-status">系统状态</button>
+        <button type="button" data-tab="p-routes">钱包提供方</button>
+        <button type="button" data-tab="p-status">系统状态 <span class="badge" data-pcount="status"></span></button>
         <button type="button" data-logout>退出登录</button>
       </nav>
       <div class="admin-content">
@@ -79,6 +80,7 @@ const WALLET_ENV = IS_STAGING ? 'staging' : !IS_PROTOTYPE && process.env.APP_ENV
         <section data-panel="p-anomalies" hidden></section>
         <section data-panel="p-recon" hidden></section>
         <section data-panel="p-wallet" hidden></section>
+        <section data-panel="p-routes" hidden></section>
         <section data-panel="p-status" hidden></section>
 
         <section data-panel="detail" hidden>

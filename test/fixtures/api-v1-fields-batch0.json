@@ -1,0 +1,136 @@
+{
+ "description": "Open API fields and types as of the batch-0 code. New code may add fields; these must stay with the same type.",
+ "endpoints": {
+  "POST customers": {
+   "customer_id": "string",
+   "name": "string",
+   "email": "string",
+   "remark": "string",
+   "address": "string",
+   "total": "string",
+   "count": "number",
+   "fees": "string",
+   "unmatched": "string",
+   "last_payment_at": "null",
+   "created_at": "string"
+  },
+  "GET customers": {
+   "customer_id": "string",
+   "name": "string",
+   "email": "string",
+   "remark": "string",
+   "address": "string",
+   "total": "string",
+   "count": "number",
+   "fees": "string",
+   "unmatched": "string",
+   "last_payment_at": "null",
+   "created_at": "string"
+  },
+  "GET customers/list": {
+   "customer_id": "string",
+   "name": "string",
+   "email": "string",
+   "remark": "string",
+   "address": "string",
+   "total": "string",
+   "count": "number",
+   "fees": "string",
+   "unmatched": "string",
+   "last_payment_at": "null",
+   "created_at": "string"
+  },
+  "POST orders": {
+   "order_no": "string",
+   "merchant_order_no": "string",
+   "customer_id": "string",
+   "amount": "string",
+   "matched": "string",
+   "status": "string",
+   "created_at": "string",
+   "expires_at": "string",
+   "deposits": "array",
+   "address": "string",
+   "network": "string",
+   "token": "string",
+   "pay_url": "string"
+  },
+  "GET orders": {
+   "order_no": "string",
+   "merchant_order_no": "string",
+   "customer_id": "string",
+   "amount": "string",
+   "matched": "string",
+   "status": "string",
+   "created_at": "string",
+   "expires_at": "string",
+   "deposits": "array",
+   "address": "string",
+   "network": "string",
+   "token": "string",
+   "pay_url": "string"
+  },
+  "GET orders/list": {
+   "order_no": "string",
+   "merchant_order_no": "string",
+   "customer_id": "string",
+   "amount": "string",
+   "matched": "string",
+   "status": "string",
+   "created_at": "string",
+   "expires_at": "string"
+  },
+  "GET deposits": {
+   "id": "string",
+   "customer_id": "string",
+   "address": "string",
+   "txid": "string",
+   "amount": "string",
+   "fee": "string",
+   "credited": "string",
+   "result": "string",
+   "order_no": "string",
+   "matched_by": "string",
+   "time": "string"
+  },
+  "GET balance": {
+   "available": "string",
+   "frozen": "string",
+   "currency": "string"
+  },
+  "callback deposit": {
+   "id": "string",
+   "data": "object",
+   "type": "string",
+   "created_at": "string"
+  },
+  "callback deposit data": {
+   "fee": "number",
+   "time": "string",
+   "txid": "string",
+   "amount": "number",
+   "address": "string",
+   "credited": "number",
+   "order_no": "string",
+   "customer_id": "string"
+  },
+  "callback order.matched": {
+   "id": "string",
+   "data": "object",
+   "type": "string",
+   "created_at": "string"
+  },
+  "callback order.matched data": {
+   "amount": "number",
+   "manual": "boolean",
+   "status": "string",
+   "matched": "number",
+   "deposits": "array",
+   "order_no": "string",
+   "created_at": "string",
+   "expires_at": "string",
+   "customer_id": "string",
+   "merchant_order_no": "string"
+  }
+ }
+}

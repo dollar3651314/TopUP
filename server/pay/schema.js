@@ -218,6 +218,102 @@ alter table sign_batches add column if not exists verified_until timestamptz;
 alter table customers add column if not exists email_hash text not null default '';
 create index if not exists customers_email_hash on customers (merchant_id, email_hash) where email_hash <> '';
 
+-- ---------- 多链（第 1 批：ETH、BSC 合约钱包） ----------
+-- 客户序号：合约充值地址的盐由它算（正整数、客户之间唯一、各条链相同）。和 hd_index（TRON 助记词地址的序号）无关
+create sequence if not exists customer_seq;
+alter table customers add column if not exists seq bigint;
+update customers set seq = nextval('customer_seq') where seq is null;
+alter table customers alter column seq set default nextval('customer_seq');
+create unique index if not exists customers_seq on customers (seq);
+-- K1：地址在客户发起充值时按链生成，新客户不再派生 TRON 地址：address、hd_index 允许为空（唯一约束照旧，空值不冲突）
+alter table customers alter column address drop not null;
+alter table customers alter column hd_index drop not null;
+
+-- 每个客户每条链的收款地址。创建时记下提供方、合约参数版本和盐；更换地址时旧地址停用（一直扫链、照常入账、由原提供方归集）
+create table if not exists customer_addresses (
+  id bigserial primary key,
+  merchant_id text not null,
+  customer_id text not null,
+  chain text not null check (chain in ('eth', 'bsc', 'tron')),
+  provider text not null,
+  scheme_ver int not null default 0,
+  salt text not null default '',
+  address text not null,
+  status text not null default 'active' check (status in ('active', 'retired')),
+  retired_at timestamptz,
+  created_at timestamptz not null default now(),
+  foreign key (merchant_id, customer_id) references customers (merchant_id, customer_id),
+  unique (chain, address)
+);
+create unique index if not exists customer_addresses_active on customer_addresses (merchant_id, customer_id, chain) where status = 'active';
+create index if not exists customer_addresses_lookup on customer_addresses (chain, lower(address));
+create index if not exists customer_addresses_provider on customer_addresses (chain, provider);
+-- 升级前已有的 TRON 客户（助记词派生的地址）：补一行 tron、provider = legacy_hd；重复执行不重复插入
+insert into customer_addresses (merchant_id, customer_id, chain, provider, scheme_ver, salt, address, status)
+  select c.merchant_id, c.customer_id, 'tron', 'legacy_hd', 0, '', c.address, 'active' from customers c
+  where c.address is not null and not exists (select 1 from customer_addresses a where a.chain = 'tron' and a.address = c.address)
+  on conflict do nothing;
+
+-- 钱包提供方路由：这个商户这条链 → 这条链 → 全局默认 contract。第一版只开放按链整体切换（merchant_id 留空）
+create table if not exists wallet_routes (
+  id bigserial primary key,
+  merchant_id text,
+  chain text not null check (chain in ('eth', 'bsc', 'tron')),
+  provider text not null,
+  effective_from timestamptz not null default now(),
+  actor text not null default '',
+  reason text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists wallet_routes_lookup on wallet_routes (chain, effective_from);
+
+-- 到账记链；同一笔交易号在不同链上互不影响
+alter table deposits add column if not exists chain text not null default 'tron';
+alter table deposits drop constraint if exists deposits_chain_check;
+alter table deposits add constraint deposits_chain_check check (chain in ('eth', 'bsc', 'tron'));
+alter table deposits add column if not exists raw_amount text;
+create unique index if not exists deposits_chain_tx on deposits (chain, txid, log_index);
+alter table deposits drop constraint if exists deposits_txid_log_index_key;
+
+-- 订单可以指定链（空 = 付款人自己选）
+alter table orders add column if not exists chain text check (chain in ('eth', 'bsc', 'tron'));
+
+-- 合约钱包归集（ETH、BSC，半自动）：系统凑批 → 管理员确认 → 一笔交易
+create table if not exists wallet_sweep_batches (
+  id text primary key,
+  chain text not null,
+  provider text not null,
+  status text not null check (status in ('awaiting_approval', 'sending', 'sent', 'confirmed', 'partial', 'failed', 'expired', 'cancelled')),
+  total bigint not null,
+  address_count int not null,
+  skipped jsonb not null default '[]',
+  fee_estimate jsonb not null default '{}',
+  tx_refs jsonb not null default '[]',
+  slot text not null default '',
+  approved_by text,
+  approved_at timestamptz,
+  reason text,
+  error text,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  updated_at timestamptz not null default now()
+);
+create index if not exists wallet_sweep_batches_status on wallet_sweep_batches (chain, status, created_at);
+create table if not exists wallet_sweep_items (
+  id bigserial primary key,
+  batch_id text not null references wallet_sweep_batches(id),
+  chain text not null,
+  address text not null,
+  salt text not null,
+  amount bigint not null,
+  deploy boolean not null,
+  status text not null check (status in ('pending', 'sent', 'swept', 'failed', 'released')),
+  reason text
+);
+-- 一个地址同一时间只在一个没结束的批次里
+create unique index if not exists wallet_sweep_items_active on wallet_sweep_items (chain, address) where status in ('pending', 'sent');
+create index if not exists wallet_sweep_items_batch on wallet_sweep_items (batch_id);
+
 create table if not exists pay_audit (
   id bigserial primary key,
   actor text not null,

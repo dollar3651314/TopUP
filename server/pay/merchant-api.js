@@ -110,7 +110,11 @@ export function createMerchantApi({ db, keys, ops, send, now = () => Date.now() 
       const [o] = await db.query(`select count(*)::int n from orders where merchant_id = $1 and status in ('pending', 'partial')`, [m.id]);
       const [u] = await db.query(`select coalesce(sum(amount), 0)::bigint total, count(*)::int n from deposits where merchant_id = $1 and result = 'credited' and order_id is null`, [m.id]);
       const [w] = await db.query(`select count(*)::int n from withdrawals where merchant_id = $1 and status = 'pending'`, [m.id]);
-      return { ...bal, today: t.total, today_count: t.n, today_fees: t.fees, open_orders: o.n, unmatched: u.total, unmatched_count: u.n, pending_withdrawals: w.n, recent: (await ops.deposits(m, { limit: 6 })).items };
+      // 按链的今日收款（余额仍是一个数，提币时再选链）
+      const byChain = await db.query(`select chain, coalesce(sum(amount), 0)::bigint total, count(*)::int n from deposits
+        where merchant_id = $1 and result = 'credited' and time >= (date_trunc('day', now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai') group by chain`, [m.id]);
+      const today_by_chain = ['eth', 'bsc', 'tron'].map((c) => { const r = byChain.find((x) => x.chain === c); return { chain: c, total: r ? r.total : 0, count: r ? r.n : 0 }; });
+      return { ...bal, today: t.total, today_count: t.n, today_fees: t.fees, today_by_chain, chains: ops.chains(), open_orders: o.n, unmatched: u.total, unmatched_count: u.n, pending_withdrawals: w.n, recent: (await ops.deposits(m, { limit: 6 })).items };
     },
     customers: (m, b, s, q) => ops.listCustomers(m, { q: q.get('q') || '', cursor: q.get('cursor'), limit: 50 }),
     async customer(m, b, s, q) {
@@ -122,6 +126,7 @@ export function createMerchantApi({ db, keys, ops, send, now = () => Date.now() 
         payouts: (await db.query(`select id, amount, status, created_at from withdrawals where merchant_id = $1 and customer_id = $2 order by created_at desc limit 50`, [m.id, id])).map((w) => ({ withdrawal_no: w.id, amount: w.amount, status: w.status, created_at: iso(w.created_at) })) };
     },
     'customer-save': (m, b) => ops.upsertCustomer(m, b),
+    'customer-addresses': (m, b, s, q) => ops.customerAddresses(m, q.get('customer_id') || ''),
     orders: (m, b, s, q) => ops.listOrders(m, { status: q.get('status') || '', customerId: q.get('customer_id') || '', cursor: q.get('cursor'), limit: 50 }),
     async order(m, b, s, q) {
       const o = await ops.getOrder(m, { orderNo: q.get('order_no') });

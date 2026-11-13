@@ -13,6 +13,7 @@ import { createApiV1, signRequest, canonicalPath } from '../server/pay/api-v1.js
 import { derivePayKeys } from '../server/pay/common.js';
 import { deliverDue } from '../server/pay/callbacks.js';
 import { ENDPOINTS, OBJECTS, LIST, EVENTS, EVENT_ENVELOPE, ERRORS, TYPES, returnFields } from '../site/src/docs/api-reference.mjs';
+import { legacyTronCustomer } from './legacy-tron.js'; // K1：新客户不再生成地址；要用 TRON 地址的用例先造已有 TRON 地址的老客户
 
 const U = 1_000_000;
 const XPUB = HDKey.fromMasterSeed(mnemonicToSeedSync('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about')).derive("m/44'/195'/0'").publicExtendedKey;
@@ -77,6 +78,7 @@ test('开发者文档：每个接口实际返回的字段、类型和文档一�
     return out;
   };
 
+  await legacyTronCustomer(db, 'md', 'c1'); // 到账要用地址：已有 TRON 地址的老客户（新客户按 K1 在充值时才生成地址）
   const c = check('POST', 'customers/', await call('POST', 'customers/', { customer_id: 'c1', name: 'Lin', email: 'lin@example.com', remark: 'vip' }));
   check('GET', 'customers/', await call('GET', 'customers/?customer_id=c1'));
   check('GET', 'customers/list/', await call('GET', 'customers/list/'));

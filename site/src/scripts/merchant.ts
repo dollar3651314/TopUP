@@ -3,7 +3,7 @@
 // - 原型模式（开发分支的预览）：模拟数据
 import copy from '../i18n/merchant.json';
 import { calcFee, describeFee, fmtUsdt, isTronAddress, parseUsdt, shortAddr } from '../lib/money';
-import { realData, protoData, units, ApiErr, MAX_ROWS, type List, type Amount, type Cust, type Dep, type OrderFull, type Wd, type Me } from './merchant-data';
+import { realData, protoData, units, ApiErr, MAX_ROWS, type List, type Amount, type Cust, type Dep, type OrderFull, type Wd, type Me, type ChainAddr } from './merchant-data';
 import * as Mock from './mock';
 import { copyBtn, field, fieldErr, fmtTime, h, makeDialog, mono, qrDataUrl, stat, status, table, toast, tpl } from './ui';
 
@@ -23,6 +23,30 @@ const CUST_RE = /^[A-Za-z0-9_.@-]{1,128}$/;
 const pct = (ppm: number) => String(ppm / 10000);
 const errText = (e: unknown) => (c.errors as Record<string, string>)[(e as ApiErr)?.code] || c.errors.generic;
 let me: NonNullable<Me['merchant']>;
+
+// ---------- 多链（第 1 批：以太坊、BSC；TRON 第 2 批） ----------
+const CHAINS = ['eth', 'bsc', 'tron'] as const;
+let enabledChains: string[] = [];
+const netName = (ch: string) => (c.chain.names as Record<string, string>)[ch] || ch.toUpperCase();
+const netStd = (ch: string) => (c.chain.std as Record<string, string>)[ch] || '';
+const chainTag = (ch: string) => h('span', { class: `chain-tag c-${ch}` }, netName(ch));
+const laterTag = () => h('span', { class: 'later-tag' }, c.chain.later);
+const addrOf = (list: ChainAddr[] | undefined, ch: string) => (list || []).find((a) => a.chain === ch)?.address || null;
+/** 每条链一张地址卡：地址、复制按钮、"只收某网络的 USDT"；TRON 没有地址时标"第 2 批" */
+function addressCards(list: ChainAddr[] | undefined) {
+  // 以太坊、BSC 同一串时就近说明一句（免得商户以为只能收一条链）
+  const e = addrOf(list, 'eth'), b = addrOf(list, 'bsc');
+  const same = e && b && e.toLowerCase() === b.toLowerCase() ? h('p', { class: 'info-box m0', 'data-same-note': '' }, c.chain.sameNote) : null;
+  const grid = h('div', { class: 'addr-grid', 'data-addresses': '' }, ...CHAINS.map((ch) => {
+    const a = addrOf(list, ch);
+    if (!a && ch !== 'tron' && !enabledChains.includes(ch)) return null;
+    return h('div', { class: 'addr-card', 'data-chain': ch }, chainTag(ch),
+      a ? mono(a) : ch === 'tron' ? laterTag() : h('span', { class: 'muted', 'data-not-yet': '' }, '—'),
+      a ? copyBtn(() => { say(tpl(c.chain.copiedNote, { net: netName(ch), std: netStd(ch) })); return a; }, tpl(c.chain.copy, { net: netName(ch) }), c.common.copied) : null,
+      h('span', { class: 'hint muted' }, a ? tpl(c.chain.only, { net: netName(ch), std: netStd(ch) }) : ch === 'tron' ? c.chain.tronLater : c.chain.notYet));
+  }));
+  return same ? h('div', { class: 'stack-sm' }, same, grid) : grid;
+}
 
 // ---------- 视图与导航 ----------
 const views = [...root.querySelectorAll<HTMLElement>('[data-view]')];
@@ -99,6 +123,7 @@ async function enter() {
 // ---------- 概览 ----------
 render.overview = async (p) => {
   const o = await D.overview();
+  if (o.chains) enabledChains = o.chains;
   const on = me.order_mode.enabled;
   p.replaceChildren(
     toolbar(c.overview.title, on ? h('button', { type: 'button', class: 'btn btn-primary', onclick: createOrder }, c.overview.newOrder) : null),
@@ -108,7 +133,8 @@ render.overview = async (p) => {
       stat(c.overview.today, usd(o.today), tpl(c.overview.todaySub, { n: o.today_count, fee: usd(o.today_fees) })),
       on ? stat(c.overview.openOrders, String(o.open_orders), c.overview.openOrdersSub) : null,
       on ? stat(c.overview.unmatched, usd(o.unmatched), tpl(c.overview.unmatchedSub, { n: o.unmatched_count })) : null),
-    h('p', { class: 'hint muted' }, c.overview.balanceNote),
+    o.today_by_chain ? h('div', { class: 'stats', 'data-by-chain': '' }, ...o.today_by_chain.filter((x) => enabledChains.includes(x.chain) || units(x.total) > 0).map((x) => stat(tpl(c.overview.byChain, { net: netName(x.chain) }), usd(x.total), tpl(c.overview.byChainSub, { n: x.count })))) : null,
+    h('p', { class: 'hint muted' }, c.overview.balanceNote, o.today_by_chain ? ` ${c.overview.oneBalance}` : ''),
     h('h2', { class: 'h-sm' }, c.overview.recent),
     depositTable(o.recent),
   );
@@ -138,19 +164,27 @@ function depositTable(rows: List<Dep>, full = false): HTMLElement {
 let custQuery = '';
 render.customers = async (p) => {
   const cc = c.customers;
+  if (!enabledChains.length && !PROTO) { try { enabledChains = (await D.overview()).chains || []; } catch { /* 读不到时按单列显示 */ } }
   const search = h('input', { type: 'search', class: 'input-sm input-wide', placeholder: cc.search, value: custQuery }) as HTMLInputElement;
   const listBox = h('div');
   const drawList = async () => {
     const list = await D.customers(custQuery.trim());
     const k = cc.cols;
-    listBox.replaceChildren(table([k.id, `${k.name} · ${k.email}`, k.address, `${k.total}（${k.count}）`, k.fees, k.last, k.unmatched], list.map((x) => [
-      mono(x.customer_id), sub(x.name || '—', x.email || null), mono(shortAddr(x.address), x.address), sub(usd(x.total), `${k.count} ${x.count}`), usd(x.fees), t(x.last_payment_at), units(x.unmatched) ? h('b', {}, usd(x.unmatched)) : '0.00',
-    ]), c.common.none, { onRow: (i) => customerDetail(list[i].customer_id), rowAttrs: (i) => ({ 'data-customer': list[i].customer_id }), page: pg(list) }));
+    // 多链：每条链一列地址（以太坊、BSC 是同一串，分两列显示）；没有多链数据的（原型）照旧一列
+    const multi = list.some((x) => x.addresses?.length) || enabledChains.length > 0;
+    const addrCell = (x: Cust, ch: string) => { const a = addrOf(x.addresses, ch); return a ? mono(shortAddr(a), a) : ch === 'tron' ? laterTag() : '—'; };
+    const unm = (x: Cust) => (units(x.unmatched) ? h('b', {}, usd(x.unmatched)) : '0.00');
+    // 多链：照原型，客户一列（标识 + 名称 · 邮箱），每条链一列地址；手续费、最近付款在客户详情里看
+    const cols = multi ? [k.id, ...CHAINS.map((ch) => `${netName(ch)} ${k.address}`), `${k.total}（${k.count}）`, k.unmatched] : [k.id, `${k.name} · ${k.email}`, k.address, `${k.total}（${k.count}）`, k.fees, k.last, k.unmatched];
+    listBox.replaceChildren(table(cols, list.map((x) => multi
+      ? [sub(mono(x.customer_id), [x.name, x.email].filter(Boolean).join(' · ') || null), ...CHAINS.map((ch) => addrCell(x, ch)), sub(usd(x.total), `${k.count} ${x.count}`), unm(x)]
+      : [mono(x.customer_id), sub(x.name || '—', x.email || null), x.address ? mono(shortAddr(x.address), x.address) : '—', sub(usd(x.total), `${k.count} ${x.count}`), usd(x.fees), t(x.last_payment_at), unm(x)],
+    ), c.common.none, { onRow: (i) => customerDetail(list[i].customer_id), rowAttrs: (i) => ({ 'data-customer': list[i].customer_id }), page: pg(list) }));
   };
   let timer = 0;
   search.addEventListener('input', () => { custQuery = search.value; clearTimeout(timer); timer = window.setTimeout(drawList, 250); });
   await drawList();
-  p.replaceChildren(toolbar(cc.title, search, h('button', { type: 'button', class: 'btn btn-primary', onclick: createCustomer }, cc.new)), h('p', { class: 'hint muted' }, cc.body), listBox);
+  p.replaceChildren(toolbar(cc.title, search, h('button', { type: 'button', class: 'btn btn-primary', onclick: createCustomer }, cc.new)), enabledChains.length ? h('p', { class: 'info-box' }, cc.chainsBody) : h('p', { class: 'hint muted' }, cc.body), listBox);
 };
 function createCustomer() {
   const cc = c.customers.create;
@@ -163,7 +197,10 @@ function createCustomer() {
     if (fieldErr(id, CUST_RE.test(v) ? null : c.orders.create.errCustomer)) return false;
     try { await D.saveCustomer({ customer_id: v, name: name.value.trim(), email: email.value.trim(), remark: remark.value.trim() }, true); }
     catch (e) { fieldErr((e as ApiErr).field === 'email' ? email : id, (e as ApiErr).code === 'duplicate_customer' ? cc.errDup : errText(e)); return false; }
-    say(cc.created); await refresh(); setTimeout(() => customerDetail(v), 0);
+    let r: { addresses: ChainAddr[] } | null = null;
+    try { r = await D.customerAddresses(v); } catch { r = null; }
+    say(r?.addresses.length ? cc.createdChains : cc.created); await refresh();
+    setTimeout(() => (r?.addresses.length ? dialog(v, addressCards(r.addresses), c.common.close, null, false, true) : customerDetail(v)), 0);
   });
 }
 async function customerDetail(id: string) {
@@ -190,8 +227,10 @@ async function customerDetail(id: string) {
   draw(first);
   const exp = D.exportUrl('customer', id);
   const body = h('div', { class: 'stack' },
-    h('dl', { class: 'kv' }, h('dt', {}, c.customers.cols.id), h('dd', {}, mono(x.customer_id)),
-      h('dt', {}, cd.address), h('dd', {}, h('span', { class: 'copy-row' }, mono(x.address), copyBtn(() => x.address, c.common.copy, c.common.copied, 'link-copy')))),
+    x.addresses?.length
+      ? h('div', { class: 'stack-sm' }, h('dl', { class: 'kv' }, h('dt', {}, c.customers.cols.id), h('dd', {}, mono(x.customer_id))), h('h3', { class: 'h-sm m0' }, cd.addresses), addressCards(x.addresses))
+      : h('dl', { class: 'kv' }, h('dt', {}, c.customers.cols.id), h('dd', {}, mono(x.customer_id)),
+        h('dt', {}, cd.address), h('dd', {}, x.address ? h('span', { class: 'copy-row' }, mono(x.address), copyBtn(() => x.address || '', c.common.copy, c.common.copied, 'link-copy')) : h('span', { class: 'muted', 'data-on-demand': '' }, cd.onDemand))),
     h('div', { class: 'fgrid fgrid-3' }, field('mcd-name', c.customers.create.name, name), field('mcd-email', c.customers.create.email, email), field('mcd-remark', c.customers.create.remark, remark)),
     h('div', { class: 'row-actions' }, h('label', { class: 'inline-label' }, cd.range, rangeSel),
       exp ? h('a', { class: 'btn btn-outline btn-sm', href: exp, download: '' }, cd.statement) : h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => say(cd.exported) }, cd.statement)),
@@ -249,8 +288,10 @@ async function orderDetail(id: string) {
         h('dt', {}, c.orders.cols.matched), h('dd', {}, tpl(cd.sum, { sum: usd(o.matched), amount: usd(o.amount), pct: pctNow })),
         h('dt', {}, c.orders.cols.status), h('dd', {}, orderBadge(o.status)),
         h('dt', {}, c.orders.cols.expires), h('dd', {}, t(o.expires_at)),
-        h('dt', {}, cd.address), h('dd', {}, mono(o.address))),
-      h('p', { class: 'hint muted m0' }, tpl(cd.addressNote, { c: o.customer_id })),
+        // K1：没指定链的订单不给地址，付款人在付款页选了网络才给这条链的地址
+        h('dt', {}, cd.network), h('dd', {}, o.chain ? chainTag(o.chain) : enabledChains.length ? tpl(cd.anyChain, { list: enabledChains.map((ch) => netName(ch)).join(' / ') }) : (o.network || '—')),
+        h('dt', {}, cd.address), h('dd', {}, o.address ? mono(o.address) : h('span', { class: 'muted', 'data-payer-picks': '' }, cd.payerPicks))),
+      ...(o.address ? [h('p', { class: 'hint muted m0' }, tpl(cd.addressNote, { c: o.customer_id }))] : []),
       h('div', { class: 'f' }, h('span', { class: 'lbl' }, cd.payLink), h('div', { class: 'copy-row' }, mono(o.pay_url), copyBtn(() => o.pay_url, cd.copyLink, c.common.copied)), h('a', { class: 'link-copy', href: url, target: '_blank', rel: 'noopener', 'data-open-pay': '' }, cd.open + ' ↗')),
       h('h3', { class: 'h-sm m0' }, cd.matchedTitle),
       table([dc.time, dc.amount, cd.how, ''], o.deposits.map((d) => [t(d.time), usd(d.amount), (cd.types as Record<string, string>)[d.matched_by] || d.matched_by, act(d, false)]), cd.none),
@@ -332,9 +373,16 @@ async function createOrder() {
   const cust = picker.input;
   const no = h('input', { autocomplete: 'off', value: `ORDER-${Date.now().toString(36).toUpperCase()}` }) as HTMLInputElement;
   const amt = h('input', { inputmode: 'decimal', autocomplete: 'off' }) as HTMLInputElement;
+  if (!enabledChains.length && !PROTO) { try { enabledChains = (await D.overview()).chains || []; } catch { /* 读不到时不显示选链 */ } }
+  const choice = (value: string, title: string, hint: string, disabled = false, extra: Node | null = null) => h('label', { class: `chain-choice${disabled ? ' disabled' : ''}` },
+    h('input', { type: 'radio', name: 'mo-chain', value, checked: value === '', disabled }), h('span', {}, h('b', {}, title), extra, hint ? h('span', { class: 'hint muted' }, hint) : null));
+  const chainBox = enabledChains.length ? h('fieldset', { class: 'f chain-choices', 'data-chain-choice': '' }, h('legend', { class: 'lbl' }, cc.chain),
+    choice('', cc.chainAny, cc.chainAnyHint),
+    ...['eth', 'bsc'].filter((ch) => enabledChains.includes(ch)).map((ch) => choice(ch, tpl(cc.chainOnly, { net: netName(ch), std: netStd(ch) }), ch === 'eth' ? cc.ethHint : '')),
+    choice('tron', tpl(cc.chainOnly, { net: netName('tron'), std: netStd('tron') }), c.chain.laterNote, true, laterTag())) : null;
   const body = h('div', { class: 'stack' }, pickerField('mo-cust', cc.customer, picker, cc.customerHint), who,
     h('div', { class: 'fgrid' }, field('mo-cname', `${cc.customerName} (${c.common.optional})`, cname), field('mo-cemail', `${cc.customerEmail} (${c.common.optional})`, cemail)),
-    field('mo-no', cc.merchantNo, no, cc.merchantNoHint), field('mo-amt', cc.amount, amt), h('p', { class: 'hint muted m0' }, settingsNote()));
+    field('mo-no', cc.merchantNo, no, cc.merchantNoHint), field('mo-amt', cc.amount, amt), chainBox, h('p', { class: 'hint muted m0' }, settingsNote()));
   dialog(cc.title, body, cc.submit, async () => {
     const cid = cust.value.trim();
     let bad = fieldErr(cust, CUST_RE.test(cid) ? null : cc.errCustomer);
@@ -343,7 +391,7 @@ async function createOrder() {
     if (bad) return false;
     let o: OrderFull;
     // 已有客户不再传名称和邮箱（服务端也只在新建客户时使用）
-    try { o = await D.createOrder({ customer_id: cid, customer_name: (!cname.readOnly && cname.value.trim()) || undefined, customer_email: (!cemail.readOnly && cemail.value.trim()) || undefined, merchant_order_no: no.value.trim(), amount: amt.value.replace(/[,\s]/g, '') }); }
+    try { o = await D.createOrder({ customer_id: cid, customer_name: (!cname.readOnly && cname.value.trim()) || undefined, customer_email: (!cemail.readOnly && cemail.value.trim()) || undefined, merchant_order_no: no.value.trim(), amount: amt.value.replace(/[,\s]/g, ''), chain: chainBox?.querySelector<HTMLInputElement>('input:checked')?.value || undefined }); }
     catch (e) {
       const f = (e as ApiErr).field;
       fieldErr(f === 'merchant_order_no' ? no : f === 'customer_email' ? cemail : f === 'customer_id' ? cust : amt, (e as ApiErr).code === 'duplicate_merchant_order_no' ? cc.errDup : errText(e));

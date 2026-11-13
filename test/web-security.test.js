@@ -22,7 +22,7 @@ test('web：生产和测试环境没有 /__fake/ 入口（即使设置了 FAKE_T
         try {
           writeFileSync(join(dir, '404.html'), 'Page not found');
           const web = createWeb(loadConfig({ APP_ENV: appEnv, FAKE_TRON: '1', FAKE_SQL: '1' }), { site: dir });
-          for (const p of ['/__fake/cleanup/', '/__fake/tick/', '/__fake/daily/', '/__fake/sql/', '/__fake/tron/pay/', '/__fake/tron/account/', '/__fake/tron/confirm-all/']) {
+          for (const p of ['/__fake/cleanup/', '/__fake/tick/', '/__fake/daily/', '/__fake/sql/', '/__fake/tron/pay/', '/__fake/tron/account/', '/__fake/tron/confirm-all/', '/__fake/evm/pay/']) {
             for (const method of ['GET', 'POST']) {
               const body = method === 'POST' ? JSON.stringify({ sql: 'select 1 as x', to: 'T', amount: 1 }) : undefined;
               const r = await web.handle(new Request(`http://x.test${p}`, { method, body, headers: { 'content-type': 'application/json' } }));

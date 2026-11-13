@@ -31,7 +31,7 @@ export function signRequest(secret, ts, method, path, body) {
 // 计数放在 Redis，web 进程的所有实例共享；本地和测试用 Redis 的内存替身，代码相同。
 // Redis 出错或超过 1 秒没有响应时放行并记录日志：不让限流故障挡住正常收款。
 export const RATE_PER_SEC = 20;
-export function createRateLimiter({ redis, log = console, timeoutMs = 1000 }) {
+export function createRateLimiter({ redis, log = console, timeoutMs = 1000, prefix = 'v1rl', perSec = RATE_PER_SEC }) {
   const local = new Map(); // 没有 Redis 时（只在单元测试里）退回单实例计数
   return async function allow(key, now) {
     const sec = Math.floor(now / 1000);
@@ -39,9 +39,9 @@ export function createRateLimiter({ redis, log = console, timeoutMs = 1000 }) {
     if (!redis) {
       const k = `${id}:${sec}`; const n = (local.get(k) || 0) + 1; local.set(k, n);
       if (local.size > 5000) local.clear();
-      return n <= RATE_PER_SEC;
+      return n <= perSec;
     }
-    const rk = `topup:v1rl:${id}:${sec}`;
+    const rk = `topup:${prefix}:${id}:${sec}`;
     try {
       let timer;
       const n = await Promise.race([
@@ -49,7 +49,7 @@ export function createRateLimiter({ redis, log = console, timeoutMs = 1000 }) {
         new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timeout')), timeoutMs); }),
       ]).finally(() => clearTimeout(timer));
       if (n === 1) redis.expire(rk, 5).catch(() => {}); // 窗口 1 秒，多留几秒再过期
-      return Number(n) <= RATE_PER_SEC;
+      return Number(n) <= perSec;
     } catch (err) {
       log.error(`[pay] RATE_LIMIT_UNAVAILABLE ${err.message}`);
       return true;

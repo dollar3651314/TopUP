@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { readJsonl, decodeQP, MAILS, KYB_ENV, TMP } from '../stack.mjs';
 // @ts-ignore 与后端同一份 TOTP 实现
 import { totpCode, totpStep } from '../../server/kyb/totp.js';
+import { legacyTron } from './legacy-tron';
 
 // 页面走查：逐页、逐状态截图，并自动检查常见的显示问题。
 // 注意：8094 端口用的是 site/dist，运行前先 `cd site && npm run build`，否则截到的是旧页面。
@@ -17,7 +18,7 @@ const U = 1_000_000;
 const OUT = process.env.WALKTHROUGH_OUT || resolve(TMP, 'walkthrough');
 const ADMIN_PW = 'walkthrough-admin-password';
 const M_EMAIL = 'finance@walk.example', M_PW = 'walkthrough merchant pw';
-const ADMIN_TABS = ['p-overview', 'apps', 'p-merchants', 'p-customers', 'p-sweep', 'p-withdrawals', 'p-anomalies', 'p-recon', 'p-wallet', 'p-status'];
+const ADMIN_TABS = ['p-overview', 'apps', 'p-merchants', 'p-customers', 'p-sweep', 'p-withdrawals', 'p-anomalies', 'p-recon', 'p-wallet', 'p-routes', 'p-status'];
 const MERCHANT_TABS = ['overview', 'customers', 'orders', 'transactions', 'withdraw', 'api', 'callbacks'];
 
 const lastStep: Record<string, number> = {};
@@ -139,7 +140,8 @@ test.describe.serial('页面走查', () => {
     for (let i = 0; i < 60; i++) {
       const r = await post(merchant, '/api/merchant/?a=customer-save', { customer_id: `cust_${String(i).padStart(3, '0')}`, name: names[i % names.length], email: i % 3 ? `user${i}@example.com` : '' });
       expect(r.status).toBe(200);
-      custs.push({ id: r.body.customer_id, address: r.body.address });
+      // K1：新客户不生成地址；走查要的 TRON 到账数据用已有 TRON 地址的老客户
+      custs.push({ id: r.body.customer_id, address: await legacyTron(merchant, B, 'Walkthrough Trading Co., Ltd.', r.body.customer_id) });
     }
     // 到账：普通、大额、小数很多、低于 1 USDT、灰尘
     const amounts = [100 * U, 1_234_567.89 * U, 12.345678 * U, 0.5 * U, 1, 999_999, 5000 * U];

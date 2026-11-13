@@ -297,7 +297,9 @@ dialog[data-mdialog]::backdrop, dialog[data-pdialog]::backdrop { background: rgb
 .pay-table td .hint { white-space: normal; display: block; min-width: 160px; max-width: 320px; }
 .stack-sm { display: grid; gap: 8px; }
 .cell-2 { display: grid; gap: 2px; }
-.pay-table td .cell-2 .hint { min-width: 0; white-space: nowrap; }
+/* 复核：390 宽时 min-width: 0 + 不换行让名称溢出到旁边一列、文字重叠。改成按词换行，格子至少有最长一个词宽 */
+.pay-table td .cell-2 > * { min-width: min-content; }
+.pay-table td .cell-2 .hint { white-space: normal; max-width: 16em; }
 .table-foot { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .table-foot [hidden] { display: none; }
 dialog[data-mdialog] .form-card > *, dialog[data-pdialog] .form-card > *, dialog .stack > * { min-width: 0; }
@@ -334,3 +336,70 @@ input[readonly] { background: var(--bg-soft); color: var(--text-muted); }
 .home, .nf { max-width: 640px; padding-top: 48px; padding-bottom: 48px; }
 .home-links { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
 .nf div { margin-top: 40px; }
+
+/* ---------- 第 1 批：多链（链标签、第一屏大卡片、归集批次卡、页内切换） ---------- */
+.chain-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); white-space: nowrap; }
+.chain-tag::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.chain-tag.c-eth { color: #4263eb; }
+.chain-tag.c-bsc { color: #b7791f; }
+.chain-tag.c-tron { color: #c92a2a; }
+@media (prefers-color-scheme: dark) { .chain-tag.c-eth { color: #91a7ff; } .chain-tag.c-bsc { color: #ffd43b; } .chain-tag.c-tron { color: #ffa8a8; } }
+.later-tag { display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 1px 6px; margin-left: 6px; border: 1px dashed var(--text-muted); border-radius: 4px; color: var(--text-muted); white-space: nowrap; }
+.hero-todo { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--border); border-left: 6px solid var(--accent); border-radius: var(--radius); padding: 18px 22px; box-shadow: var(--shadow); margin-bottom: 16px; }
+.hero-todo h2 { font-size: 1.15rem; }
+.hero-todo > .stack-sm { flex: 1 1 360px; }
+.hero-warn { border-left-color: var(--gold); }
+.hero-bad { border-left-color: var(--danger); }
+.btn-lg { padding: 12px 24px; font-size: 1rem; }
+.batch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; align-items: start; }
+.batch-card .kv, .chain-card .kv { grid-template-columns: 7em 1fr; }
+.batch-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.batch-head .status { margin-left: auto; }
+.batch-amt { font-size: 1.6rem; font-weight: 800; }
+.batch-amt small { font-size: 0.8rem; color: var(--text-muted); font-weight: 600; }
+.seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.seg button, .pill-btn { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 0.85rem; cursor: pointer; }
+.seg button.on, .seg button[aria-selected="true"] { background: var(--text); color: var(--surface); border-color: var(--text); }
+.seg button:disabled { opacity: 0.6; cursor: not-allowed; }
+.seg-nav { margin-bottom: 8px; }
+.stepper-3 { display: flex; gap: 8px; list-style: none; padding: 0; margin: 0; counter-reset: s; }
+.stepper-3 li { flex: 1; counter-increment: s; font-size: 0.85rem; color: var(--text-muted); }
+.stepper-3 li::before { content: counter(s); display: inline-grid; place-items: center; width: 22px; height: 22px; margin-right: 6px; border-radius: 50%; border: 1px solid var(--border); }
+.stepper-3 li.on { color: var(--text); font-weight: 700; }
+.stepper-3 li.on::before, .stepper-3 li.done::before { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
+.wl-checks { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.wl-checks li { position: relative; padding-left: 1.6em; }
+.wl-checks li::before { content: '✓'; position: absolute; left: 0; width: 1.2em; height: 1.2em; border-radius: 50%; display: grid; place-items: center; font-size: 0.75em; font-weight: 800; background: var(--accent); color: var(--accent-contrast); top: 0.15em; }
+.wl-checks li.bad { color: var(--danger); font-weight: 600; }
+.wl-checks li.bad::before { content: '✕'; background: var(--danger); color: #fff; }
+.wl-checks li.muted::before { content: '–'; background: var(--text-muted); color: var(--surface); }
+.wl-checks.bullets li::before { content: '✓'; }
+.chain-card.later { border-style: dashed; }
+.tron-toolbar { margin-top: 0; }
+.addr-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+.addr-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; display: grid; gap: 8px; }
+.addr-card .mono { word-break: break-all; }
+.chain-choices { display: grid; gap: 8px; }
+.chain-choice { display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; cursor: pointer; }
+.chain-choice:has(input:checked) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.chain-choice.disabled { opacity: 0.55; cursor: not-allowed; }
+.chain-choice .hint { display: block; }
+.info-box { background: rgba(28, 126, 214, 0.08); border: 1px solid rgba(28, 126, 214, 0.35); border-radius: var(--radius); padding: 10px 14px; margin: 0 0 12px; }
+@media (max-width: 560px) { .hero-todo .btn-lg { width: 100%; } .batch-grid { grid-template-columns: 1fr; } }
+button.chain-choice { width: 100%; background: var(--surface); color: var(--text); font: inherit; text-align: left; align-items: center; }
+button.chain-choice:not(:disabled):hover { border-color: var(--accent); }
+button.chain-choice .later-tag { margin-left: auto; }
+/* 第 1 批复核：没发出、部分成功等"不是成功"的提示（不用成功色）；侧栏出错角标；各链 tab 的地址数；确认数进度条 */
+.warn-box { background: rgba(245, 184, 61, 0.14); border: 1px solid rgba(245, 184, 61, 0.55); border-radius: 10px; padding: 10px 14px; font-size: 0.92rem; }
+.badge.badge-bad { background: var(--danger); color: #fff; border-color: var(--danger); }
+.tab-count { display: inline-block; min-width: 1.6em; margin-left: 6px; padding: 0 6px; border-radius: 999px; font-size: 0.75rem; background: var(--bg-soft); color: var(--text-muted); border: 1px solid var(--border); }
+.stat .v.v-sm { font-size: 1.05rem; }
+.stat.stat-bad { border-color: var(--danger); }
+.stat.stat-bad .v { color: var(--danger); }
+.chain-card.chain-bad { border-color: var(--danger); box-shadow: inset 4px 0 0 var(--danger); }
+.conf-bar { width: 100%; height: 8px; accent-color: var(--accent); }
+.funds-chains summary { cursor: pointer; font-weight: 600; margin: 4px 0 8px; }
+@media (prefers-color-scheme: dark) { .st-needs_info { color: #ffa8a8; background: rgba(255, 135, 135, 0.16); } .st-submitted { color: #ffc078; background: rgba(255, 192, 120, 0.14); } }
+.status.st-bad { color: var(--danger); background: rgba(201, 42, 42, 0.12); font-weight: 700; }
+@media (prefers-color-scheme: dark) { .status.st-bad { background: rgba(255, 135, 135, 0.16); } }
+.link-btn.link-plain { color: var(--accent); }

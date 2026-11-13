@@ -13,10 +13,19 @@ const base = (l: Lang) => (l === 'en' ? '/' : '/zh/');
 <AppLayout lang={lang} title={copy[lang].meta.payTitle} badge={c.powered} switchHref={`${base(other)}pay/`} switchLabel={copy[lang].header.switch} switchAria={copy[lang].header.switchAria}>
   <div class="container pay-wrap" id="pay-root" data-prototype={IS_PROTOTYPE ? '1' : undefined} data-lang={lang} data-base={base(lang)}>
     <p class="alert" data-pay-notfound hidden>{c.notFound}</p>
+    <p class="note-box" data-pay-unavailable role="status" hidden></p>
     <div class="card pay-card" data-pay-card hidden>
       <p class="muted m0" data-pay-merchant></p>
       <div class="pay-amount"><span data-pay-amount></span> <small>USDT</small></div>
-      <span class="pill">{c.network}</span>
+      <span class="pill" data-pay-network>{c.network}</span>
+
+      <!-- 多链：先选网络（只有一条链可选、或商户指定了链时跳过） -->
+      <div class="stack-sm" data-pay-choose hidden>
+        <h1 class="h-sm m0">{c.chooseTitle}</h1>
+        <p class="warn-box m0"><b>{c.chooseWarn}</b></p>
+        <div class="chain-choices" data-pay-chains></div>
+        <p class="hint muted m0">{c.chooseNote}</p>
+      </div>
 
       <div data-pay-live>
         <img class="pay-qr" data-pay-qr alt="QR" width="200" height="200" />
@@ -25,8 +34,9 @@ const base = (l: Lang) => (l === 'en' ? '/' : '/zh/');
           <button type="button" class="btn btn-outline" data-copy="address">{c.copyAddr}</button>
           <button type="button" class="btn btn-outline" data-copy="amount">{c.copyAmt}</button>
         </div>
-        <p class="warn-box">{c.warn}</p>
+        <p class="warn-box" data-pay-warn>{c.warn}</p>
         <p class="m0 pay-timer">{c.remaining} <b data-pay-timer>--:--</b></p>
+        <p class="m0"><button type="button" class="link-btn" data-pay-change hidden>{c.change}</button></p>
       </div>
 
       <div class="pay-result" data-pay-result hidden>
@@ -37,6 +47,7 @@ const base = (l: Lang) => (l === 'en' ? '/' : '/zh/');
 
       <p class="pay-confirming" data-pay-confirming role="status" hidden></p>
       <ol class="pay-steps" aria-label="Status">
+        <li data-pay-step="choose" hidden>{c.stepChoose}</li>
         <li data-pay-step="waiting">{c.steps.waiting}</li>
         <li data-pay-step="confirming">{c.steps.confirming}</li>
         <li data-pay-step="completed">{c.steps.completed}</li>

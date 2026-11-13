@@ -14,6 +14,7 @@ import { describeFee, fmtUsdt, parseUsdt, shortAddr } from '../lib/money';
 import { copyBtn, field, fieldErr, fmtTime, h, mono, stat, status, table, toast } from './ui';
 import { dialog, feeInputs, modeInputs, modeText, tronscan, minsAgo, TRONSCAN } from './admin-pay';
 import { mountOverview } from './admin-overview';
+import { pickSweepChain, renderEvmSweep, renderRoutes, walletBadges, walletStatus, walletTodo, type WalletUi } from './admin-wallet';
 
 const root = document.getElementById('admin-root')!;
 const PROTO = root.dataset.prototype === '1';
@@ -44,6 +45,8 @@ async function call(a: string, body?: unknown, qs = '') {
 }
 
 const render: Record<string, (p: HTMLElement) => Promise<void>> = {};
+/** 合约钱包部分（admin-wallet.ts）用的工具：rerender 重画当前标签 */
+const wui = (tab: string): WalletUi => ({ call, dialog, say, errText, rerender: () => show(tab), go: (x) => root.querySelector<HTMLElement>(`[data-tab="${x}"]`)?.click() });
 async function show(tab: string) {
   const p = $(`[data-panel="${tab}"]`);
   // 走查：接口慢时页面一片空白。0.3 秒还没好就显示"加载中"；出错时显示原因和"重试"
@@ -55,6 +58,7 @@ async function show(tab: string) {
   } finally { clearTimeout(slow); }
   counts();
 }
+const v2 = (x: string) => `${x}有失败、部分成功或手续费不够，要处理`;
 async function counts() {
   const set = (k: string, n: number | null, meaning: string) => {
     const b = root.querySelector<HTMLElement>(`[data-pcount="${k}"]`);
@@ -68,9 +72,17 @@ async function counts() {
     ['withdrawals', '待审核的提币', async () => (await call('withdrawals')).items.length],
     ['anomalies', '未处理的异常到账', async () => (await call('anomalies')).items.filter((x: any) => !x.handled).length],
   ];
-  await Promise.all(jobs.map(async ([k, meaning, f]) => {
+  await Promise.all([...jobs.map(async ([k, meaning, f]) => {
     try { set(k, await f(), meaning); } catch (e) { set(k, null, meaning); console.warn(`[admin] 导航数字 ${k} 读取失败：${(e as WErr).code || e}`); }
-  }));
+  }),
+  // 归集、系统状态的角标（"!" 表示有出错要处理）
+  walletBadges(wui('p-overview')).then((b) => {
+    for (const [k, v, meaning] of [['sweep', b.sweep, v2('归集')], ['status', b.status, '系统状态有链不正常']] as [string, string | null, string][]) {
+      const el = root.querySelector<HTMLElement>(`[data-pcount="${k}"]`);
+      if (!el) continue;
+      el.textContent = v ?? ''; el.classList.toggle('badge-bad', v === '!'); el.title = v === '!' ? meaning : v ? `等你确认的归集批次：${v}` : '';
+    }
+  }).catch(() => {})]);
 }
 if (!PROTO) {
   root.querySelectorAll<HTMLElement>('[data-tab^="p-"]').forEach((b) => b.addEventListener('click', () => show(b.dataset.tab!)));
@@ -152,7 +164,7 @@ function signDialog(job: SignJob) {
 
 // ============ 商户 ============
 render.overview = async (p) => {
-  const go = (tab: string) => root.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.click();
+  const go = (tab: string, chain?: string) => { if (chain) pickSweepChain(chain); root.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.click(); };
   mountOverview(p, {
     db: async () => {
       try { return await call('overview'); } catch (e) {
@@ -163,7 +175,11 @@ render.overview = async (p) => {
     },
     chain: () => call('overview-chain'),
   }, go);
+  // 第 1 批：最上面加"待处理"（按等了多久排，出错的排最前）；读取失败时显示"待处理读取失败 + 重试"，不显示"现在没事要做"
+  const todo = await walletTodo(wui('p-overview')).catch(() => h('div', { class: 'alert', 'data-todo-error': '' }, '待处理读取失败。 ', h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => show('p-overview') }, '重试')));
+  const head = p.querySelector('.toolbar'); if (head) head.after(todo); else p.prepend(todo);
 };
+render.routes = (p) => renderRoutes(wui('p-routes'), p);
 render.merchants = async (p) => {
   const { merchants, pending } = await call('merchants');
   p.replaceChildren(
@@ -221,14 +237,14 @@ render.customers = async (p) => {
   q.addEventListener('change', () => { custQ = q.value.trim(); render.customers(p); });
   const { items } = await call('customers', undefined, `&q=${encodeURIComponent(custQ)}&merchant_id=${encodeURIComponent(custM)}`);
   p.replaceChildren(toolbar('客户', sel, q), h('p', { class: 'hint muted' }, '商户的客户由商户自己定义标识，每个客户一个永久地址。这里可以跨商户查找任意客户。'),
-    table(['商户', '客户标识 · 名称', '地址', '累计收款（笔数）', '手续费', '未匹配', '未归集', '最近付款'], items.map((x: any) => [x.merchant, sub(mono(x.customer_id), x.name || ''), mono(shortAddr(x.address), x.address), sub(usd(x.total), `${x.count} 笔`), usd(x.fees), usd(x.unmatched), usd(x.onchain), t(x.last_payment_at)]),
+    table(['商户', '客户标识 · 名称', '地址', '累计收款（笔数）', '手续费', '未匹配', '未归集', '最近付款'], items.map((x: any) => [x.merchant, sub(mono(x.customer_id), x.name || ''), x.address ? mono(shortAddr(x.address), x.address) : h('span', { class: 'muted' }, '—'), sub(usd(x.total), `${x.count} 笔`), usd(x.fees), usd(x.unmatched), usd(x.onchain), t(x.last_payment_at)]),
       '没有找到客户', { onRow: (i) => customerDetail(items[i]) }));
 };
 async function customerDetail(x: any) {
   const r = await call('customer', undefined, `&merchant_id=${encodeURIComponent(x.merchant_id)}&customer_id=${encodeURIComponent(x.customer_id)}`);
   const OS: Record<string, string> = { pending: '等待付款', partial: '部分付款', completed: '已完成', overpaid: '超额付款', expired: '已过期', expired_partial: '部分付款（已过期）' };
   dialog(`${x.merchant} · ${x.customer_id}`, h('div', { class: 'stack' },
-    h('dl', { class: 'kv' }, h('dt', {}, '地址'), h('dd', {}, h('span', { class: 'copy-row' }, mono(r.customer.address), tronscan(r.customer.address))), h('dt', {}, '名称'), h('dd', {}, r.customer.name || '—'), h('dt', {}, '创建时间'), h('dd', {}, t(r.customer.created_at))),
+    h('dl', { class: 'kv' }, h('dt', {}, '地址'), h('dd', {}, r.customer.address ? h('span', { class: 'copy-row' }, mono(r.customer.address), tronscan(r.customer.address)) : h('span', { class: 'muted' }, '没有 TRON 地址（地址在客户发起充值时按链生成）')), h('dt', {}, '名称'), h('dd', {}, r.customer.name || '—'), h('dt', {}, '创建时间'), h('dd', {}, t(r.customer.created_at))),
     h('div', { class: 'stats' }, stat('累计收款', usd(r.customer.total), 'USDT'), stat('笔数', String(r.customer.count)), stat('手续费', usd(r.customer.fees), 'USDT'), stat('未匹配', usd(r.customer.unmatched), 'USDT')),
     h('h3', { class: 'h-sm m0' }, '订单'), table(['订单号', '金额', '已匹配', '状态', '创建'], r.orders.map((o: any) => [mono(o.order_no), usd(o.amount), usd(o.matched), OS[o.status] || o.status, t(o.created_at)]), '暂无'),
     h('h3', { class: 'h-sm m0' }, '到账'), table(['时间', '金额', '结果', '订单', '交易'], r.deposits.map((d: any) => [t(d.time), usd(d.amount), d.result === 'credited' ? '已入账' : '低于 1 USDT', d.order_no ? mono(d.order_no) : '—', mono(d.txid.slice(0, 10) + '…', d.txid)]), '暂无'),
@@ -264,7 +280,7 @@ render.withdrawals = async (p) => {
       return [cb, mono(w.id), sub(t(w.created_at), isP ? `已等待 ${minsAgo(w.created_at)}` : ''), w.merchant, `${w.kind === 'payout' ? '代付' : '商户提现'} · ${w.source === 'api' ? 'API' : '后台'}`, w.customer_id ? mono(w.customer_id) : '—', mono(shortAddr(w.to), w.to), sub(h('b', {}, usd(w.amount)), `手续费 ${usd(w.fee)}`), st];
     }), wdAll ? '暂无提币' : '暂无待审核的提币'),
     short ? h('p', { class: 'alert' }, `热钱包余额不足：已选 ${fmtUsdt(need)} USDT，热钱包只有 ${fmtUsdt(hotUsdt!)} USDT。请先归集，或少选几笔。`) : h('span'),
-    h('div', { class: 'sumbar' }, h('span', {}, '已选 ', h('b', {}, String(chosen.length)), ' 笔 · 合计打出 ', h('b', {}, `${fmtUsdt(need)} USDT`)),
+    !r.items.length ? h('span') : h('div', { class: 'sumbar' }, h('span', {}, '已选 ', h('b', {}, String(chosen.length)), ' 笔 · 合计打出 ', h('b', {}, `${fmtUsdt(need)} USDT`)),
       h('span', { class: 'sumbar-actions' },
         h('button', { type: 'button', class: 'btn btn-outline btn-on-dark', disabled: !chosen.length, onclick: () => rejectWd(chosen, p) }, '驳回'),
         h('button', { type: 'button', class: 'btn btn-primary', disabled: !chosen.length || short || !RULES.hot, onclick: () => planWd(chosen, p) }, `批准并签名（${chosen.length} 笔）`))),
@@ -300,6 +316,8 @@ async function planWd(chosen: any[], p: HTMLElement) {
 const swSel = new Set<string>();
 let swMin = '100', swTo: 'hot' | 'cold' = 'hot';
 render.sweep = async (p) => {
+  // 以太坊、BSC 合约钱包（第 1 批）在上面；下面是 TRON 已有地址的第 0 批方式（助记词签名，逐个地址）
+  const evm = await renderEvmSweep(wui('p-sweep'));
   const [r, b] = await Promise.all([call('sweep-list'), call('batches')]);
   const min = parseUsdt(swMin) ?? 0;
   const rows = r.items.filter((x: any) => u(x.balance) >= min);
@@ -311,8 +329,11 @@ render.sweep = async (p) => {
   const total = r.items.reduce((s: number, x: any) => s + u(x.balance), 0);
   const running = b.items.filter((x: any) => x.kind === 'sweep' && x.status !== 'done' && x.status !== 'planned');
   p.replaceChildren(
-    toolbar('归集', h('label', { class: 'inline-label' }, '金额 ≥', minInput),
-      h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => { const all = rows.every((x: any) => swSel.has(x.address)); rows.forEach((x: any) => (all ? swSel.delete(x.address) : swSel.add(x.address))); render.sweep(p); } }, '全选 / 取消')),
+    h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, '归集'), h('span', { class: 'muted' }, '把收款地址里的 USDT 一批批转进冷钱包 · 半自动：系统凑批，你确认才执行')),
+    evm,
+    h('h2', { class: 'h-sm', id: 'sw-tron' }, 'TRON 已有地址（第 0 批方式：助记词签名、逐个地址）'),
+    h('div', { class: 'toolbar tron-toolbar' }, h('span', { class: 'muted' }, 'TRON 合约钱包第 2 批上线；在那之前，已有 TRON 地址里的钱用这里归集。'), h('div', { class: 'tool-actions' }, h('label', { class: 'inline-label' }, '金额 ≥', minInput),
+      h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => { const all = rows.every((x: any) => swSel.has(x.address)); rows.forEach((x: any) => (all ? swSel.delete(x.address) : swSel.add(x.address))); render.sweep(p); } }, '全选 / 取消'))),
     h('div', { class: 'stats' }, stat('未归集总额（按账本）', fmtUsdt(total), `USDT · ${r.items.length} 个地址`), stat('热钱包可借出能量', r.energy_left === null ? '—' : Number(r.energy_left).toLocaleString('en'), `大约够 ${r.energy_left === null ? '—' : Math.floor(r.energy_left / r.energy_per_sweep)} 笔归集`)),
     running.length ? h('p', { class: 'note-box' }, `有 ${running.length} 批归集正在进行（每一步链上确认后自动进行下一步，大约每分钟推进一次）。`) : h('span'),
     table(['', '商户', '客户', '地址', 'USDT（按账本）', '最后到账', ''], rows.map((x: any) => {
@@ -326,7 +347,7 @@ render.sweep = async (p) => {
       return below.length ? `有 ${below.length} 个地址低于 ${swMin} USDT（合计 ${fmtUsdt(below.reduce((s: number, x: any) => s + u(x.balance), 0))} USDT），调低上面的"金额 ≥"就能看到。每次归集都要花费能量或 TRX，金额太小不划算。` : '暂无需要归集的地址';
     })()),
     h('p', { class: 'hint muted' }, '点"签名并归集"后，服务器向链上核实每个地址的实际余额，并根据热钱包的能量决定"借出能量"还是"转 TRX 燃烧"；签名框里会逐笔显示。'),
-    h('div', { class: 'sumbar' },
+    !r.items.length ? h('span') : h('div', { class: 'sumbar' },
       h('span', {}, '已选 ', h('b', {}, String(chosen.length)), ' 个地址 · 合计约 ', h('b', {}, `${fmtUsdt(chosen.reduce((s: number, x: any) => s + u(x.balance), 0))} USDT`)),
       h('span', { class: 'sumbar-actions' }, '归集到：', toSel, h('button', { type: 'button', class: 'btn btn-primary', disabled: !chosen.length || !RULES.hot, onclick: () => planSweep(p) }, '签名并归集'))),
     b.items.filter((x: any) => x.kind === 'sweep').length ? h('h2', { class: 'h-sm' }, '最近的归集') : h('span'),
@@ -424,8 +445,11 @@ render.status = async (p) => {
   const s = await call('status');
   const ago = s.tick ? Math.round((Date.now() - Date.parse(s.tick.at)) / 1000) : null;
   const pct = s.disk && s.disk.total_mb ? s.disk.used_mb / s.disk.total_mb : 0;
+  const chains = await walletStatus(wui('p-status'));
   p.replaceChildren(
-    toolbar('系统状态', h('span', { class: 'muted' }, `网络：${netName(s.network)}`)),
+    toolbar('系统状态', h('span', { class: 'muted' }, `TRON 网络：${netName(s.network)}`)),
+    chains,
+    h('h2', { class: 'h-sm' }, 'TRON 链上监控、回调、磁盘'),
     h('div', { class: 'stats' },
       stat('链上监控最后一次运行', ago === null ? '从未运行' : ago < 120 ? `${ago} 秒前` : `${Math.round(ago / 60)} 分钟前`, ago !== null && ago > 300 ? '⚠️ 超过 5 分钟，请检查 worker 进程' : '每 15 秒一次（worker）'),
       stat('扫描到的时间点', s.cursor ? t(new Date(Number(s.cursor)).toISOString()) : '—', s.solid_block ? `链上最新已确认区块 ${Number(s.solid_block.number).toLocaleString('en')}` : 'TronGrid 暂时查询不到'),
