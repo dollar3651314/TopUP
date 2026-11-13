@@ -13,6 +13,7 @@ import { createMemRedis } from '../server/kyb/memredis.js';
 import { derivePayKeys, emailHash } from '../server/pay/common.js';
 import { backfillEmailHash } from '../server/pay/schema.js';
 import { encryptJson, decryptJson } from '../server/kyb/crypto.js';
+import { legacyTronCustomer } from './legacy-tron.js'; // K1：新客户不再生成地址；要用 TRON 地址的用例先造已有 TRON 地址的老客户
 
 const U = 1_000_000;
 const XPUB = HDKey.fromMasterSeed(mnemonicToSeedSync('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about')).derive("m/44'/195'/0'").publicExtendedKey;
@@ -83,6 +84,7 @@ test('商户隔离：A 的 Key 读不到、改不了 B 的订单、客户和提�
 
 test('提币：没有 IP 白名单拒绝；白名单外的 IP 拒绝；余额不够拒绝', async () => {
   const { db, ops, a, call, setIp } = await setup();
+  await legacyTronCustomer(db, 'ma', 'u1');
   const c = await ops.upsertCustomer(a.m, { customer_id: 'u1' });
   await core.recordDeposit(db, { txid: 'f'.repeat(64), logIndex: 0, block: 1, to: c.address, amount: 100 * U, time: new Date() });
   const body = { kind: 'payout', to: HOT, amount: '10', customer_id: 'u1' };
@@ -103,6 +105,7 @@ test('提币：没有 IP 白名单拒绝；白名单外的 IP 拒绝；余额不
 
 test('客户统计、到账筛选、账本、未知接口', async () => {
   const { db, ops, a, call } = await setup();
+  await legacyTronCustomer(db, 'ma', 'u9');
   const c = await ops.upsertCustomer(a.m, { customer_id: 'u9', name: 'Nine', email: 'nine@example.com' });
   assert.equal((await call(a.cred, 'GET', 'customers/?customer_id=u9')).body.email, 'nine@example.com');
   const [row] = await db.query('select email_enc from customers where customer_id = $1', ['u9']);
@@ -128,7 +131,8 @@ test('http-rules.json：改写到接口的目标地址以 / 结尾（trailingSla
 });
 
 test('客户搜索：按客户标识、名称、邮箱模糊搜索（邮箱加密保存，解密后比对），按地址精确搜索', async () => {
-  const { a, call } = await setup();
+  const { db, a, call } = await setup();
+  await legacyTronCustomer(db, 'ma', 'user_101'); // 按地址搜索：用有 TRON 地址的老客户
   const c1 = (await call(a.cred, 'POST', 'customers/', { customer_id: 'user_101', name: 'Lin Trading', email: 'Lin@Example.com' })).body;
   await call(a.cred, 'POST', 'customers/', { customer_id: 'shop-9', name: 'Harbor', email: 'ops@harbor.test' });
   const ids = async (q) => (await call(a.cred, 'GET', `customers/list/?q=${encodeURIComponent(q)}`)).body.items.map((x) => x.customer_id).sort();

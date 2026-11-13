@@ -14,6 +14,7 @@ import { checkStep } from '../server/pay/verify.js';
 import { signTxId, addressOfPrivateKey } from '../server/pay/signing.js';
 import { encodeRaw } from '../server/pay/txcodec.js';
 import { runTick } from '../server/pay/tick.js';
+import { legacyTronCustomer } from './legacy-tron.js'; // K1：新客户不再生成地址；TRON 老地址的用例用已有 TRON 地址的老客户
 
 const U = 1_000_000;
 const root = HDKey.fromMasterSeed(mnemonicToSeedSync('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about'));
@@ -41,7 +42,7 @@ const priv = (i) => root.derive(`m/44'/195'/0'/0/${i}`).privateKey;
 
 test('提币：浏览器核对 → 验证码 → 签名 → 广播 → 链上确认后完成', async () => {
   const { db, tron, m, call } = await setup();
-  const c = await db.tx((t) => core.ensureCustomer(t, 'm1', 'u1'));
+  const c = await legacyTronCustomer(db, 'm1', 'u1');
   await core.recordDeposit(db, { txid: 'a'.repeat(64), logIndex: 0, block: 1, to: c.address, amount: 500 * U, time: new Date() });
   const w = await core.requestWithdrawal(db, m, { kind: 'payout', to: COLD, amount: 100 * U, source: 'web' });
   tron.accounts.set(HOT, { activated: true, trx: 100 * U, trc20: { [tron.contract]: 50 * U } });
@@ -67,7 +68,7 @@ test('提币：浏览器核对 → 验证码 → 签名 → 广播 → 链上确
 
 test('归集：借出能量 → 转出 USDT → 收回能量，每一步确认后才做下一步；新地址改为转 TRX 燃烧', async () => {
   const { db, tron, call } = await setup();
-  const a = await db.tx((t) => core.ensureCustomer(t, 'm1', 'old')), b = await db.tx((t) => core.ensureCustomer(t, 'm1', 'new'));
+  const a = await legacyTronCustomer(db, 'm1', 'old'), b = await legacyTronCustomer(db, 'm1', 'new');
   for (const [c, amt] of [[a, 300 * U], [b, 80 * U]]) await core.recordDeposit(db, { txid: c.address.padEnd(64, '0').slice(0, 64), logIndex: 0, block: 1, to: c.address, amount: amt, time: new Date() });
   tron.accounts.set(a.address, { activated: true, trx: 0, trc20: { [tron.contract]: 300 * U } });
   tron.accounts.set(b.address, { activated: false, trx: 0, trc20: { [tron.contract]: 80 * U } });
@@ -130,7 +131,7 @@ test('钱包初始化：只接受 xpub，第 1 个地址要对得上，只能初
 
 test('归集只转账本上记录过的金额：链上多出来的还没扫到的到账先不动', async () => {
   const { db, tron, call } = await setup();
-  const a = await db.tx((t) => core.ensureCustomer(t, 'm1', 'f6'));
+  const a = await legacyTronCustomer(db, 'm1', 'f6');
   await core.recordDeposit(db, { txid: 'f6'.padEnd(64, '0'), logIndex: 0, block: 1, to: a.address, amount: 100 * U, time: new Date() });
   tron.accounts.set(a.address, { activated: true, trx: 0, trc20: { [tron.contract]: 130 * U } }); // 链上多了 30，还没扫到
   const plan = (await call('sweep-plan', { addresses: [a.address], to: 'hot' })).body;
@@ -139,7 +140,7 @@ test('归集只转账本上记录过的金额：链上多出来的还没扫到�
 
 test('按商户核对：商户收款合计按账本计算，客户合计被改动时能发现', async () => {
   const { db, call } = await setup();
-  const a = await db.tx((t) => core.ensureCustomer(t, 'm1', 'f7'));
+  const a = await legacyTronCustomer(db, 'm1', 'f7');
   await core.recordDeposit(db, { txid: 'f7'.padEnd(64, '0'), logIndex: 0, block: 1, to: a.address, amount: 10 * U, time: new Date() });
   let m = (await call('recon')).body.merchants[0];
   assert.deepEqual([m.deposits_total, m.customers_total, m.ok], ['10.00', '10.00', true]);
@@ -150,7 +151,7 @@ test('按商户核对：商户收款合计按账本计算，客户合计被改�
 
 test('同一笔交易里两次低于 1 USDT 的转账，异常到账各记一条', async () => {
   const { db } = await setup();
-  const a = await db.tx((t) => core.ensureCustomer(t, 'm1', 'f8'));
+  const a = await legacyTronCustomer(db, 'm1', 'f8');
   for (const i of [0, 1]) await core.recordDeposit(db, { txid: 'f8'.padEnd(64, '0'), logIndex: i, block: 1, to: a.address, amount: 1, time: new Date() });
   assert.equal((await db.query(`select count(*)::int n from anomalies where type = 'below_min'`))[0].n, 2);
 });
@@ -171,7 +172,7 @@ test('热钱包一栏可以填私钥或助记词：助记词按 TRON 路径找�
 
 test('概览：代收、欠商户、平台资产、利润（现在能转走 / 归集后）、利润来源、待处理、待归集', async () => {
   const { db, tron, call } = await setup();
-  const a = await db.tx((t) => core.ensureCustomer(t, 'm1', 'ov'));
+  const a = await legacyTronCustomer(db, 'm1', 'ov');
   await core.recordDeposit(db, { txid: 'ov'.padEnd(64, '0'), logIndex: 0, block: 1, to: a.address, amount: 100 * U, time: new Date() }); // 收款费 1%
   await core.recordDeposit(db, { txid: 'ov'.padEnd(64, '1'), logIndex: 0, block: 2, to: a.address, amount: 1, time: new Date() }); // 灰尘
   tron.accounts.set(HOT, { activated: true, trx: 300 * U, trc20: { [tron.contract]: 50 * U } });
