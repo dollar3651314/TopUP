@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { readJsonl, decodeQP, MAILS, KYB_ENV, TMP } from '../stack.mjs';
 // @ts-ignore 与后端同一份 TOTP 实现
 import { totpCode, totpStep } from '../../server/kyb/totp.js';
+import { legacyTron } from './legacy-tron';
 
 // 钱包第 1 批页面端到端（以太坊、BSC 合约钱包；正式构建、真实接口，8096 端口的独立实例）：
 // 归集（凑批 → 确认三步 → 链上确认；BSC 超每批上限拆批；超每地址上限跳过；确认失败的提示；部分成功、失败）、
@@ -427,6 +428,24 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await pay.unroute(isPay);
     await expect(pay.locator('body')).not.toContainText('暂时查不到', { timeout: 15_000 });
     await pay.close();
+  });
+
+  test('TC-W13 老 TRON 客户（K1）：不指定链的订单和新客户一样不显示地址；付款页可以选 TRON，选了才给已有的 TRON 地址', async () => {
+    const tron = await legacyTron(admin, B, 'Wallet E2E Ltd', 'old_tron_1');
+    expect(tron).toMatch(/^T[1-9A-HJ-NP-Za-km-z]{33}$/);
+    const o = await mcall('order-create', { customer_id: 'old_tron_1', merchant_order_no: 'OLD-TRON-1', amount: '10' });
+    expect(o.status).toBe(200);
+    const no = o.body.order_no;
+    // 付款页：先选网络，TRON 可选（老客户有 TRON 地址）；选之前不给地址
+    const pay = await mctx.newPage();
+    await pay.goto(`/zh/pay/${no}/`);
+    await expect(pay.locator('[data-net="tron"]')).toBeEnabled();
+    await pay.click('[data-net="tron"]');
+    await expect(pay.locator('[data-pay-address]')).toHaveText(tron);
+    await pay.close();
+    // 创建订单的返回：和新客户一样不带地址（放最后：K1 没实现时这里红，不挡住上面的检查）
+    expect(o.body.address).toBeNull();
+    expect(o.body.network).toBeNull();
   });
 
 });

@@ -139,7 +139,7 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
 
   test('TC-P03 创建订单 → 模拟链上两笔付款 → 累计达到下限自动完成', async () => {
     // K1：新客户不生成地址、第 1 批不提供新的 TRON 地址；这条 TRON 收款流程用已有 TRON 地址的老客户
-    await legacyTron(admin, B, 'Pay E2E Ltd', 'buyer_1', 'Buyer One');
+    address = await legacyTron(admin, B, 'Pay E2E Ltd', 'buyer_1', 'Buyer One');
     await merchant.click('[data-mtab="orders"]');
     await merchant.click('[data-mpanel="orders"] .toolbar .btn-primary');
     await merchant.fill('#mo-cust', 'buyer_1');
@@ -149,8 +149,7 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
     await merchant.fill('#mo-amt', '100');
     await merchant.click('[data-mdialog-ok]');
     await expect(merchant.locator('[data-mdialog]')).toContainText('等待付款');
-    const addrText = await merchant.locator('[data-mdialog] dd .mono').last().textContent();
-    address = addrText!.trim();
+    // K1：不指定链的订单创建时不带地址（付款人在付款页选链后再给），这里不从弹窗里读地址；用老客户已有的 TRON 地址付款
     expect(address).toMatch(/^T[1-9A-HJ-NP-Za-km-z]{33}$/);
     orderNo = (await merchant.locator('[data-mdialog-title]').textContent())!.match(/ORD-\d{8}-[0-9A-F]{8}/)![0];
     await merchant.keyboard.press('Escape');

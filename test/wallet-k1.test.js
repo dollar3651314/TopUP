@@ -144,16 +144,30 @@ test('K1 付款页：订单指定了链时只能用这条链（带别的链 409�
   await db.end?.();
 });
 
-test('K1 老客户（已有 TRON 地址）：照常显示 TRON 地址，付款页可以选 TRON；照常入账', async () => {
-  const { db, ops, m, payGet } = await setup({ withXpub: true });
+test('K1 老客户（已有 TRON 地址）：客户资料照常显示 TRON 地址；不指定链的订单和新客户一样创建时不带地址，付款人在付款页选链（可选 TRON）后再给；照常入账', async () => {
+  const { db, ops, m, payGet, rows } = await setup({ withXpub: true });
   const old = await legacyTronCustomer(db, 'ma', 'old1');
   const c = await ops.getCustomer(m, 'old1');
   assert.equal(c.address, old.address);
   assert.deepEqual(c.addresses, [{ chain: 'tron', address: old.address }]);
+  // 不指定链的订单：和新客户一样，创建时 address、network 为空（不再按第 0 批给 TRON 地址）
   const o = await ops.createOrder(m, { customer_id: 'old1', merchant_order_no: 'O1', amount: '10' });
+  assert.equal(o.address, null);
+  assert.equal(o.network, null);
   const g = await payGet(o.order_no);
+  assert.equal(g.body.address, null, '付款人还没选链时不给地址');
+  assert.equal(g.body.network, null);
   assert.deepEqual(g.body.chains, ['eth', 'bsc', 'tron']);
-  assert.deepEqual(g.body.addresses, [{ chain: 'tron', network: 'TRON', address: old.address }]);
+  // 选 TRON：给已有的 TRON 地址（不新建）
+  const gt = await payGet(o.order_no, 'tron');
+  assert.equal(gt.status, 200);
+  assert.equal(gt.body.address, old.address);
+  assert.equal(gt.body.network, 'TRON');
+  assert.deepEqual((await rows('old1')).map((r) => r.chain), ['tron']);
+  // 选 ETH：照常给 ETH 生成
+  const ge = await payGet(o.order_no, 'eth');
+  assert.match(ge.body.address, /^0x[0-9a-fA-F]{40}$/);
+  assert.deepEqual((await rows('old1')).map((r) => r.chain), ['eth', 'tron']);
   const r = await core.recordDeposit(db, { txid: 'c'.repeat(64), logIndex: 0, block: 1, time: Date.now(), from: 'TX', to: old.address, amount: 10 * U });
   assert.equal(r.status, 'credited');
   await db.end?.();

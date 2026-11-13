@@ -220,7 +220,7 @@ test('开放 API（K1）：新客户 address 为 null、addresses 为空；不�
   assert.equal(ot.body.error.code, 'chain_not_enabled');
   assert.equal((await call('POST', 'orders/', { customer_id: 'u1', merchant_order_no: 'A4', amount: '10', chain: 'sol' })).status, 422);
 
-  // 已有 TRON 地址的老客户：客户和不指定链的订单照第 0 批（TRON 字符串），TRON 到账和回调的老字段不变，新加 chain
+  // 已有 TRON 地址的老客户：客户资料照第 0 批（TRON 字符串）；不指定链的订单和新客户一样不带地址；TRON 到账和回调的老字段不变，新加 chain
   const old = await legacyTronCustomer(db, 'ma', 'u_old');
   const oc = (await call('GET', 'customers/?customer_id=u_old')).body;
   keepsOld('GET customers', oc);
@@ -228,6 +228,10 @@ test('开放 API（K1）：新客户 address 为 null、addresses 为空；不�
   assert.deepEqual(oc.addresses, [{ chain: 'tron', address: old.address }]);
   const oo = await call('POST', 'orders/', { customer_id: 'u_old', merchant_order_no: 'B1', amount: '10' });
   assert.equal(oo.status, 200);
+  // 老客户不指定链的订单也和新客户一样：创建时不带地址（付款人在付款页选链后再给）
+  keepsOld('POST orders', oo.body, { except: ['address', 'network'] });
+  assert.equal(oo.body.address, null);
+  assert.equal(oo.body.network, null);
   await core.recordDeposit(db, { txid: 'f'.repeat(64), logIndex: 0, block: 1, time: Date.now(), from: 'TX', to: old.address, amount: 10_000_000 });
   const d = (await call('GET', 'deposits/')).body.items[0];
   keepsOld('GET deposits', d);
