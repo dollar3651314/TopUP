@@ -120,6 +120,9 @@ jobs:
         run: cd contracts && forge build
       - name: forge test
         run: cd contracts && forge test -vvv
+      # TRON 派生版合约（src/tron/）的单测：单独一个 profile（test-tron/），不影响上面以太坊版的编译和测试
+      - name: forge test（TRON 派生版合约，FOUNDRY_PROFILE=tron）
+        run: cd contracts && FOUNDRY_PROFILE=tron forge test -vvv
       - uses: actions/setup-node@v5
         with:
           node-version: 26
@@ -133,9 +136,43 @@ jobs:
           for i in $(seq 1 30); do curl -sf -X POST -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId"}' "$TOPUP_ANVIL_RPC" >/dev/null && break; sleep 1; done
           node --test test/anvil/*.test.js
 
+  # TRON：用 TRON 官方编译器编译（编译器 sha256 写死）→ 起本机 TRON 私链（tronbox/tre，镜像按摘要固定）→ 跑 Nile 验证脚本的全部场景
+  # 私链账户是容器启动时自己生成的、只在这个容器里有效的测试账户，不是任何真实或测试网账户；不打印、不保存。
+  tron-local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: TRON 编译 + 离线地址计算
+        run: node scripts/tron-nile/verify.mjs --offline --report tron-offline-report.json
+      - name: 本机 TRON 私链上跑全部验证场景
+        run: |
+          docker run -d --name tre -p 9090:9090 tronbox/tre@sha256:f4332e11df12a9f360639a4546fd046593909630fda48af00b30410c144342f0 >/dev/null
+          for i in $(seq 1 90); do docker logs tre 2>&1 | grep -qE '^\(0\) [0-9a-f]{64}$' && curl -sf -X POST http://127.0.0.1:9090/wallet/getnowblock >/dev/null && break; sleep 2; done
+          TOPUP_NILE_PRIVATE_KEY="$(docker logs tre 2>&1 | grep -m1 -E '^\(0\) [0-9a-f]{64}$' | awk '{print $2}')" \
+            node scripts/tron-nile/verify.mjs --node http://127.0.0.1:9090 --report tron-local-report.json
+      # 后端 TRON 合约钱包端到端（test/tron-local/）：同一个私链，分配地址 → 转账 → 扫链入账 → 凑批 → 确认 → 归集进 parent
+      - name: 本机 TRON 私链上的钱包端到端（test/tron-local/）
+        run: |
+          TOPUP_TRON_LOCAL_NODE=http://127.0.0.1:9090 \
+          TOPUP_TRON_LOCAL_PRIVATE_KEY="$(docker logs tre 2>&1 | grep -m1 -E '^\(0\) [0-9a-f]{64}$' | awk '{print $2}')" \
+            node --test test/tron-local/*.test.js
+      - name: 保存报告
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: tron-local-report
+          path: tron-*-report.json
+          retention-days: 7
+
   # 汇总：任何一个检查失败或被取消就失败
   ci-ok:
-    needs: [unit, e2e, contracts]
+    needs: [unit, e2e, contracts, tron-local]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 2

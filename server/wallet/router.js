@@ -4,8 +4,10 @@ import { PayError, audit } from '../pay/core.js';
 import { CHAINS, PROVIDER_IDS } from './provider.js';
 
 export const DEFAULT_PROVIDER = 'contract';
-/** 第 1 批不在钱包层开放的链（TRON 合约第 2 批上线） */
-export const CHAINS_NOT_IN_BATCH = Object.freeze(['tron']);
+/** 不在钱包层开放的链（第 2 批起 TRON 也开放：要不要给 TRON 地址看提供方有没有开通 tron，见 tronEnabled） */
+export const CHAINS_NOT_IN_BATCH = Object.freeze([]);
+/** TRON 只在提供方声明开通了 tron（provider.chains 含 tron）时才放行；ETH、BSC 照旧 */
+export const chainOpen = (p, chain) => chain !== 'tron' || Boolean(p && Array.isArray(p.chains) && p.chains.includes('tron'));
 
 const at = (now) => new Date(now ?? Date.now());
 
@@ -34,6 +36,7 @@ export async function setChainProvider(db, { chain, provider, actor, reason, pro
   if (!PROVIDER_IDS.includes(provider)) throw new PayError('invalid_provider', 422, 'provider');
   const p = providers[provider];
   if (!p || p.enabled === false) throw new PayError('provider_not_enabled', 409, 'provider');
+  if (!chainOpen(p, chain)) throw new PayError('chain_not_enabled', 409, 'chain');
   const when = at(now);
   return db.tx(async (t) => {
     const from = await resolveProvider(t, { chain, now: when });

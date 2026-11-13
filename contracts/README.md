@@ -1,4 +1,4 @@
-# 资金归集合约（以太坊、BSC）
+# 资金归集合约（以太坊、BSC；TRON 派生版见第 7 节）
 
 - 做法：BitGo 转发合约原样部署 + 我们自己写的批量合约 `SweepBatcher`，钱只能进部署时写死的 parent（冷钱包，Safe 多签）。
 - 工具：Foundry（forge / anvil / cast，CI 用 v1.5.1）。
@@ -13,6 +13,8 @@
 | `lib/SHA256SUMS` | 上面每个文件的 sha256；CI 每次跑 `script/check-vendor.sh --upstream`：先按清单核对，再从 GitHub 拉上游固定提交逐字节比较 |
 | `lib/forge-std/` | Foundry 测试库（git submodule，固定 v1.11.0 = `8e40513d678f392f398620b3ef2b418648b33e89`），只用于测试和脚本，不部署 |
 | `src/SweepBatcher.sol` | 批量合约（约 60 行有效代码） |
+| `src/tron/` | TRON 派生版（第 2 批）：`ForwarderTron`、`ForwarderFactoryTron`、`SweepBatcherTron`，见第 7 节 |
+| `test-tron/` | TRON 派生版的单测（22 个，`FOUNDRY_PROFILE=tron forge test`）和测试代币 `TronMocks.sol` |
 | `src/DepositSalt.sol` | 充值地址的盐 `keccak256("topup-deposit" ‖ 客户序号)`（只给测试和脚本用，不部署） |
 | `test/` | 单元、模糊、不变量测试（`SweepBatcher*.t.sol`）；CREATE2 测试向量核对（`Vectors.t.sol`，读 `../test/fixtures/wallet/`）；测试代币和多签替身（`Mocks.sol`） |
 | `script/Deploy.s.sol` | 部署（管理员在自己的电脑上运行，私钥不写进任何文件） |
@@ -94,4 +96,31 @@ bash script/check-vendor.sh          # 原样源码 sha256（加 --upstream 和 
 forge build && forge test            # 编译、测试（32 个：批量合约 25、不变量 4、向量 3）
 cd .. && anvil --port 18545 --silent &
 TOPUP_ANVIL_RPC=http://127.0.0.1:18545 node --test test/anvil/*.test.js   # 本地链端到端
+```
+
+## 7. TRON 派生版（第 2 批，`src/tron/`）
+
+TRON 上没有审计过的同类合约，所以从 BitGo 源码派生，**只改 TRON 必须改的**；改完就是我们自己的新代码（上线前按 Q8 审计）。`lib/` 下的上游源码仍一行不改（`ForwarderFactoryTron` 原样引用 `lib/eth-multisig-v4/contracts/CloneFactory.sol`）。
+
+| 合约 | 上游 | 差异 |
+|---|---|---|
+| `ForwarderTron` | `ForwarderV4` | ① `flushTokens` 不看 `transfer` 的返回值（TRON 主网 USDT 成功也返回 false），按"parent 余额正好增加转出的数额、本地址余额归零"判断，否则回滚；② 去掉 `receive` / `fallback`（TRON 系统转账不执行合约代码），保留任何人可调用的 `flush()`；`init` 时把已有的 TRX 转给 parent 保持原样（地址先被激活也能部署）；③ 删 NFT 相关（ERC721 / ERC1155 回调、flush、autoFlush 开关、`supportsInterface`）和 `batchFlushERC20Tokens`，`init` 只有 (parent, feeAddress) |
+| `ForwarderFactoryTron` | `ForwarderFactoryV4` | 只有三参数 `createForwarder(parent, feeAddress, salt)`（上游三参数版通过外部调用转五参数版，五参数只多 autoFlush）；事件去掉 autoFlush 字段；CREATE2 部署失败时明确回滚；finalSalt 算法不变 |
+| `SweepBatcherTron` | 本仓库 `SweepBatcher` | 只有 `forwarderAddress()` 的前缀从 `0xff` 改成 `0x41`；其余逐行相同 |
+
+本机 TRON 私链（`tronbox/tre`，java-tron 4.8.2，2026-11-13 实测；测试代币 `TronUsdtMock`，真 USDT 的转账更贵，要 Nile 实测）：
+
+| 操作 | 能量 |
+|---|---|
+| 部署实现 `ForwarderTron` / 工厂 / 批量合约 | 601,275 / 178,701 / 583,947 |
+| 归集 1 个地址（首次部署 + flush） | 123,988 |
+| 归集 1 个地址（已部署，只 flush） | 23,990 |
+| 归集 2 个地址（都首次，私链端到端） | 241,888 |
+| 归集 10 个地址（都首次） | 1,082,553 |
+| 归集 20 个地址（都首次） | 2,164,310（私链 `getMaxCpuTimeOfOneTx` = 200 毫秒，主网 80 毫秒，20 个一批要 Nile 实测） |
+
+后端的能量预估（`server/wallet/providers/contract-tron.js` 的 `TRON_SWEEP_ENERGY`：每批 3 万 + 首次每地址 12 万 + 每地址 flush 14 万，再和节点模拟执行的结果取大的、加 20%）按真 USDT 的转账 6.4 万～13 万能量留了余量，Nile 实测后再调。另外：私链的 `getMaxFeeLimit` 是 1,000 TRX，fee_limit 超过节点会拒绝，后端按链参数封顶。
+
+```bash
+cd contracts && FOUNDRY_PROFILE=tron forge test -vvv          # TRON 派生版单测（EVM 上跑，CREATE2 按 0xff；0x41 的实际部署在私链上核对）
 ```

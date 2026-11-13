@@ -8,3 +8,6 @@ e2e/.tmp/
 e2e/test-results/
 contracts/out/
 contracts/cache/
+contracts/out-tron/
+contracts/out-tron-forge/
+contracts/cache-tron-forge/

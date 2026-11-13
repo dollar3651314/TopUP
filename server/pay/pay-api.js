@@ -2,8 +2,8 @@
 // K1：地址在客户发起充值时按链生成。
 //   - 订单指定了链：只用这条链（创建订单时已生成）；带了别的链 409 chain_mismatch
 //   - 没指定链：付款人在付款页选了链（带 chain）才为这条链生成（或复用）地址；没选时 address、network 为 null
-//   - chains：付款人现在能选的链（第 1 批 eth、bsc；老客户已有 TRON 地址时加 tron；订单指定了链时只有这条）
-//   - chain=tron：只给已有 TRON 地址的老客户，其他 409 chain_not_enabled；不认识的链 422
+//   - chains：付款人现在能选的链（开通了的链；TRON 合约钱包没开通时，老客户已有 TRON 地址也能选 tron；订单指定了链时只有这条）
+//   - chain=tron：TRON 开通了就按需生成（老客户给已有的老地址）；没开通时只给已有 TRON 地址的老客户，其他 409 chain_not_enabled；不认识的链 422
 import { json } from '../kyb/http.js';
 import { stateOf } from './matching.js';
 import { amt, iso } from './common.js';
@@ -35,11 +35,11 @@ export function createPayApi({ db, layer = null, now = () => Date.now(), redis =
     let rows = await active();
     const evm = layer ? [...layer.enabledChains] : [];
     const hasTron = rows.some((r) => r.chain === 'tron');
-    const chains = o.chain ? [o.chain] : ORDER.filter((c) => (c === 'tron' ? hasTron : evm.includes(c)));
+    const chains = o.chain ? [o.chain] : ORDER.filter((c) => (c === 'tron' ? hasTron || evm.includes(c) : evm.includes(c)));
     if (want) {
       if (o.chain && want !== o.chain) return err(409, 'chain_mismatch', 'chain');
       if (!chains.includes(want)) return err(409, 'chain_not_enabled', 'chain');
-      if (want !== 'tron' && !rows.some((r) => r.chain === want)) {
+      if (!rows.some((r) => r.chain === want)) {
         try { await addressFor(db, { merchantId: o.merchant_id, customerId: o.customer_id, chain: want, providers: layer?.providers || {} }); }
         catch (e) { return err(e.status || 409, e.code || 'chain_not_enabled', 'chain'); }
         rows = await active();

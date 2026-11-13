@@ -11,13 +11,15 @@ import {
 import { walletChainStatus } from './status.js';
 
 const usdt = (u) => fmtUsdt(Number(u)).replace(/,/g, '');
-const native = (wei) => {
+/** 原生币最小单位 → 小数字符串：ETH、BNB 18 位（wei），TRX 6 位（sun） */
+const NATIVE_DECIMALS = { eth: 18, bsc: 18, tron: 6 };
+const native = (wei, chain = 'eth') => {
   if (wei === null || wei === undefined || wei === '') return null;
-  const w = BigInt(wei);
-  const int = w / 10n ** 18n, frac = (w % 10n ** 18n).toString().padStart(18, '0').slice(0, 6).replace(/0+$/, '');
+  const w = BigInt(wei), d = NATIVE_DECIMALS[chain] ?? 18, u = 10n ** BigInt(d);
+  const int = w / u, frac = (w % u).toString().padStart(d, '0').slice(0, 6).replace(/0+$/, '');
   return `${int}${frac ? '.' + frac : ''}`;
 };
-const NATIVE = { eth: 'ETH', bsc: 'BNB' };
+const NATIVE = { eth: 'ETH', bsc: 'BNB', tron: 'TRX' };
 /** 发起账户的手续费币少于够付几批典型归集时告警 */
 export const LOW_GAS_BATCHES = 3;
 
@@ -27,7 +29,7 @@ function batchOut(b, extra = {}) {
     id: b.id, status: b.status, chain: b.chain, provider: b.provider, total_usdt: usdt(b.total), address_count: b.addressCount,
     items: b.items.map((i) => ({ address: i.address, amount_usdt: usdt(i.amount), deploy: i.deploy, status: i.status, reason: i.reason })),
     skipped: (b.skipped || []).map((s) => ({ address: s.address, amount_usdt: usdt(s.amount), reason: s.reason })),
-    fee: b.feeEstimate?.native ? { native: native(b.feeEstimate.native), symbol: NATIVE[b.chain], gas: b.feeEstimate.gas || null } : null,
+    fee: b.feeEstimate?.native ? { native: native(b.feeEstimate.native, b.chain), symbol: NATIVE[b.chain], gas: b.feeEstimate.gas || null } : null,
     tx_refs: b.txRefs, slot: b.slot || null, approved_by: b.approvedBy, approved_at: b.approvedAt, reason: b.reason, error: b.error,
     created_at: b.createdAt, expires_at: b.expiresAt, updated_at: b.updatedAt,
   };
@@ -63,13 +65,14 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
 
   /** 发起账户的手续费币：余额、按一批典型的归集（10 个地址、一半首次）估够几批；不够 3 批或不够付待确认批次时 low = true */
   async function operatorGas(chain) {
-    const out = { configured: Boolean(layer?.operatorConfigured), gas: null, symbol: NATIVE[chain], batches_left: null, low: false };
-    if (!enabled().includes(chain) || !layer.operatorConfigured) return out;
+    const configured = chain === 'tron' ? Boolean(layer?.tronOperatorConfigured) : Boolean(layer?.operatorConfigured);
+    const out = { configured, gas: null, symbol: NATIVE[chain], batches_left: null, low: false };
+    if (!enabled().includes(chain) || !configured) return out;
     const p = providers().contract;
-    out.address = p.operator || null; // 发起账户的公开地址（补手续费时要复制它；不是密钥）
+    out.address = (chain === 'tron' ? p.tronOperator : p.operator) || null; // 发起账户的公开地址（补手续费时要复制它；不是密钥）
     try {
       const wei = await p.operatorGas(chain);
-      out.gas = native(wei);
+      out.gas = native(wei, chain);
       if (wei !== null && wei !== undefined) {
         const f = await p.estimateFee(chain, 'sweep', 10, { deploy: 5 }).catch(() => null);
         if (f?.native) out.batches_left = Number(BigInt(wei) / BigInt(f.native));
@@ -86,7 +89,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
     if (verify && layer?.verifyOnchain) await layer.verifyOnchain({ db, notify, timeoutMs: 5000, now: now() }).catch(() => {});
     const out = [];
     for (const chain of CHAINS) {
-      if (chain === 'tron' || CHAINS_NOT_IN_BATCH.includes(chain)) { out.push({ ...walletChainStatus({ chain, enabled: false, now: now() }), name: chain }); continue; }
+      if ((chain === 'tron' && !enabled().includes('tron')) || CHAINS_NOT_IN_BATCH.includes(chain)) { out.push({ ...walletChainStatus({ chain, enabled: false, now: now() }), name: chain }); continue; }
       const c = layer?.config?.[chain] || { scheme: {}, rpcUrl: '', usdt: '', confirmations: 0 };
       const scan = await getMeta(db, `evm_scan_${chain}`, null);
       const card = walletChainStatus({
@@ -116,7 +119,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
       const chains = [];
       for (const chain of CHAINS) {
         const on = enabled().includes(chain);
-        const row = { chain, enabled: on, not_in_this_batch: chain === 'tron', threshold_usdt: usdt(settings.thresholds[chain] ?? 0n) };
+        const row = { chain, enabled: on, not_in_this_batch: chain === 'tron' && !on, threshold_usdt: usdt(settings.thresholds[chain] ?? 0n) };
         if (on) {
           const active = await listBatches(db, { chain, status: 'awaiting_approval,sending,sent', limit: 50 });
           row.batches = (await outAll(db, active.items)).reverse(); // 最早的在前
@@ -181,7 +184,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
     },
     /** 确认归集：原因必填，不要动态码（钱只能进冷钱包） */
     async 'wallet-sweep-approve'(b, actor) {
-      return approveSweep(db, { id: String(b.id || ''), actor, reason: b.reason, providers: providers() });
+      return approveSweep(db, { id: String(b.id || ''), actor, reason: b.reason, providers: providers(), notify });
     },
     async 'wallet-sweep-cancel'(b, actor) {
       return cancelSweep(db, { id: String(b.id || ''), actor, reason: b.reason });
@@ -206,7 +209,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
       });
       return {
         chains: CHAINS.map((chain) => ({
-          chain, provider: current[chain], not_in_this_batch: CHAINS_NOT_IN_BATCH.includes(chain),
+          chain, provider: current[chain], not_in_this_batch: CHAINS_NOT_IN_BATCH.includes(chain) || (chain === 'tron' && !enabled().includes('tron')),
           addresses: counts.filter((c) => c.chain === chain).map((c) => ({ provider: c.provider, status: c.status, address_count: c.n })),
         })),
         providers: ps,

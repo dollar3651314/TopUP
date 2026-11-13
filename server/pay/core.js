@@ -223,11 +223,21 @@ export async function recordDeposit(db, { chain = 'tron', txid, logIndex, block,
   if (!['eth', 'bsc', 'tron'].includes(chain)) throw new Error(`recordDeposit: unsupported chain ${chain}`);
   amount = Number(amount);
   return db.tx(async (t) => {
-    const evm = chain !== 'tron';
-    const [c] = evm
+    // 找客户：ETH、BSC 按 customer_addresses（地址不分大小写）；TRON 先按 customer_addresses（第 2 批的合约地址只在这里，T 开头区分大小写），
+    // 找不到再按第 0 批的 customers.address。legacy：钱在第 0 批的助记词地址上（由原来的浏览器签名归集，要记 customers.onchain）
+    let legacy = false;
+    let [c] = chain !== 'tron'
       ? await t.query(`select c.*, m.fee_in, m.order_mode from customer_addresses a join customers c on c.merchant_id = a.merchant_id and c.customer_id = a.customer_id
           join merchants m on m.id = c.merchant_id where a.chain = $1 and lower(a.address) = lower($2)`, [chain, to])
-      : await t.query('select c.*, m.fee_in, m.order_mode from customers c join merchants m on m.id = c.merchant_id where c.address = $1', [to]);
+      : await t.query(`select c.*, m.fee_in, m.order_mode, a.provider addr_provider from customer_addresses a join customers c on c.merchant_id = a.merchant_id and c.customer_id = a.customer_id
+          join merchants m on m.id = c.merchant_id where a.chain = 'tron' and a.address = $1`, [to]);
+    if (chain === 'tron') {
+      if (c) legacy = c.addr_provider === 'legacy_hd';
+      else {
+        [c] = await t.query('select c.*, m.fee_in, m.order_mode from customers c join merchants m on m.id = c.merchant_id where c.address = $1', [to]);
+        legacy = Boolean(c);
+      }
+    }
     if (!c) return { status: 'ignored' };
     await lockCustomer(t, c.merchant_id, c.customer_id);
     const credited = amount >= MIN_CREDIT;
@@ -238,7 +248,7 @@ export async function recordDeposit(db, { chain = 'tron', txid, logIndex, block,
       [txid, logIndex, block, to, c.merchant_id, c.customer_id, amount, fee, credited ? 'credited' : 'below_min', new Date(time), chain, rawAmount === null ? null : String(rawAmount)]);
     if (!d) return { status: 'duplicate' };
     // 不论是否入账，钱都在这个地址上，归集时要算进去（TRON 的旧归集和对账用；ETH、BSC 归集前向链上查余额）
-    if (!evm) await t.query('update customers set onchain = onchain + $3 where merchant_id = $1 and customer_id = $2', [c.merchant_id, c.customer_id, amount]);
+    if (legacy) await t.query('update customers set onchain = onchain + $3 where merchant_id = $1 and customer_id = $2', [c.merchant_id, c.customer_id, amount]);
     if (!credited) {
       await t.query(`insert into anomalies (type, merchant_id, customer_id, address, amount, ref) values ('below_min', $1, $2, $3, $4, $5) on conflict do nothing`,
         [c.merchant_id, c.customer_id, to, `${amount / 1e6} USDT`, `${txid}:${logIndex}`]); // 同一笔交易里可能有几次转账
