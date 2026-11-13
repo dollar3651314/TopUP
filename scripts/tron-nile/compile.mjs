@@ -1,6 +1,8 @@
 // 用 TRON 官方编译器（tron-solidity 0.8.20，wasm 版）编译 Nile 验证要部署的合约。
 // 编译器从 TRON 官方的 solc-bin 下载，sha256 写死在下面，对不上就拒绝使用。下载后缓存在 contracts/out-tron/（不进仓库）。
 // 编译参数和以太坊版一致：0.8.20、paris、优化器 1000 次。BitGo 源码用 contracts/lib/ 下原样保存的文件，一行不改。
+// 第 2 批另编 TRON 派生版合约（contracts/src/tron/：ForwarderTron、ForwarderFactoryTron、SweepBatcherTron）和测试代币 TronUsdtMock
+// （contracts/test-tron/TronMocks.sol，transfer 成功也返回 false，像 TRON 主网 USDT）；私链端到端（test/tron-local/）部署这几个。
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -50,6 +52,10 @@ function sources() {
   add(join(CONTRACTS, 'lib', 'eth-multisig-v4', 'contracts'), 'bitgo/');
   add(join(CONTRACTS, 'lib', 'openzeppelin-contracts', 'contracts'), '@openzeppelin/contracts/');
   s['tron-nile/NileProbe.sol'] = { content: readFileSync(join(CONTRACTS, 'script', 'tron-nile', 'NileProbe.sol'), 'utf8') };
+  // TRON 派生版：按仓库里的相对路径放（SweepBatcherTron 用 ../SweepBatcher.sol 引用以太坊版里的接口）
+  for (const f of ['src/SweepBatcher.sol', 'src/tron/ForwarderTron.sol', 'src/tron/ForwarderFactoryTron.sol', 'src/tron/SweepBatcherTron.sol', 'test-tron/TronMocks.sol']) {
+    s[f] = { content: readFileSync(join(CONTRACTS, ...f.split('/')), 'utf8') };
+  }
   return s;
 }
 
@@ -58,6 +64,10 @@ const WANT = {
   ForwarderFactoryV4: 'bitgo/ForwarderFactoryV4.sol',
   NileProbe: 'tron-nile/NileProbe.sol',
   NileTestToken: 'tron-nile/NileProbe.sol',
+  ForwarderTron: 'src/tron/ForwarderTron.sol',
+  ForwarderFactoryTron: 'src/tron/ForwarderFactoryTron.sol',
+  SweepBatcherTron: 'src/tron/SweepBatcherTron.sol',
+  TronUsdtMock: 'test-tron/TronMocks.sol',
 };
 
 /** 编译，返回 { compiler, artifacts: { 名字: { abi, bytecode, bytecodeSha256 } } } */

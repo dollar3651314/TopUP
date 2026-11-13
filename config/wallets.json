@@ -1,5 +1,5 @@
 {
-  "_说明": "热钱包、冷钱包的地址（公开信息，不是密钥）。签名页面只允许把钱归集到这两个地址，修改必须提交 PR。production 和 staging 的地址在部署时提供后走 PR 填写；local 是本地测试用的地址，对应公开的测试私钥，只用于自动化测试。usdt 是签名页面认可的 USDT 合约地址（生产是主网，测试环境和本地是 Nile 测试网）。 evm 是 ETH、BSC 合约钱包的参数（公开地址）：usdt、factory（BitGo 工厂）、implementation（转发合约实现）、parent（冷钱包，Safe 多签）、batcher（批量合约 SweepBatcher）、ver（这套参数的版本，换参数时加 1）；空着的链不开通。local 的是本地替身用的假地址，不在任何链上。",
+  "_说明": "热钱包、冷钱包的地址（公开信息，不是密钥）。签名页面只允许把钱归集到这两个地址，修改必须提交 PR。production 和 staging 的地址在部署时提供后走 PR 填写；local 是本地测试用的地址，对应公开的测试私钥，只用于自动化测试。usdt 是签名页面认可的 USDT 合约地址（生产是主网，测试环境和本地是 Nile 测试网）。 evm 是 ETH、BSC 合约钱包的参数（公开地址）：usdt、factory（BitGo 工厂）、implementation（转发合约实现）、parent（冷钱包，Safe 多签）、batcher（批量合约 SweepBatcher）、ver（这套参数的版本，换参数时加 1）；空着的链不开通。local 的是本地替身用的假地址，不在任何链上。 tron 是 TRON 合约钱包（第 2 批）的参数（公开地址，T 开头）：usdt、factory（TRON 版工厂 ForwarderFactoryTron）、implementation（ForwarderTron）、parent（冷钱包）、batcher（SweepBatcherTron）、ver；空着的不开通，local 不开通 TRON 合约钱包（本地只有第 0 批的老 TRON 地址）。",
   "production": {
     "hot": "",
     "cold": "",
@@ -21,6 +21,14 @@
         "batcher": "",
         "ver": 1
       }
+    },
+    "tron": {
+      "usdt": "",
+      "factory": "",
+      "implementation": "",
+      "parent": "",
+      "batcher": "",
+      "ver": 1
     }
   },
   "staging": {
@@ -44,6 +52,14 @@
         "batcher": "",
         "ver": 1
       }
+    },
+    "tron": {
+      "usdt": "",
+      "factory": "",
+      "implementation": "",
+      "parent": "",
+      "batcher": "",
+      "ver": 1
     }
   },
   "local": {

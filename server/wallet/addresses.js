@@ -1,9 +1,10 @@
 // 客户的收款地址（每条链一个）：第一次要地址时按路由从提供方拿，并记下提供方、合约参数版本和盐；以后再要返回同一个。
 // 更换地址（renew）：旧地址停用（一直扫链、照常入账、由原提供方归集，不设期限），按当前路由要新地址。
-// 第 1 批不分配新的 TRON 地址：已有的照常返回，没有的拒绝（chain_not_enabled）。
+// TRON（第 2 批）：提供方开通了 tron 才分配新的合约地址，没开通的照旧 chain_not_enabled（不调用提供方）；
+// 第 0 批老客户已有的 TRON 地址（legacy_hd）照常返回，"更换地址"才换成合约地址，老地址停用后一直入账。
 import { PayError } from '../pay/core.js';
 import { CHAINS } from './provider.js';
-import { resolveProvider, CHAINS_NOT_IN_BATCH } from './router.js';
+import { resolveProvider, CHAINS_NOT_IN_BATCH, chainOpen } from './router.js';
 
 const at = (now) => new Date(now ?? Date.now());
 const view = (r) => ({ chain: r.chain, address: r.address, provider: r.provider, schemeVer: r.scheme_ver, status: r.status });
@@ -21,6 +22,7 @@ export async function addressFor(db, { merchantId, customerId, chain, providers 
   const providerId = await resolveProvider(db, { chain, merchantId, now });
   const p = providers[providerId];
   if (!p || p.enabled === false) throw new PayError('provider_not_enabled', 409, 'chain');
+  if (!chainOpen(p, chain)) throw new PayError('chain_not_enabled', 409, 'chain');
   // 提供方在事务外调用（合约钱包是纯计算；第三方托管会访问网络，不能放在事务里）
   const got = await p.allocateAddress({ merchantId, customerId, chain });
   return db.tx(async (t) => {
@@ -57,7 +59,7 @@ export async function sweepCandidates(db, { chain, provider }) {
 }
 
 /**
- * ETH、BSC 合约钱包地址里还没归集的钱（按账本估算：到账合计 − 已归集），每条链一行：
+ * 合约钱包地址里还没归集的钱（ETH、BSC；chains 带 tron 时只算 TRON 合约地址，第 0 批老地址按 customers.onchain 另算）（按账本估算：到账合计 − 已归集），每条链一行：
  * { chain: { total, count, over, overTotal } }（金额是 0.000001 单位的 bigint）。thresholds：每条链的门槛（bigint），给了才算"达到门槛"
  */
 export async function evmUnswept(db, { chains = ['eth', 'bsc'], thresholds = {} } = {}) {
@@ -66,7 +68,7 @@ export async function evmUnswept(db, { chains = ['eth', 'bsc'], thresholds = {} 
     const [r] = await db.query(`with a as (
         select coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address)), 0)
           - coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept'), 0) v
-        from customer_addresses ca where ca.chain = $1)
+        from customer_addresses ca where ca.chain = $1 and (ca.chain <> 'tron' or ca.provider = 'contract'))
       select count(*) filter (where v > 0)::int n, coalesce(sum(v) filter (where v > 0), 0)::bigint total,
         count(*) filter (where v >= $2)::int over_n, coalesce(sum(v) filter (where v >= $2), 0)::bigint over_total from a`, [chain, String(thresholds[chain] ?? 0n)]);
     out[chain] = { total: BigInt(r.total), count: r.n, over: r.over_n, overTotal: BigInt(r.over_total) };

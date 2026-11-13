@@ -5,12 +5,39 @@
 // 不让健康检查整体 DOWN。只返回结果，不返回地址的值。
 import { selector } from './evm-tx.js';
 import { raiseAlert, clearAlert, CHAIN_NAMES } from './sweep.js';
+import { hex20 } from './tron-create2.js';
 
 const call0 = (sig) => '0x' + selector(sig);
 const asAddr = (word) => (typeof word === 'string' && /^0x[0-9a-fA-F]{64}$/.test(word) ? '0x' + word.slice(-40).toLowerCase() : null);
 
+/**
+ * TRON：用只读调用（/wallet/triggerconstantcontract）核对。节点报 CONTRACT_VALIDATE_ERROR（"不是合约"，例如地址上没有部署合约）
+ * 等同于"结果是空的"，判不一致；其他节点错误（SERVER_BUSY 等）、连不上、429、5xx 都算"还没核对上"
+ */
+async function verifyTron(adapter, scheme) {
+  const NOT_CONTRACT = Symbol('not_contract');
+  const call = async (to, sig) => {
+    const r = await adapter.constantCall(to, sig); // 连不上、HTTP 出错时抛出
+    if (r?.result?.result) return String(r.constant_result?.[0] ?? '');
+    if (r?.result?.code === 'CONTRACT_VALIDATE_ERROR') return NOT_CONTRACT;
+    throw new Error(`node error ${r?.result?.code || ''}`);
+  };
+  let parent, factory, impl;
+  try {
+    [parent, factory] = await Promise.all([call(scheme.batcher, 'parent()'), call(scheme.batcher, 'factory()')]);
+    impl = await call(scheme.factory, 'implementationAddress()');
+  } catch { return { result: 'unverified' }; }
+  const same = (w, want) => typeof w === 'string' && /^[0-9a-fA-F]{64}$/.test(w) && w.slice(-40).toLowerCase() === hex20(want);
+  const fields = [];
+  if (!same(parent, scheme.parent)) fields.push('parent');
+  if (!same(factory, scheme.factory)) fields.push('factory');
+  if (!same(impl, scheme.implementation)) fields.push('implementation');
+  return fields.length ? { result: 'mismatch', fields } : { result: 'ok' };
+}
+
 /** 核对一条链：返回 { result: 'ok' | 'mismatch' | 'unverified', fields?: [...不一致的字段名] } */
 export async function verifyChain(adapter, scheme) {
+  if (adapter.chain === 'tron') return verifyTron(adapter, scheme);
   const ec = (to, sig) => adapter.rpc.call('eth_call', [{ to, data: call0(sig) }, 'latest']);
   let parent, factory, impl;
   try {
@@ -47,7 +74,7 @@ export async function verifyLayer(layer, { db, notify, timeoutMs = 8000, now = D
     if (r.result === 'mismatch') {
       layer.disableChain(chain, 'onchain_mismatch');
       if (db) await raiseAlert(db, `onchain_${chain}`, notify, `${name} 合约参数和链上不一致，已停用这条链`,
-        `${name} 链上批量合约的 ${r.fields.join('、')} 和 config/wallets.json 不一致。为了不分配收不了钱的地址，这条链已停用（不分配新地址、不凑批），本链到账暂停入账（不扫块，恢复后从停下的区块接着扫，不会漏账）；其他链和收款页面不受影响。\n请核对 config/wallets.json 的 evm.${chain}，改好后走 PR 重新部署、重启服务。`, { now }).catch(() => {});
+        `${name} 链上批量合约的 ${r.fields.join('、')} 和 config/wallets.json 不一致。为了不分配收不了钱的地址，这条链已停用（不分配新地址、不凑批），本链到账暂停入账（不扫块，恢复后从停下的区块接着扫，不会漏账）；其他链和收款页面不受影响。\n请核对 config/wallets.json 的 ${chain === 'tron' ? 'tron 一节' : `evm.${chain}`}，改好后走 PR 重新部署、重启服务。`, { now }).catch(() => {});
     } else if (r.result === 'ok' && db) {
       await clearAlert(db, `onchain_${chain}`, notify, `${name} 合约参数核对一致`, `${name} 链上批量合约的参数和 config/wallets.json 一致。`).catch(() => {});
     }

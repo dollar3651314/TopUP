@@ -283,8 +283,10 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const big = await one(`select count(*)::int n, coalesce(sum(onchain), 0)::bigint v from customers where onchain >= $1`, [tronTh]);
       // ETH、BSC 合约钱包地址里没归集的（按账本：到账 − 已归集）
       const evm = await evmUnswept(db, { thresholds: settings.thresholds });
+      // TRON 合约地址（第 2 批开通后）：和第 0 批老地址合在 TRON 一行
+      const tc = layer?.enabledChains.includes('tron') ? (await evmUnswept(db, { chains: ['tron'], thresholds: settings.thresholds })).tron : { total: 0n, count: 0, over: 0, overTotal: 0n };
       const byChain = {
-        tron: { unswept_total: Number(uns.v), address_count: uns.n, over_threshold: big.n, over_threshold_total: Number(big.v), threshold: tronTh, enabled: true },
+        tron: { unswept_total: Number(uns.v) + Number(tc.total), address_count: uns.n + tc.count, over_threshold: big.n + tc.over, over_threshold_total: Number(big.v) + Number(tc.overTotal), threshold: tronTh, enabled: true },
         ...Object.fromEntries(Object.entries(evm).map(([c, x]) => [c, { unswept_total: Number(x.total), address_count: x.count, over_threshold: x.over, over_threshold_total: Number(x.overTotal), threshold: Number(settings.thresholds[c]), enabled: Boolean(layer?.enabledChains.includes(c)) }])),
       };
       const sumOf = (k) => Object.values(byChain).reduce((a, x) => a + x[k], 0);
@@ -334,10 +336,13 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const [h, c, r, approved, kybPending] = await Promise.all([within(chain(hot)), within(chain(cold)), within(tron.resources(hot)), within(listApproved()), within(pendingKyb())]);
       // ETH、BSC：冷钱包（合约里写死的 parent）的 USDT 余额；第 1 批 ETH、BSC 没有热钱包（打款在后续批次）
       const evmChains = layer ? [...layer.enabledChains] : [];
-      const evmCold = Object.fromEntries(await Promise.all(evmChains.map(async (ch) => [ch, await within((async () => Number(await layer.providers.contract.balance(ch, { vault: 'cold' })))())])));
+      // TRON 合约钱包的 parent 和第 0 批的冷钱包是同一个地址时只算一次
+      const tronParent = layer?.providers?.contract?.scheme?.('tron')?.parent;
+      const coldChains = evmChains.filter((ch) => !(ch === 'tron' && tronParent && tronParent === cold));
+      const evmCold = Object.fromEntries(await Promise.all(coldChains.map(async (ch) => [ch, await within((async () => Number(await layer.providers.contract.balance(ch, { vault: 'cold' })))())])));
       const [bal] = await db.query('select coalesce(sum(available + frozen), 0)::bigint owed from balances');
       const [uns] = await db.query('select coalesce(sum(onchain), 0)::bigint v from customers');
-      const evmUns = await evmUnswept(db);
+      const evmUns = await evmUnswept(db, { chains: ['eth', 'bsc', ...(evmChains.includes('tron') ? ['tron'] : [])] });
       const unsAll = Number(uns.v) + Object.values(evmUns).reduce((a, x) => a + Number(x.total), 0);
       const opened = new Set((await db.query('select kyb_ref from merchants where kyb_ref is not null')).map((x) => x.kyb_ref));
       const evmColdKnown = Object.values(evmCold).every((x) => x !== null);

@@ -17,8 +17,11 @@ import { decryptJson } from '../kyb/crypto.js';
 import { createWalletLayer } from '../wallet/index.js';
 import { scanEvm } from '../wallet/scan.js';
 import { confirmSweeps, proposeDue } from '../wallet/sweep.js';
+import { checkRentalBalance } from '../wallet/energy.js';
+import { checkWalletsChange } from './wallets-change.js';
 
-const WALLETS = JSON.parse(readFileSync(new URL('../../config/wallets.json', import.meta.url), 'utf8'));
+const WALLETS_RAW = readFileSync(new URL('../../config/wallets.json', import.meta.url), 'utf8');
+const WALLETS = JSON.parse(WALLETS_RAW);
 export const walletsFor = (appEnv) => WALLETS[appEnv === 'production' ? 'production' : appEnv === 'staging' ? 'staging' : 'local'];
 
 
@@ -31,13 +34,15 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   await backfillEmailHash(db, { decrypt: (s) => decryptJson(keys.enc, s), hash: (e) => emailHash(keys, e) });
   const keyPrefix = config.appEnv === 'production' ? 'topup_live_' : 'topup_test_';
   const wallets = walletsFor(config.appEnv);
-  // 钱包层（ETH、BSC 合约钱包；cobo、fireblocks 未开通）
-  const layer = createWalletLayer({ db, config, evm: wallets.evm || {} });
+  // 钱包层（ETH、BSC、TRON 合约钱包；cobo、fireblocks 未开通）。TRON 一节空着时不开通 TRON 合约钱包
+  const layer = createWalletLayer({ db, config, evm: wallets.evm || {}, tron: wallets.tron || null });
   const ops = createOps({ db, keys, payBase: origin, keyPrefix, wallet: layer });
   const gate = createAdminGate({ redis: kyb.redis, kybKeys: kyb.keys });
   const notify = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
   // 启动时用 eth_call 核对链上批量合约的 parent、factory 和配置一致；不一致的链不开通并告警（最多等 8 秒，连不上下一轮再核对）
   await layer.verifyOnchain({ db, notify }).catch((e) => console.error(`[wallet] onchain check: ${e.message}`));
+  // config/wallets.json 和上次启动时不一样：发邮件（web、worker 同时启动也只发一封）
+  await checkWalletsChange(db, { raw: WALLETS_RAW, appEnv: config.appEnv, section: wallets, notify }).catch((e) => console.error(`[pay] wallets.json check: ${e.message}`));
   const diskPath = config.blobDir || config.dataDir || '/'; // 用量提醒看这块磁盘
   const getTarget = async (merchantId) => {
     const [m] = await db.query('select callback_url, api_secret_enc from merchants where id = $1', [merchantId]);
@@ -64,6 +69,11 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
         return { tron: tronSweeps, evm, proposed };
       },
     }),
-    daily: () => runDaily({ db, tron, wallets, notify, diskPath }),
+    daily: async () => {
+      const out = await runDaily({ db, tron, wallets, notify, diskPath });
+      // 租能量平台的预存余额每天查一次（超过 1,000 TRX 告警；没配不查）
+      const rental = await checkRentalBalance(db, { renter: layer.tronEnergy, notify }).catch((e) => ({ status: 'error', error: e.message }));
+      return out && typeof out === 'object' ? { ...out, energyRental: rental.status } : out;
+    },
   };
 }

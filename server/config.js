@@ -51,6 +51,12 @@ export function loadConfig(rawEnv = process.env) {
     bscConfirmations: int(env.BSC_CONFIRMATIONS, 15),
     // 归集发起账户的私钥（只在服务器的 .env；它只能调用批量合约，钱只能进冷钱包）。没有时只能分配地址、扫链，不能执行归集
     sweepOperatorKey: env.SWEEP_OPERATOR_KEY || '',
+    // TRON 合约钱包（第 2 批）：节点地址（可选，默认按 TRON_NETWORK 用 TronGrid，带 TRONGRID_API_KEY）、确认数（默认 19）、
+    // 归集发起账户的私钥（只在服务器的 .env；只能调用 TRON 批量合约）、租能量平台 TronSave 的 API Key（可选，没配就烧 TRX）
+    tronNodeUrl: (env.TRON_NODE_URL || '').replace(/\/+$/, ''),
+    tronConfirmations: int(env.TRON_CONFIRMATIONS, 19),
+    sweepOperatorKeyTron: env.SWEEP_OPERATOR_KEY_TRON || '',
+    tronsaveApiKey: env.TRONSAVE_API_KEY || '',
     // 本地和自动化测试：ETH、BSC 用内存替身（只在 APP_ENV=local 时生效）
     fakeEvm: appEnv === 'local' && env.FAKE_EVM !== '0',
     // worker 进程：扫链间隔、每日任务的时间（UTC 小时:分钟）
