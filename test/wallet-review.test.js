@@ -2,7 +2,7 @@
 //   一、研发自加的安全措施有测试守着：第一次运行只记凑批时间点；确认后停在"发送中"超过 15 分钟标失败、地址放回；节点连不上时退回待确认
 //   二、"连不上节点不等于失败"：广播时连不上，不能把批次当失败、把地址放回（交易可能已经发出），按交易号继续查
 //   三、对外接口只加字段：开放 API 和回调里第 0 批就有的字段一个不少、类型不变（基准：test/fixtures/api-v1-fields-batch0.json，
-//       用第 0 批代码跑同一组调用生成）；没指定链的订单仍是 TRON 地址；新错误码 chain_not_enabled 是 409；健康检查的 wallet 项不进整体 ok
+//       用第 0 批代码跑同一组调用生成）；按 K1 新客户和不指定链的订单不带地址，老客户仍是 TRON；新错误码 chain_not_enabled 是 409；健康检查的 wallet 项不进整体 ok
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
@@ -14,6 +14,7 @@ import { proposeDue, proposeSweep, approveSweep, confirmSweeps, getBatch } from 
 import { createEvmAdapter } from '../server/wallet/adapters/evm.js';
 import { createContractProvider } from '../server/wallet/providers/contract.js';
 import { addressFor } from '../server/wallet/addresses.js';
+import { legacyTronCustomer } from './legacy-tron.js';
 
 const V = JSON.parse(readFileSync(new URL('./fixtures/wallet/create2-vectors-topup.json', import.meta.url), 'utf8'));
 const BASE = JSON.parse(readFileSync(new URL('./fixtures/api-v1-fields-batch0.json', import.meta.url), 'utf8')).endpoints;
@@ -166,46 +167,68 @@ async function apiSetup() {
   return { db, core, call };
 }
 const typeOf = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
-function keepsOld(name, obj) {
+/**
+ * 第 0 批的字段一个不少、类型不变。except：按 K1 决定（客户充值时才生成地址）允许为 null 的字段，调用处另外断言它的值。
+ */
+function keepsOld(name, obj, { except = [] } = {}) {
   const old = BASE[name];
   assert.ok(old, `基准里有 ${name}`);
   for (const [k, t] of Object.entries(old)) {
     assert.ok(k in obj, `${name}：第 0 批的字段 ${k} 还在`);
+    if (except.includes(k) && obj[k] === null) continue;
     // 第 0 批是 null 的字段（例如还没付款的时间）现在可以是 null 或原来那一类，不能变成别的类型
     if (t !== 'null') assert.equal(typeOf(obj[k]), t, `${name}.${k} 的类型没变`);
   }
 }
 
-test('开放 API：客户、订单、到账、余额的第 0 批字段一个不少、类型不变；客户的 address 仍是 TRON 地址，新加 addresses', async () => {
+// K1（11/13 决定）：所有地址都是客户发起充值时才生成，客户要用哪条链就给哪条链。所以：
+//   新客户 address 为 null、addresses 为空；不指定链的订单创建时不带地址；指定链的订单创建时只生成这条链的地址。
+//   这是按决定改口径，不是放宽：其余字段一个不少、类型不变的检查照旧；已有 TRON 地址的老客户照旧是 TRON 字符串。
+test('开放 API（K1）：新客户 address 为 null、addresses 为空；不指定链的订单不带地址；指定链的订单只生成这条链；其余第 0 批字段一个不少、类型不变', async () => {
   const { db, core, call } = await apiSetup();
   const c = await call('POST', 'customers/', { customer_id: 'u1', name: 'N', email: 'a@b.co' });
   assert.equal(c.status, 200);
-  keepsOld('POST customers', c.body);
-  assert.match(c.body.address, /^T[1-9A-HJ-NP-Za-km-z]{33}$/, '老字段 address 仍是 TRON 地址');
-  assert.deepEqual(c.body.addresses.map((a) => a.chain), ['eth', 'bsc']);
-  keepsOld('GET customers', (await call('GET', 'customers/?customer_id=u1')).body);
-  keepsOld('GET customers/list', (await call('GET', 'customers/list/')).body.items[0]);
+  keepsOld('POST customers', c.body, { except: ['address'] });
+  assert.equal(c.body.address, null, '新客户不生成地址');
+  assert.deepEqual(c.body.addresses, []);
+  keepsOld('GET customers', (await call('GET', 'customers/?customer_id=u1')).body, { except: ['address'] });
+  keepsOld('GET customers/list', (await call('GET', 'customers/list/')).body.items[0], { except: ['address'] });
 
-  // 不指定链的订单：和第 0 批一样（TRON 地址、network = TRON）
+  // 不指定链的订单：创建时不带地址（付款人在付款页选了链才生成）
   const o = await call('POST', 'orders/', { customer_id: 'u1', merchant_order_no: 'A1', amount: '10' });
   assert.equal(o.status, 200);
-  keepsOld('POST orders', o.body);
-  assert.equal(o.body.network, 'TRON');
-  assert.equal(o.body.address, c.body.address);
-  keepsOld('GET orders', (await call('GET', `orders/?order_no=${o.body.order_no}`)).body);
+  keepsOld('POST orders', o.body, { except: ['address', 'network'] });
+  assert.equal(o.body.address, null);
+  assert.equal(o.body.network, null);
+  assert.equal(o.body.chain, null);
+  assert.deepEqual(o.body.addresses, []);
+  keepsOld('GET orders', (await call('GET', `orders/?order_no=${o.body.order_no}`)).body, { except: ['address', 'network'] });
   keepsOld('GET orders/list', (await call('GET', 'orders/list/')).body.items[0]);
-  // 指定链：address 是这条链的地址；TRON 第 1 批不开放：409 chain_not_enabled；不认识的链 422
+  assert.deepEqual((await call('GET', 'customers/?customer_id=u1')).body.addresses, [], '不指定链的订单不生成地址');
+  // 指定链：创建订单时生成这条链的地址（只这一条链）
   const oe = await call('POST', 'orders/', { customer_id: 'u1', merchant_order_no: 'A2', amount: '10', chain: 'eth' });
   assert.equal(oe.status, 200);
-  assert.equal(oe.body.address, c.body.addresses.find((a) => a.chain === 'eth').address);
   keepsOld('POST orders', oe.body);
+  assert.match(oe.body.address, /^0x[0-9a-fA-F]{40}$/);
+  assert.equal(oe.body.network, 'ETH');
+  assert.deepEqual(oe.body.addresses.map((a) => a.chain), ['eth']);
+  const cu = (await call('GET', 'customers/?customer_id=u1')).body;
+  assert.deepEqual(cu.addresses, [{ chain: 'eth', address: oe.body.address }]);
+  assert.equal(cu.address, null, '旧字段 address 只给 TRON，新客户没有 TRON 地址');
   const ot = await call('POST', 'orders/', { customer_id: 'u1', merchant_order_no: 'A3', amount: '10', chain: 'tron' });
   assert.equal(ot.status, 409);
   assert.equal(ot.body.error.code, 'chain_not_enabled');
   assert.equal((await call('POST', 'orders/', { customer_id: 'u1', merchant_order_no: 'A4', amount: '10', chain: 'sol' })).status, 422);
 
-  // TRON 到账（第 0 批的方式）：到账列表、回调的老字段不变，新加 chain
-  await core.recordDeposit(db, { txid: 'f'.repeat(64), logIndex: 0, block: 1, time: Date.now(), from: 'TX', to: c.body.address, amount: 10_000_000 });
+  // 已有 TRON 地址的老客户：客户和不指定链的订单照第 0 批（TRON 字符串），TRON 到账和回调的老字段不变，新加 chain
+  const old = await legacyTronCustomer(db, 'ma', 'u_old');
+  const oc = (await call('GET', 'customers/?customer_id=u_old')).body;
+  keepsOld('GET customers', oc);
+  assert.equal(oc.address, old.address);
+  assert.deepEqual(oc.addresses, [{ chain: 'tron', address: old.address }]);
+  const oo = await call('POST', 'orders/', { customer_id: 'u_old', merchant_order_no: 'B1', amount: '10' });
+  assert.equal(oo.status, 200);
+  await core.recordDeposit(db, { txid: 'f'.repeat(64), logIndex: 0, block: 1, time: Date.now(), from: 'TX', to: old.address, amount: 10_000_000 });
   const d = (await call('GET', 'deposits/')).body.items[0];
   keepsOld('GET deposits', d);
   assert.equal(d.chain, 'tron');

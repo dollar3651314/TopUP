@@ -9,6 +9,7 @@ import * as core from '../server/pay/core.js';
 import { createFakeTron } from '../server/pay/fake-trongrid.js';
 import { scan, runTick, notifyWithdrawals } from '../server/pay/tick.js';
 import { signCallback, checkCallbackUrl, isPrivateIp, RETRY_MIN, resend } from '../server/pay/callbacks.js';
+import { legacyTronCustomer } from './legacy-tron.js'; // K1：新客户不再生成地址；TRON 老地址的用例用已有 TRON 地址的老客户
 
 const U = 1_000_000;
 const XPUB = HDKey.fromMasterSeed(mnemonicToSeedSync('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about')).derive("m/44'/195'/0'").publicExtendedKey;
@@ -25,7 +26,7 @@ async function setup() {
 
 test('扫链：只入账转到客户地址的转账，翻页、游标前进，重复扫描不会重复入账', async () => {
   const { db, tron } = await setup();
-  const c = await db.tx((t) => core.ensureCustomer(t, 'm1', 'u1'));
+  const c = await legacyTronCustomer(db, 'm1', 'u1');
   const now = Date.now();
   await core.setMeta(db, 'scan_cursor', now - 120_000);
   for (let i = 0; i < 7; i++) tron.pay({ to: i % 2 ? c.address : HOT, amount: 10 * U, time: now - 60_000 + i * 1000 });
@@ -40,7 +41,7 @@ test('扫链：只入账转到客户地址的转账，翻页、游标前进，�
 
 test('回调：带签名；失败按 1 分钟、5 分钟……重试；24 小时后停止；可以手动重发', async () => {
   const { db, tron } = await setup();
-  const c = await db.tx((t) => core.ensureCustomer(t, 'm1', 'u1'));
+  const c = await legacyTronCustomer(db, 'm1', 'u1');
   await core.setMeta(db, 'scan_cursor', Date.now() - 60_000);
   tron.pay({ to: c.address, amount: 20 * U, time: Date.now() - 1000 });
   const got = [];
@@ -79,7 +80,7 @@ test('回调地址：只允许 https，不允许内网地址', async () => {
 
 test('提币：广播后链上确认才扣除冻结；新申请合并成一封邮件', async () => {
   const { db, m, tron } = await setup();
-  const c = await db.tx((t) => core.ensureCustomer(t, 'm1', 'u1'));
+  const c = await legacyTronCustomer(db, 'm1', 'u1');
   await core.recordDeposit(db, { txid: 'a'.repeat(64), logIndex: 0, block: 1, to: c.address, amount: 500 * U, time: new Date() });
   const w1 = await core.requestWithdrawal(db, m, { kind: 'payout', to: HOT, amount: 100 * U, source: 'web' });
   const w2 = await core.requestWithdrawal(db, m, { kind: 'payout', to: HOT, amount: 50 * U, source: 'api' });
@@ -103,7 +104,7 @@ test('提币：广播后链上确认才扣除冻结；新申请合并成一封�
 
 test('扫链只读到已确认的区块：还没确认的转账，游标不会越过它，确认后能扫到', async () => {
   const { db, tron } = await setup();
-  const c = await db.tx((t) => core.ensureCustomer(t, 'm1', 'u9'));
+  const c = await legacyTronCustomer(db, 'm1', 'u9');
   const now = Date.now();
   await core.setMeta(db, 'scan_cursor', now - 60_000);
   tron.solidBlock = async () => ({ number: 1, time: now - 70_000 }); // 最新已确认区块在 70 秒前
@@ -118,7 +119,7 @@ test('扫链只读到已确认的区块：还没确认的转账，游标不会�
 
 test('一笔到账处理失败不会卡住扫链：记为异常，后面的照常入账', async () => {
   const { db, tron } = await setup();
-  const a = await db.tx((t) => core.ensureCustomer(t, 'm1', 'ua')), b = await db.tx((t) => core.ensureCustomer(t, 'm1', 'ub'));
+  const a = await legacyTronCustomer(db, 'm1', 'ua'), b = await legacyTronCustomer(db, 'm1', 'ub');
   await core.setMeta(db, 'scan_cursor', Date.now() - 60_000);
   tron.pay({ to: a.address, amount: 3 * U, time: Date.now() - 2000 });
   tron.pay({ to: b.address, amount: 4 * U, time: Date.now() - 1000 });

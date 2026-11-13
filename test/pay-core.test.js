@@ -7,6 +7,7 @@ import { createTestDb } from '../server/pay/db.js';
 import { migrate } from '../server/pay/schema.js';
 import * as core from '../server/pay/core.js';
 import { deriveAddress } from '../server/pay/tron.js';
+import { legacyTronCustomer } from './legacy-tron.js';
 
 const U = 1_000_000;
 const XPUB = HDKey.fromMasterSeed(mnemonicToSeedSync('abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about')).derive("m/44'/195'/0'").publicExtendedKey;
@@ -22,15 +23,28 @@ async function setup(mode = core.DEFAULT_MODE) {
   return { db, m };
 }
 const bal = async (db) => (await db.query('select available, frozen from balances where merchant_id = $1', ['m1']))[0];
-const cust = async (db, id) => db.tx((t) => core.ensureCustomer(t, 'm1', id));
+// 到账、匹配、提币这些用例和链无关，用已有 TRON 地址的老客户（K1：新客户不再生成地址，见 test/legacy-tron.js）
+const cust = (db, id) => legacyTronCustomer(db, 'm1', id);
 
-test('客户：同一个标识永远是同一个地址；地址按序号从公钥推导', async () => {
+test('客户（K1）：新建客户不生成任何地址（address 为空），同一个标识永远是同一个客户；没初始化 TRON 主助记词也能建；老客户的 TRON 地址仍按序号从公钥推导', async () => {
   const { db } = await setup();
-  const a = await cust(db, 'user_1'), b = await cust(db, 'user_1'), c = await cust(db, 'user_2');
-  assert.equal(a.address, b.address);
-  assert.notEqual(a.address, c.address);
-  assert.equal(a.address, deriveAddress(XPUB, a.hd_index));
-  await assert.rejects(cust(db, 'bad id!'), /invalid_param/);
+  const mk = (id) => db.tx((t) => core.ensureCustomer(t, 'm1', id));
+  const a = await mk('user_1'), b = await mk('user_1'), c = await mk('user_2');
+  assert.equal(a.address, null);
+  assert.equal(c.address, null);
+  assert.equal(a.seq, b.seq);
+  assert.notEqual(a.seq, c.seq);
+  assert.equal((await db.query(`select count(*)::int n from customer_addresses where customer_id in ('user_1', 'user_2')`))[0].n, 0);
+  await assert.rejects(mk('bad id!'), /invalid_param/);
+  // 没初始化 TRON 主助记词：照样能建客户（不再 503）
+  const db2 = await createTestDb(); await migrate(db2);
+  await core.createMerchant(db2, { id: 'm1', name: 'Acme', feeIn: { ppm: 0, fixed: 0, min: 0 }, feeOut: { ppm: 0, fixed: 0, min: 0 }, mode: core.DEFAULT_MODE });
+  const d = await db2.tx((t) => core.ensureCustomer(t, 'm1', 'no_xpub'));
+  assert.equal(d.customer_id, 'no_xpub');
+  assert.equal(d.address, null);
+  // 老客户（升级前就有的 TRON 地址）：地址照旧按序号从公钥推导
+  const old = await cust(db, 'old_1');
+  assert.equal(old.address, deriveAddress(XPUB, old.hd_index));
 });
 
 test('到账：扣收款费入账，写两条账本；重复的转账忽略；低于 1 USDT 不入账', async () => {
@@ -54,11 +68,12 @@ test('到账：扣收款费入账，写两条账本；重复的转账忽略；�
 
 test('先建订单后到账：两笔累计达到下限即完成，匹配通知带到账列表', async () => {
   const { db, m } = await setup();
+  const c = await cust(db, 'u1');
   const o = await core.createOrder(db, m, { customerId: 'u1', merchantOrderNo: 'A-1', amount: 100 * U });
   assert.equal(o.status, 'pending');
-  await core.recordDeposit(db, { txid: tx(), logIndex: 0, block: 1, to: o.address, amount: 50 * U, time: new Date() });
+  await core.recordDeposit(db, { txid: tx(), logIndex: 0, block: 1, to: c.address, amount: 50 * U, time: new Date() });
   assert.equal((await core.orderView(db, o.order_no)).status, 'partial');
-  await core.recordDeposit(db, { txid: tx(), logIndex: 0, block: 2, to: o.address, amount: 45 * U, time: new Date() });
+  await core.recordDeposit(db, { txid: tx(), logIndex: 0, block: 2, to: c.address, amount: 45 * U, time: new Date() });
   const v = await core.orderView(db, o.order_no);
   assert.equal(v.status, 'completed');
   assert.equal(v.matched, 95 * U);
@@ -93,11 +108,12 @@ test('订单模式关闭时不能建订单；订单过期处理', async () => {
   const { db, m } = await setup({ ...core.DEFAULT_MODE, enabled: false });
   await assert.rejects(core.createOrder(db, m, { customerId: 'u1', merchantOrderNo: 'X', amount: U }), /order_mode_disabled/);
   const { db: db2, m: m2 } = await setup();
+  const c2 = await cust(db2, 'u1');
   const o = await core.createOrder(db2, m2, { customerId: 'u1', merchantOrderNo: 'E-1', amount: 100 * U });
-  await core.recordDeposit(db2, { txid: tx(), logIndex: 0, block: 1, to: o.address, amount: 10 * U, time: new Date() });
+  await core.recordDeposit(db2, { txid: tx(), logIndex: 0, block: 1, to: c2.address, amount: 10 * U, time: new Date() });
   // 过期后再等 5 分钟才处理：这段时间扫到的、过期前付的钱还能匹配
   assert.equal(await core.expireOrders(db2, new Date(Date.now() + 33 * 60_000)), 0);
-  await core.recordDeposit(db2, { txid: tx(), logIndex: 0, block: 2, to: o.address, amount: 5 * U, time: new Date(Date.now() + 29 * 60_000) });
+  await core.recordDeposit(db2, { txid: tx(), logIndex: 0, block: 2, to: c2.address, amount: 5 * U, time: new Date(Date.now() + 29 * 60_000) });
   assert.equal((await core.orderView(db2, o.order_no)).matched, 15 * U);
   assert.equal(await core.expireOrders(db2, new Date(Date.now() + 36 * 60_000)), 1);
   assert.equal((await core.orderView(db2, o.order_no)).status, 'expired_partial');
@@ -107,7 +123,7 @@ test('收款手续费最多等于到账金额：最低收费大于到账金额�
   const db = await createTestDb(); await migrate(db);
   await core.setMeta(db, 'xpub', XPUB);
   await core.createMerchant(db, { id: 'mf', name: 'Fee', feeIn: { ppm: 0, fixed: 0, min: 2 * U }, feeOut: { ppm: 0, fixed: 0, min: 0 }, mode: core.DEFAULT_MODE });
-  const c = await db.tx((t) => core.ensureCustomer(t, 'mf', 'u1'));
+  const c = await legacyTronCustomer(db, 'mf', 'u1');
   const r = await core.recordDeposit(db, { txid: tx(), logIndex: 0, block: 1, to: c.address, amount: 1.5 * U, time: new Date() });
   assert.equal(r.status, 'credited');
   assert.equal(r.deposit.fee, 1.5 * U);

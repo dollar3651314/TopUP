@@ -68,7 +68,7 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
   }
   const usdtOf = (s: string) => Number(s.replace(/[^\d.]/g, ''));
 
-  test('TC-W00 准备：后台初始化并登录、初始化 TRON 主助记词（现在新建客户仍要它，见说明）；开通商户 → 设置密码和验证码 → 登录', async () => {
+  test('TC-W00 准备：后台初始化并登录、初始化 TRON 主助记词；开通商户 → 设置密码和验证码 → 登录', async () => {
     await admin.goto('/admin/');
     await admin.fill('#s-token', KYB_ENV.ADMIN_SETUP_TOKEN); await admin.fill('#s-pw', ADMIN_PW); await admin.fill('#s-pw2', ADMIN_PW);
     await admin.click('[data-setup] button[type="submit"]');
@@ -81,7 +81,8 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await admin.click('[data-login] button[type="submit"]');
     await expect(admin.locator('[data-view="app"]')).toBeVisible();
     await actx.storageState({ path: ASTATE });
-    // 现在新建客户仍会派生一个 TRON 地址（第 0 批的做法），钱包没初始化时新建客户返回 503。是否保留另行决定，这里照现状先初始化
+    // 初始化 TRON 主助记词：按 K1 新建客户不再需要它（不初始化也不该 503，单元测试 test/wallet-k1.test.js 守着）；
+    // 这里照样初始化，免得 K1 还没实现时后面所有准备步骤一起失败
     await admin.click('[data-tab="p-wallet"]');
     await admin.click('text=初始化主助记词');
     const words = await admin.locator('.mnemonic li').allTextContents();
@@ -110,18 +111,18 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await mctx.storageState({ path: MSTATE });
   });
 
-  test('TC-W01 准备：ETH、BSC 客户地址和到账（ETH 150 / 6,000 超每地址上限 / 50 低于门槛；BSC 5 × 4,900 合计超每批上限）', async () => {
+  test('TC-W01 准备（K1）：建客户不生成地址；按链建订单时才生成这条链的地址（只这条链）；ETH 150 / 6,000 超每地址上限 / 50 低于门槛；BSC 5 × 4,900 合计超每批上限', async () => {
     const plan: [string, string, number][] = [['sw_e1', 'eth', 150], ['sw_e2', 'eth', 6000], ['sw_e3', 'eth', 50], ...[1, 2, 3, 4, 5].map((i) => [`sw_b${i}`, 'bsc', 4900] as [string, string, number])];
     for (const [cid, chain, amount] of plan) {
       expect((await mcall('customer-save', { customer_id: cid })).status).toBe(200);
+      // K1：客户发起充值时才按链生成地址。建订单时指定链 → 生成这条链的地址（订单金额和到账不同，不会被匹配）
+      const o = await mcall('order-create', { customer_id: cid, merchant_order_no: `GEN-${cid}`, amount: '1', chain });
+      expect(o.status).toBe(200);
+      expect(o.body.address).toMatch(/^0x[0-9a-fA-F]{40}$/);
       const r = await mcall('customer-addresses', undefined, `&customer_id=${cid}`);
-      expect(r.status).toBe(200);
-      const byChain = Object.fromEntries(r.body.addresses.map((a: any) => [a.chain, a.address]));
-      expect(byChain.eth).toMatch(/^0x[0-9a-fA-F]{40}$/);
-      expect(byChain.bsc).toBe(byChain.eth); // 同一套合约，两条链同一个地址
-      expect(byChain.tron).toBeUndefined(); // 第 1 批不分配新的 TRON 地址
-      st.ev[cid] = byChain.eth;
-      const p = await admin.request.post(`${B}/__fake/evm/pay/`, { data: { chain, to: byChain[chain], amount: amount * U } });
+      expect.soft(r.body.addresses.map((a: any) => a.chain), `${cid} 只生成被选的这条链`).toEqual([chain]); // soft：K1 没实现时这里红，但照样准备好后面用例要的数据
+      st.ev[cid] = o.body.address;
+      const p = await admin.request.post(`${B}/__fake/evm/pay/`, { data: { chain, to: o.body.address, amount: amount * U } });
       expect(p.status()).toBe(200);
     }
     await tick(admin);
@@ -169,7 +170,7 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
   test('TC-W02B 归集（ETH）：确认时把预填的原因清空也能确认，记录里原因仍是"例行归集"', async () => {
     const r = await mcall('customer-save', { customer_id: 'sw_e4' });
     expect(r.status).toBe(200);
-    const a = (await mcall('customer-addresses', undefined, '&customer_id=sw_e4')).body.addresses.find((x: any) => x.chain === 'eth').address;
+    const a = (await mcall('order-create', { customer_id: 'sw_e4', merchant_order_no: 'GEN-sw_e4', amount: '1', chain: 'eth' })).body.address; // K1：按链建订单时才生成地址
     st.ev.sw_e4 = a;
     expect((await admin.request.post(`${B}/__fake/evm/pay/`, { data: { chain: 'eth', to: a, amount: 200 * U } })).status()).toBe(200);
     await tick(admin);
@@ -309,51 +310,44 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await admin.unroute(isWallet('wallet-chains'));
   });
 
-  test('TC-W09 商户客户：每条链一行地址（ETH、BSC 两行，同一串）；列表上方有说明；TRON 标"第 2 批"；列表按链分列', async () => {
+  test('TC-W09 商户客户（K1）：新建客户后没有地址，写明"客户发起充值时按链生成"；列表按链分列；TRON 标"第 2 批"', async () => {
     await merchant.goto('/zh/merchant/');
     await merchant.click('[data-mtab="customers"]');
     const panel = merchant.locator('[data-mpanel="customers"]');
-    await expect(panel.locator('.info-box')).toContainText('同一串');
     await expect(panel.locator('thead')).toContainText('以太坊');
     await expect(panel.locator('thead')).toContainText('BSC');
     await panel.locator('.toolbar .btn-primary').click();
     await merchant.fill('#mc-id', 'ui_multi_1');
     await merchant.click('[data-mdialog-ok]');
-    const dlg = merchant.locator('[data-mdialog]');
-    const eth = dlg.locator('[data-addresses] [data-chain="eth"]'), bsc = dlg.locator('[data-addresses] [data-chain="bsc"]');
-    await expect(eth).toBeVisible(); await expect(bsc).toBeVisible();
-    const ea = (await eth.locator('.mono').textContent())!.trim(), ba = (await bsc.locator('.mono').textContent())!.trim();
-    expect(ea).toMatch(/^0x[0-9a-fA-F]{40}$/);
-    expect(ba).toBe(ea);
-    await expect(eth).toContainText('ERC20'); await expect(bsc).toContainText('BEP20');
-    await expect(dlg.locator('[data-addresses] [data-chain="tron"]')).toContainText('第 2 批');
-    st.ev.ui_multi_1 = ea;
-    await merchant.keyboard.press('Escape');
-    // 客户详情里同样每条链一行
+    await expect(merchant.locator('[data-mtoast]')).toBeVisible();
+    expect((await mcall('customer-addresses', undefined, '&customer_id=ui_multi_1')).body.addresses).toEqual([]);
+    if (await merchant.locator('[data-mdialog]').isVisible()) await merchant.keyboard.press('Escape');
     await panel.locator('[data-customer="ui_multi_1"]').click();
-    await expect(dlg.locator('[data-addresses] [data-chain="eth"]')).toBeVisible();
-    await expect(dlg.locator('[data-addresses] [data-chain="bsc"]')).toBeVisible();
+    const dlg = merchant.locator('[data-mdialog]');
+    await expect(dlg).toBeVisible();
+    await expect(dlg).not.toContainText(/0x[0-9a-fA-F]{40}/);
+    await expect(dlg).toContainText('充值'); // 说明地址在客户发起充值时按链生成
     await merchant.keyboard.press('Escape');
   });
 
-  test('TC-W09B 商户客户：地址弹窗和客户详情里两行同一串时就近说明（免得商户以为只能收一条链）', async () => {
+  test('TC-W09B 商户客户：以太坊、BSC 都生成过时，客户详情两行同一串，旁边写一句说明（免得商户以为只能收一条链）；TRON 标"第 2 批"', async () => {
+    await mcall('customer-save', { customer_id: 'ui_multi_2' });
+    for (const chain of ['eth', 'bsc']) expect((await mcall('order-create', { customer_id: 'ui_multi_2', merchant_order_no: `GEN2-${chain}`, amount: '1', chain })).status).toBe(200);
     await merchant.goto('/zh/merchant/');
     await merchant.click('[data-mtab="customers"]');
     const panel = merchant.locator('[data-mpanel="customers"]');
-    await panel.locator('.toolbar .btn-primary').click();
-    await merchant.fill('#mc-id', 'ui_multi_2');
-    await merchant.click('[data-mdialog-ok]');
-    const dlg = merchant.locator('[data-mdialog]');
-    await expect(dlg.locator('[data-addresses] [data-chain="bsc"]')).toBeVisible();
-    await expect(dlg).toContainText('同一串');
-    await merchant.keyboard.press('Escape');
     await panel.locator('[data-customer="ui_multi_2"]').click();
-    await expect(dlg.locator('[data-addresses] [data-chain="bsc"]')).toBeVisible();
+    const dlg = merchant.locator('[data-mdialog]');
+    const eth = dlg.locator('[data-addresses] [data-chain="eth"]'), bsc = dlg.locator('[data-addresses] [data-chain="bsc"]');
+    await expect(eth).toBeVisible(); await expect(bsc).toBeVisible();
+    expect((await eth.locator('.mono').textContent())!.trim()).toBe((await bsc.locator('.mono').textContent())!.trim());
+    await expect(eth).toContainText('ERC20'); await expect(bsc).toContainText('BEP20');
+    await expect(dlg.locator('[data-addresses] [data-chain="tron"]')).toContainText('第 2 批');
     await expect(dlg).toContainText('同一串');
     await merchant.keyboard.press('Escape');
   });
 
-  test('TC-W10 订单选链：可选"不指定 / 以太坊 / BSC"，TRON 灰（第 2 批）；指定 BSC 只给 BSC 地址，不指定给每条链的地址', async () => {
+  test('TC-W10 订单选链（K1）：可选"不指定 / 以太坊 / BSC"，TRON 灰（第 2 批）；不指定时不给地址（付款人选了链才生成）；指定 BSC 时生成并只给 BSC 地址', async () => {
     const create = async (no: string, chain: string) => {
       await merchant.click('[data-mtab="orders"]');
       await merchant.click('[data-mpanel="orders"] .toolbar .btn-primary');
@@ -369,18 +363,24 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
       const id = (await merchant.locator('[data-mdialog-title]').textContent())!.match(/ORD-\d{8}-[0-9A-F]{8}/)![0];
       return id;
     };
-    st.orderBsc = await create('CHAIN-BSC-1', 'bsc');
     const dlg = merchant.locator('[data-mdialog]');
-    await expect(dlg.locator('.chain-tag')).toHaveText(['BSC']);
-    await expect(dlg).toContainText(st.ev.ui_multi_1);
-    await merchant.keyboard.press('Escape');
+    // 先建不指定链的订单：客户还没有任何地址，订单里也不给地址
     st.orderAny = await create('CHAIN-ANY-1', '');
-    await expect(dlg.locator('.chain-tag', { hasText: '以太坊' })).toHaveCount(1);
-    await expect(dlg.locator('.chain-tag', { hasText: 'BSC' })).toHaveCount(1);
+    // soft：K1 没实现时这里红，但照样往下建 BSC 订单（后面的付款页用例要用）
+    await expect.soft(dlg).not.toContainText(/0x[0-9a-fA-F]{40}/);
     await merchant.keyboard.press('Escape');
+    expect.soft((await mcall('customer-addresses', undefined, '&customer_id=ui_multi_1')).body.addresses).toEqual([]);
+    // 指定 BSC：创建订单时生成 BSC 地址，只给 BSC
+    st.orderBsc = await create('CHAIN-BSC-1', 'bsc');
+    await expect(dlg.locator('.chain-tag')).toHaveText(['BSC']);
     const o = await mcall('order', undefined, `&order_no=${st.orderBsc}`);
     expect(o.body.order.chain).toBe('bsc');
     expect(o.body.order.network).toBe('BSC');
+    expect(o.body.order.address).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    st.ev.ui_multi_1 = o.body.order.address;
+    await expect(dlg).toContainText(st.ev.ui_multi_1);
+    await merchant.keyboard.press('Escape');
+    expect.soft((await mcall('customer-addresses', undefined, '&customer_id=ui_multi_1')).body.addresses.map((a: any) => a.chain)).toEqual(['bsc']);
   });
 
   test('TC-W11 付款页：没指定链时先选网络（TRON 灰）→ 显示这条链的地址和警示 → 可以换网络；指定了链时直接显示', async () => {

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { readJsonl, decodeQP, MAILS, KYB_ENV, DATA_PAY, TMP } from '../stack.mjs';
 // @ts-ignore 与后端同一份 TOTP 实现
 import { totpCode, totpStep } from '../../server/kyb/totp.js';
+import { legacyTron } from './legacy-tron';
 
 // 收付款端到端（正式构建、真实接口；数据库是内嵌 Postgres，链上用 TronGrid 替身）：
 // 后台初始化 → 钱包初始化（浏览器生成助记词，只提交公钥）→ 开通商户 → 商户设置密码和验证码 → 登录
@@ -137,9 +138,15 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
   });
 
   test('TC-P03 创建订单 → 模拟链上两笔付款 → 累计达到下限自动完成', async () => {
+    // K1：新客户不生成地址、第 1 批不提供新的 TRON 地址；这条 TRON 收款流程用已有 TRON 地址的老客户
+    await legacyTron(admin, B, 'Pay E2E Ltd', 'buyer_1', 'Buyer One');
     await merchant.click('[data-mtab="orders"]');
     await merchant.click('[data-mpanel="orders"] .toolbar .btn-primary');
-    await merchant.fill('#mo-cust', 'buyer_1'); await merchant.fill('#mo-cname', 'Buyer One'); await merchant.fill('#mo-amt', '100');
+    await merchant.fill('#mo-cust', 'buyer_1');
+    await expect(merchant.locator('#mo-cust-list .picker-opt').first()).toContainText('buyer_1');
+    await merchant.press('#mo-cust', 'ArrowDown'); await merchant.press('#mo-cust', 'Enter');
+    await expect(merchant.locator('#mo-cname')).toHaveValue('Buyer One');
+    await merchant.fill('#mo-amt', '100');
     await merchant.click('[data-mdialog-ok]');
     await expect(merchant.locator('[data-mdialog]')).toContainText('等待付款');
     const addrText = await merchant.locator('[data-mdialog] dd .mono').last().textContent();
@@ -214,6 +221,7 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
     expect((await merchant.request.get(`${B}/api/v1/balance/`)).status()).toBe(401);
     expect((await api(merchant, 'GET', 'balance/')).body.available).toBe('94.05');
     // 客户 buyer_2 先付款，再建订单：自动匹配
+    await legacyTron(admin, B, 'Pay E2E Ltd', 'buyer_2'); // K1：TRON 到账用已有 TRON 地址的老客户
     const c = (await api(merchant, 'POST', 'customers/', { customer_id: 'buyer_2', name: 'Buyer Two' })).body;
     await fake(merchant, 'tron/pay', { to: c.address, amount: 49 * U });
     await tick(merchant);
@@ -309,6 +317,7 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
 
   test('TC-P10 所有后台页面的金额：逐个打开运营后台和商户后台的每个页面，接口里没有漏转换的金额', async () => {
     // 先准备数据：新客户收到一笔 20.000001 USDT（未归集），热钱包有 USDT 和 TRX（钱包设置、提币审核会显示）
+    await legacyTron(admin, B, 'Pay E2E Ltd', 'amount_check_1'); // K1：TRON 到账用已有 TRON 地址的老客户
     const c = await api(merchant, 'POST', 'customers/', { customer_id: 'amount_check_1' });
     expect(c.status).toBe(200);
     await fake(admin, 'tron/pay', { to: c.body.address, amount: 20 * U });
