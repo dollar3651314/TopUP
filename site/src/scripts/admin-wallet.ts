@@ -56,7 +56,9 @@ export function hero(kind: 'ok' | 'warn' | 'bad', title: string, text: string | 
     action ? h('button', { type: 'button', class: 'btn btn-primary btn-lg', onclick: action.onClick }, action.label) : null);
 }
 const kv = (rows: [string, Node | string][]) => h('dl', { class: 'kv' }, ...rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
-const feeLine = (b: any) => b.fee ? `约 ${b.fee.native} ${b.fee.symbol}（${ago(b.created_at)}前估算）` : '暂时估不出（节点没响应）';
+/** "x 分钟前估算"；不到 1 分钟写"刚刚估算" */
+const estAgo = (iso: string) => (Date.now() - Date.parse(iso) < 60_000 ? '刚刚估算' : `${ago(iso)}前估算`);
+const feeLine = (b: any) => b.fee ? `约 ${b.fee.native} ${b.fee.symbol}（${estAgo(b.created_at)}）` : '暂时估不出（节点没响应）';
 /** 失败、部分成功的批次是否还要处理：之后这条链没有再凑过批（地址还没被重新列出）就算 */
 const unresolved = (b: any, all: any[]) => ['failed', 'partial'].includes(b.status) && !all.some((x) => x.chain === b.chain && Date.parse(x.created_at) > Date.parse(b.created_at));
 
@@ -85,7 +87,7 @@ export async function renderEvmSweep(ui: WalletUi): Promise<HTMLElement> {
     top = hero('bad', `${CHAIN_NAME[c.chain]} 发起账户的 ${c.operator.symbol} 不够付手续费`, `现在有 ${gasText(c.operator)}。钱都还在原地址，没有丢；补够手续费后再确认归集。`, { label: '去补手续费', onClick: () => topUpGas(ui, c) });
   } else if (problems.length) {
     const b = problems[0];
-    top = hero('bad', `归集批次 ${b.id} ${b.status === 'partial' ? '部分成功' : '失败了'}`, `${b.status === 'partial' ? '部分地址没归集成功' : b.error === 'interrupted_while_sending' ? '确认后发送时中断' : '交易没有成功'}，失败的地址已放回待归集，下一次凑批会重新列出。钱只会进冷钱包。`, { label: `看 ${b.id}`, onClick: () => batchDetail(ui, b) });
+    top = hero('bad', `归集批次 ${b.id} ${b.status === 'partial' ? '部分成功' : '失败了'}`, `${b.status === 'partial' ? '部分地址没归集成功' : b.error === 'interrupted_while_sending' ? '确认后发送时中断' : '交易没有成功'}，失败的地址已放回待归集，下一次凑批会重新列出。钱只会进冷钱包。`, { label: '看批次', onClick: () => batchDetail(ui, b) });
   } else if (waiting.length) {
     const first = waiting[0];
     top = hero('warn', `有 ${waiting.length} 个批次等你确认，合计 ${fmtUsdt(total)} USDT`,
@@ -124,7 +126,7 @@ export async function renderEvmSweep(ui: WalletUi): Promise<HTMLElement> {
         stat('未归集合计（估算）', usd(cur.estimate.total_usdt), `USDT · ${cur.estimate.address_count} 个地址`),
         stat(`达到门槛（${usd(cur.threshold_usdt)}）`, String(cur.estimate.over_threshold), `个地址 · ${usd(cur.estimate.over_threshold_usdt)} USDT`),
         h('div', { class: `stat${cur.operator?.low ? ' stat-bad' : ''}`, 'data-gas-card': cur.chain }, h('div', { class: 'k' }, '发起账户手续费币'), h('div', { class: 'v v-sm' }, gasText(cur.operator)),
-          h('div', { class: 's' }, '只付手续费，转不走钱 ', cur.operator?.configured ? h('button', { type: 'button', class: 'link-btn', onclick: () => topUpGas(ui, cur) }, '补手续费') : null))),
+          h('div', { class: 's' }, '只付手续费，转不走钱 ', cur.operator?.configured ? h('button', { type: 'button', class: `link-btn${cur.operator.low ? '' : ' link-plain'}`, onclick: () => topUpGas(ui, cur) }, '补手续费') : null))),
       r ? table(['收款地址', '客户 · 商户', '待归集 USDT（估算）', '首次归集', '状态'], r.items.map((x: any) => [
         mono(shortAddr(x.address), x.address), h('span', { class: 'cell-2' }, mono(x.customer_id), h('span', { class: 'hint muted' }, x.merchant)), usd(x.pending_usdt),
         x.first_sweep ? '是（要先部署，手续费高些）' : '不是', stateOf(x),
@@ -233,7 +235,7 @@ function confirmBatch(ui: WalletUi, b: any) {
       ['链', chainTag(b.chain)],
       ['归集', h('b', {}, `${b.address_count} 个地址，合计 ${usd(b.total_usdt)} USDT`)],
       ['钱去哪', h('span', {}, '冷钱包（parent）', h('br'), h('span', { class: 'hint muted' }, '写死在合约里，系统和服务器都改不了'))],
-      ['手续费估算', b.fee ? h('span', {}, `约 ${b.fee.native} ${b.fee.symbol}${b.fee.gas ? `（${Number(b.fee.gas).toLocaleString('en')} gas）` : ''}`, h('br'), h('span', { class: 'hint muted', 'data-fee-age': '' }, `${ago(b.created_at)}前估算（凑批时）；实际按发送时的价格`)) : '暂时估不出'],
+      ['手续费估算', b.fee ? h('span', {}, `约 ${b.fee.native} ${b.fee.symbol}${b.fee.gas ? `（${Number(b.fee.gas).toLocaleString('en')} gas）` : ''}`, h('br'), h('span', { class: 'hint muted', 'data-fee-age': '' }, `${estAgo(b.created_at)}（凑批时）；实际按发送时的价格`)) : '暂时估不出'],
       ['谁付手续费', '发起账户（服务器上，只能付手续费、转不走钱）'],
     ]),
     h('ul', { class: 'wl-checks bullets' },
@@ -365,6 +367,7 @@ export async function renderRoutes(ui: WalletUi, p: HTMLElement) {
       c.not_in_this_batch ? '—' : `${count(c, 'active')} 个在用${count(c, 'retired') ? ` · ${count(c, 'retired')} 个停用（照常入账、归集）` : ''}`,
       c.not_in_this_batch ? laterTag() : h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-switch': c.chain, disabled: !canSwitch(c), title: canSwitch(c) ? '' : '现在没有别的已接入的提供方可以切换', onclick: () => switchProvider(ui, c, r.providers) }, `切换 ${CHAIN_NAME[c.chain]} 的提供方`),
     ]), '—'),
+    r.chains.some((c: any) => !c.not_in_this_batch && !canSwitch(c)) ? h('p', { class: 'note-box', 'data-switch-why': '' }, '切换按钮现在不能点：除了合约钱包，还没有别的已接入的提供方。Cobo、Fireblocks 要先开账号、用真账号实测后才能接入。') : null,
     h('p', { class: 'hint muted' }, '切换只影响新分配的地址；老地址不变，继续扫链、入账，由原提供方归集。商户余额在 TopUP 自己的账本里，切换不动账本。'),
     h('h2', { class: 'h-sm' }, '可选的提供方'),
     h('div', { class: 'batch-grid' }, ...r.providers.map((x: any) => h('article', { class: 'card stack-sm' },
@@ -412,7 +415,7 @@ export async function walletStatus(ui: WalletUi): Promise<HTMLElement> {
     ? hero('bad', bad.map((c: any) => `${CHAIN_NAME[c.chain]}${words(c)}`).join('，'), '扫块停了到账会晚到（恢复后从停下的区块接着扫，不会漏账）；少配置、合约参数和链上不一致的链不能分配地址、不能归集。')
     : hero('ok', '每条链都正常', '扫块、合约地址配置、链上合约参数核对都正常。');
   const ck = (ok: boolean, text: string) => h('li', { class: ok ? 'y' : 'bad' }, `${text}：${ok ? '已配置' : '没配置'}`);
-  const ONCHAIN: Record<string, [string, string]> = { ok: ['y', '一致'], mismatch: ['bad', '不一致（这条链已停用，已发邮件）'], unverified: ['bad', '还没核对上（节点连不上，下一轮再核对）'] };
+  const ONCHAIN: Record<string, [string, string]> = { ok: ['y', '一致'], mismatch: ['bad', '不一致（这条链已停用，需重新部署后重启；已发邮件）'], unverified: ['bad', '还没核对上（节点连不上，下一轮再核对）'] };
   const cards = r.chains.map((c: any) => c.status === 'not_in_this_batch'
     ? h('article', { class: 'card stack-sm chain-card later', 'data-chain-card': c.chain }, h('div', { class: 'batch-head' }, chainTag(c.chain), laterTag()), h('p', { class: 'muted m0' }, '第 1 批不分配新的 TRON 地址；已有的 TRON 地址照常入账（上面"链上监控"）。第 2 批上线后这里同样显示扫块和合约配置。'))
     : h('article', { class: `card stack-sm chain-card${c.ok ? '' : ' chain-bad'}`, 'data-chain-card': c.chain },
@@ -427,7 +430,7 @@ export async function walletStatus(ui: WalletUi): Promise<HTMLElement> {
       h('ul', { class: 'wl-checks' }, ck(c.rpc, '节点'), ck(c.usdt, 'USDT 合约'), ...Object.entries(CONTRACT_NAME).map(([k, v]) => ck(c.contracts[k], v)),
         c.onchain ? h('li', { class: (ONCHAIN[c.onchain] || ONCHAIN.unverified)[0], 'data-onchain': c.onchain }, `链上核对（批量合约的冷钱包、工厂）：${(ONCHAIN[c.onchain] || ONCHAIN.unverified)[1]}${c.onchain_fields?.length ? `：${c.onchain_fields.join('、')}` : ''}`) : null,
         h('li', { class: c.operator.configured && !c.operator.low ? 'y' : 'bad' }, `发起账户（只付手续费）：${c.operator.configured ? `已配置${c.operator.gas !== null ? `，余额 ${gasText(c.operator)}` : ''}${c.operator.low ? '，不够了' : ''}` : '没配置（不能执行归集）'}`)),
-      c.config_error === 'onchain_mismatch' ? h('p', { class: 'alert m0' }, '链上批量合约的参数和 config/wallets.json 不一致，这条链已停用（不分配新地址、不凑批）。核对配置后走 PR 重新部署。')
+      c.config_error === 'onchain_mismatch' ? h('p', { class: 'alert m0' }, '链上批量合约的参数和 config/wallets.json 不一致，这条链已停用（不分配新地址、不凑批、到账暂停入账）。核对配置后走 PR 重新部署，重启服务后才会再核对、恢复。')
         : c.config_error ? h('p', { class: 'alert m0' }, '合约参数检查没通过（例如冷钱包等于批量合约），这条链先不开通。') : null,
       h('p', { class: 'hint muted m0' }, '只显示"是否已配置"，不显示具体值。')));
   return h('div', { class: 'stack', 'data-wallet-status': '' }, top, h('h2', { class: 'h-sm m0' }, '每条链'), h('div', { class: 'batch-grid' }, ...cards),
@@ -452,10 +455,10 @@ export async function walletTodoItems(ui: WalletUi): Promise<{ items: Todo[]; fa
   }
   const allB = all?.items || [];
   for (const b of probs?.items || []) if (unresolved(b, allB)) {
-    items.push({ bad: true, since: b.updated_at, text: `归集批次 ${b.id} ${b.status === 'partial' ? '部分成功' : '失败了'}`, sub: `${CHAIN_NAME[b.chain]} · ${b.error === 'interrupted_while_sending' ? '确认后发送中断超过 15 分钟，已标失败' : '失败的地址已放回待归集'}`, tab: 'p-sweep', label: `看 ${b.id}` });
+    items.push({ bad: true, since: b.updated_at, text: `归集批次 ${b.id} ${b.status === 'partial' ? '部分成功' : '失败了'}`, sub: `${CHAIN_NAME[b.chain]} · ${b.error === 'interrupted_while_sending' ? '确认后发送中断超过 15 分钟，已标失败' : '失败的地址已放回待归集'}`, tab: 'p-sweep', label: '看批次' });
   }
   for (const ch of s?.chains || []) for (const b of ch.batches || []) {
-    if (b.status === 'awaiting_approval') items.push({ bad: false, since: b.created_at, text: `确认归集 ${b.id}（${CHAIN_NAME[b.chain]}，${usd(b.total_usdt)} USDT）`, sub: `${b.address_count} 个地址${b.split_of > 1 ? ` · 超过每批上限，系统分成了 ${b.split_of} 批` : ''}`, tab: 'p-sweep', label: `去确认 ${b.id}` });
+    if (b.status === 'awaiting_approval') items.push({ bad: false, since: b.created_at, text: `确认归集 ${b.id}（${CHAIN_NAME[b.chain]}，${usd(b.total_usdt)} USDT）`, sub: `${b.address_count} 个地址${b.split_of > 1 ? ` · 超过每批上限，系统分成了 ${b.split_of} 批` : ''}`, tab: 'p-sweep', label: '去确认' });
   }
   for (const x of w?.items || []) if (x.status === 'pending') items.push({ bad: false, since: x.created_at, text: `审核提币 ${x.id}（${usd(x.amount)} USDT）`, tab: 'p-withdrawals', label: '去审核提币' });
   items.sort((a, b) => (a.bad !== b.bad ? (a.bad ? -1 : 1) : (Date.parse(a.since || '') || 0) - (Date.parse(b.since || '') || 0)));

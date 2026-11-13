@@ -49,7 +49,7 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
     db, tron, keys, ops, wallets, layer,
     v1: createApiV1({ db, keys, ops, getIp, redis: kyb.redis }), // 限流计数和开户共用同一个 Redis
     merchant: createMerchantApi({ db, keys, ops, send }),
-    pay: createPayApi({ db, layer }),
+    pay: createPayApi({ db, layer, redis: kyb.redis, getIp }), // 按 IP 限流，和开放 API 共用 Redis
     wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, notify, diskPath }), diskPath, ...gate }),
     tick: () => runTick({
       db, tron, getTarget, notify, adminUrl: `${origin}/admin/`,

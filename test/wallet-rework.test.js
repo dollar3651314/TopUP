@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { fakeEvm, setupDb } from './wallet-helpers.js';
-import { proposeSweep, approveSweep, confirmSweeps, getBatch } from '../server/wallet/sweep.js';
+import { proposeSweep, approveSweep, confirmSweeps, getBatch, reconcileReleased } from '../server/wallet/sweep.js';
 import { createEvmAdapter } from '../server/wallet/adapters/evm.js';
 import { createContractProvider } from '../server/wallet/providers/contract.js';
 import { addressFor, evmUnswept } from '../server/wallet/addresses.js';
@@ -102,12 +102,13 @@ function chainNode({ parent = SCHEME.parent, factory = SCHEME.factory, impl = SC
 }
 const adapterOf = (node) => createEvmAdapter({ chain: 'eth', rpcUrl: node.rpcUrl, fetchImpl: node.fetchImpl, usdt: USDT, decimals: 6, confirmations: 12 });
 
-test('链上核对：parent、factory、implementation 都一致 → ok；任何一项不一致 → mismatch 并写出字段名；合约不存在（调用回滚）→ mismatch；连不上 → unverified', async () => {
+test('链上核对：parent、factory、implementation 都一致 → ok；任何一项不一致 → mismatch 并写出字段名；节点报错（例如回滚、限流）、连不上 → unverified', async () => {
   assert.deepEqual(await verifyChain(adapterOf(chainNode()), SCHEME), { result: 'ok' });
   const other = '0x' + '77'.repeat(20);
   assert.deepEqual(await verifyChain(adapterOf(chainNode({ parent: other })), SCHEME), { result: 'mismatch', fields: ['parent'] });
   assert.deepEqual(await verifyChain(adapterOf(chainNode({ factory: other, impl: other })), SCHEME), { result: 'mismatch', fields: ['factory', 'implementation'] });
-  assert.equal((await verifyChain(adapterOf(chainNode({ revert: true })), SCHEME)).result, 'mismatch');
+  assert.equal((await verifyChain(adapterOf(chainNode({ revert: true })), SCHEME)).result, 'unverified', '节点报错（含限流）不下结论，下一轮再核对');
+  assert.equal((await verifyChain(adapterOf(chainNode({ parent: '0x' + '00'.repeat(20) })), SCHEME)).result, 'mismatch', '拿到的结果对不上才算不一致');
   const down = chainNode(); down.state.down = true;
   assert.deepEqual(await verifyChain(adapterOf(down), SCHEME), { result: 'unverified' });
 });
@@ -164,5 +165,38 @@ test('ETH / BSC 未归集按账本：到账合计 − 已归集；达到门槛�
   assert.equal(r.eth.over, 1);
   assert.equal(r.eth.overTotal, U(50));
   assert.equal(r.bsc.total, 0n);
+  await db.end?.();
+});
+
+test('凑批时按链上余额校正"放回待归集"：放回的地址链上已经没钱（交易后来上链了），把放回的记录改记为已归集，"待归集"不再多算；取消、作废的不动', async () => {
+  const db = await setupDb({ customers: [['m1', 'c1']] });
+  const a = '0x' + '33'.repeat(20);
+  await db.query(`insert into customer_addresses (merchant_id, customer_id, chain, provider, scheme_ver, salt, address, status) values ('m1', 'c1', 'eth', 'contract', 1, '0x1', $1, 'active')`, [a]);
+  await db.query(`insert into deposits (txid, log_index, block, time, address, amount, merchant_id, customer_id, result, chain) values ('t1', 0, 1, now(), $1, 300000000, 'm1', 'c1', 'credited', 'eth')`, [a]);
+  await db.query(`insert into wallet_sweep_batches (id, chain, provider, status, total, address_count, skipped, fee_estimate, slot, created_at, expires_at, updated_at) values ('B1', 'eth', 'contract', 'failed', 300000000, 1, '[]', '{}', '', now(), now(), now()), ('B0', 'eth', 'contract', 'cancelled', 300000000, 1, '[]', '{}', '', now(), now(), now())`);
+  await db.query(`insert into wallet_sweep_items (batch_id, chain, address, salt, amount, deploy, status, reason) values ('B0', 'eth', $1, '0x1', 300000000, true, 'released', 'cancelled'), ('B1', 'eth', $1, '0x1', 300000000, true, 'released', 'interrupted')`, [a]);
+  // 链上还有 300：不动
+  assert.deepEqual(await reconcileReleased(db, 'eth', [{ address: a, balance: U(300) }]), []);
+  assert.equal((await evmUnswept(db)).eth.total, U(300));
+  // 链上已经是 0：中断那条改记为已归集，取消那条不动
+  assert.deepEqual(await reconcileReleased(db, 'eth', [{ address: a, balance: 0n }]), [a]);
+  const items = await db.query(`select batch_id, status, reason from wallet_sweep_items order by batch_id`);
+  assert.deepEqual(items.map((i) => [i.batch_id, i.status, i.reason]), [['B0', 'released', 'cancelled'], ['B1', 'swept', 'reconciled_onchain']]);
+  assert.equal((await evmUnswept(db)).eth.total, 0n);
+  await db.end?.();
+});
+
+test('付款页接口按 IP 限流：超过每秒上限返回 429 rate_limited；没有 IP 时不限', async () => {
+  const { createPayApi, PAY_RATE_PER_SEC } = await import('../server/pay/pay-api.js');
+  const { createMemRedis } = await import('../server/kyb/memredis.js');
+  const db = await setupDb();
+  const pay = createPayApi({ db, redis: createMemRedis(), getIp: (r) => r.headers.get('x-real-ip') || '', now: () => T0 });
+  const get = (ip) => pay(new Request('https://pay.test/api/pay/?o=ORD-20261201-00000000', { headers: ip ? { 'x-real-ip': ip } : {} }));
+  for (let i = 0; i < PAY_RATE_PER_SEC; i++) assert.equal((await get('203.0.113.9')).status, 404);
+  const r = await get('203.0.113.9');
+  assert.equal(r.status, 429);
+  assert.equal((await r.json()).error.code, 'rate_limited');
+  assert.equal((await get('203.0.113.10')).status, 404, '别的 IP 不受影响');
+  assert.equal((await get('')).status, 404);
   await db.end?.();
 });

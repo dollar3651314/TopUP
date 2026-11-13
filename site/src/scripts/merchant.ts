@@ -43,7 +43,7 @@ function addressCards(list: ChainAddr[] | undefined) {
     return h('div', { class: 'addr-card', 'data-chain': ch }, chainTag(ch),
       a ? mono(a) : ch === 'tron' ? laterTag() : h('span', { class: 'muted', 'data-not-yet': '' }, '—'),
       a ? copyBtn(() => { say(tpl(c.chain.copiedNote, { net: netName(ch), std: netStd(ch) })); return a; }, tpl(c.chain.copy, { net: netName(ch) }), c.common.copied) : null,
-      h('span', { class: 'hint muted' }, a ? tpl(c.chain.only, { net: netName(ch), std: netStd(ch) }) : ch === 'tron' ? c.chain.laterNote : c.chain.notYet));
+      h('span', { class: 'hint muted' }, a ? tpl(c.chain.only, { net: netName(ch), std: netStd(ch) }) : ch === 'tron' ? c.chain.tronLater : c.chain.notYet));
   }));
   return same ? h('div', { class: 'stack-sm' }, same, grid) : grid;
 }
@@ -291,7 +291,7 @@ async function orderDetail(id: string) {
         // K1：没指定链的订单不给地址，付款人在付款页选了网络才给这条链的地址
         h('dt', {}, cd.network), h('dd', {}, o.chain ? chainTag(o.chain) : enabledChains.length ? tpl(cd.anyChain, { list: enabledChains.map((ch) => netName(ch)).join(' / ') }) : (o.network || '—')),
         h('dt', {}, cd.address), h('dd', {}, o.address ? mono(o.address) : h('span', { class: 'muted', 'data-payer-picks': '' }, cd.payerPicks))),
-      o.address ? h('p', { class: 'hint muted m0' }, tpl(cd.addressNote, { c: o.customer_id })) : null,
+      ...(o.address ? [h('p', { class: 'hint muted m0' }, tpl(cd.addressNote, { c: o.customer_id }))] : []),
       h('div', { class: 'f' }, h('span', { class: 'lbl' }, cd.payLink), h('div', { class: 'copy-row' }, mono(o.pay_url), copyBtn(() => o.pay_url, cd.copyLink, c.common.copied)), h('a', { class: 'link-copy', href: url, target: '_blank', rel: 'noopener', 'data-open-pay': '' }, cd.open + ' ↗')),
       h('h3', { class: 'h-sm m0' }, cd.matchedTitle),
       table([dc.time, dc.amount, cd.how, ''], o.deposits.map((d) => [t(d.time), usd(d.amount), (cd.types as Record<string, string>)[d.matched_by] || d.matched_by, act(d, false)]), cd.none),

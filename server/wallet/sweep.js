@@ -183,6 +183,31 @@ async function awaiting(q, chain, now) {
 }
 
 /**
+ * 按链上余额校正"放回待归集"的记录：放回的地址（发送中断、没送到节点、部分失败）其实可能已经归集了（交易后来上链），
+ * 账本估算（到账 − 已归集）就会多算。凑批时已经查了每个地址的链上余额：估算比链上余额多出来的部分，
+ * 从这个地址最近放回的记录里改记为"已归集"（reason = reconciled_onchain，不写账本，只影响"待归集"的估算）。
+ */
+export async function reconcileReleased(db, chain, enriched) {
+  const fixed = [];
+  for (const c of enriched) {
+    const [r] = await db.query(`select
+        coalesce((select sum(d.amount) from deposits d where d.chain = $1 and lower(d.address) = lower($2)), 0)::bigint dep,
+        coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = $1 and lower(i.address) = lower($2) and i.status = 'swept'), 0)::bigint swept`, [chain, c.address]);
+    let extra = BigInt(r.dep) - BigInt(r.swept) - BigInt(c.balance);
+    if (extra <= 0n) continue;
+    const released = await db.query(`select id, amount from wallet_sweep_items where chain = $1 and lower(address) = lower($2) and status = 'released'
+      and reason not in ('cancelled', 'expired') order by id desc`, [chain, c.address]);
+    for (const it of released) {
+      if (BigInt(it.amount) > extra) continue;
+      await db.query(`update wallet_sweep_items set status = 'swept', reason = 'reconciled_onchain' where id = $1 and status = 'released'`, [it.id]);
+      extra -= BigInt(it.amount);
+      fixed.push(c.address);
+    }
+  }
+  return fixed;
+}
+
+/**
  * 凑批：门槛、上限按当前设置（或传入的 limits）；没有可归集的返回 []、不发邮件。
  * 这条链已有没过期的待确认批次时返回那几批，不新建、不再发邮件。一次凑出几批也只发一封邮件。
  */
@@ -205,6 +230,7 @@ export async function proposeSweep(db, { chain, providers = {}, notify, provider
     const deployed = balance > 0n && typeof p.isDeployed === 'function' ? await p.isDeployed(chain, c.address) : false;
     return { ...c, balance, deployed, estFee: null, inBatch: inBatch.has(c.address.toLowerCase()) };
   })));
+  await reconcileReleased(db, chain, enriched).catch((e) => console.error(`[sweep] reconcile ${chain}: ${e.message}`));
   const plan = await p.planSweep(chain, enriched, lim);
   if (!plan.batches.length) return [];
 
@@ -288,13 +314,13 @@ export async function approveSweep(db, { id, actor, reason, providers = {}, now 
   } catch (e) {
     if (e?.stage === 'prepare') {
       // 交易还没签出去（例如节点连不上）：退回待确认，可以稍后再点；钱没动
-      await db.query(`update wallet_sweep_batches set status = 'awaiting_approval', error = $2, updated_at = now() where id = $1`, [id, `not_sent: ${String(e?.message || e).slice(0, 280)}`]);
+      await db.query(`update wallet_sweep_batches set status = 'awaiting_approval', error = $2, updated_at = now() where id = $1 and status = 'sending'`, [id, `not_sent: ${String(e?.message || e).slice(0, 280)}`]);
       throw new PayError('sweep_not_sent', 502);
     }
     // 节点明确拒绝（或提供方报了没归类的错）：标为失败，地址放回待归集
     await db.tx(async (t) => {
-      await t.query(`update wallet_sweep_batches set status = 'failed', error = $2, updated_at = now() where id = $1`, [id, String(e?.message || e).slice(0, 300)]);
-      await t.query(`update wallet_sweep_items set status = 'released', reason = 'send_failed' where batch_id = $1 and status = 'pending'`, [id]);
+      const done = await t.query(`update wallet_sweep_batches set status = 'failed', error = $2, updated_at = now() where id = $1 and status = 'sending' returning id`, [id, String(e?.message || e).slice(0, 300)]);
+      if (done.length) await t.query(`update wallet_sweep_items set status = 'released', reason = 'send_failed' where batch_id = $1 and status = 'pending'`, [id]);
     });
     throw new PayError('sweep_send_failed', 502);
   }
@@ -302,8 +328,10 @@ export async function approveSweep(db, { id, actor, reason, providers = {}, now 
   // 广播时连不上节点（broadcast = 'uncertain'）：交易已签名、可能已经发出，照常记"已发送"，由 confirmSweeps 按交易号查
   const uncertain = res?.broadcast === 'uncertain';
   await db.tx(async (t) => {
-    await t.query(`update wallet_sweep_batches set status = 'sent', tx_refs = $2::jsonb, error = $3, updated_at = now() where id = $1`, [id, JSON.stringify(txRefs), uncertain ? 'broadcast_uncertain' : null]);
-    await t.query(`update wallet_sweep_items set status = 'sent' where batch_id = $1 and status = 'pending'`, [id]);
+    // 只改还在"发送中"的批次：发送拖了超过 15 分钟、已被 confirmSweeps 标为失败的不再改回（只记下交易号，按日志人工核对）
+    const done = await t.query(`update wallet_sweep_batches set status = 'sent', tx_refs = $2::jsonb, error = $3, updated_at = now() where id = $1 and status = 'sending' returning id`, [id, JSON.stringify(txRefs), uncertain ? 'broadcast_uncertain' : null]);
+    if (done.length) await t.query(`update wallet_sweep_items set status = 'sent' where batch_id = $1 and status = 'pending'`, [id]);
+    else await t.query(`update wallet_sweep_batches set tx_refs = $2::jsonb, error = 'sent_after_interrupted', updated_at = now() where id = $1`, [id, JSON.stringify(txRefs)]);
   });
   return uncertain ? { status: 'sent', txRefs, broadcast: 'uncertain' } : { status: 'sent', txRefs };
 }

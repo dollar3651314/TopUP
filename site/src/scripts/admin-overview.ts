@@ -154,6 +154,16 @@ function fundsByChain(d: OverviewData) {
     return [chainTag(c), uns === null ? '—' : fmtUsdt(uns), c === 'tron' ? (hot === null ? '—' : fmtUsdt(hot)) : h('span', { class: 'muted' }, '没有（第 1 批）'),
       off ? h('span', { class: 'muted' }, '未开通') : cold === null ? '—' : fmtUsdt(cold), sum === null ? '—' : h('b', {}, fmtUsdt(sum))];
   });
+  // 显示"—"的地方写原因：哪条链的哪个余额暂时查不到（数据都回来以后才判断，加载中不算）
+  const why: string[] = [];
+  if (f.by_chain) for (const c of CHAINS) {
+    const w = f.by_chain[c], u = s.by_chain?.[c];
+    if (c !== 'tron' && u?.enabled === false) continue;
+    if (!w) continue; // 没开通的链
+    if (c === 'tron' && units(w.hot_usdt) === null) why.push('TRON 热钱包余额暂时查不到');
+    if (units(w.cold_usdt) === null) why.push(`${CHAIN_NAME[c]} 冷钱包余额暂时查不到`);
+  }
   return h('details', { class: 'funds-chains', open: true, 'data-funds-chains': '' }, h('summary', {}, '平台资产按链拆开（USDT）'),
-    table(['链', '未归集', '热钱包', '冷钱包', '合计'], rows, '—'));
+    table(['链', '未归集', '热钱包', '冷钱包', '合计'], rows, '—'),
+    why.length ? h('p', { class: 'hint neg m0', 'data-funds-why': '' }, `${why.join('；')}：对应的合计、平台资产和利润显示"—"，稍后点"刷新"再试。`) : null);
 }

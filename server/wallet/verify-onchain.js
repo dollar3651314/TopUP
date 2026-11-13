@@ -1,7 +1,8 @@
 // 启动时和看系统状态时，用 eth_call 核对链上批量合约的参数和 config/wallets.json 一致：
 //   batcher.parent() = parent（冷钱包）、batcher.factory() = factory、factory.implementationAddress() = implementation。
 // 这三项决定 CREATE2 充值地址和钱的去向；配错了算出来的地址收到的钱归集不了，所以不一致就不开通这条链（不分配地址、不凑批）并发邮件告警。
-// 节点连不上时不下结论（unverified），下一轮再核对；不一致只关这一条链，不让健康检查整体 DOWN。只返回结果，不返回地址的值。
+// 节点连不上、限流、报错时不下结论（unverified），下一轮再核对；只有拿到结果且为空或对不上才算不一致。不一致只关这一条链（停到重新部署、重启），
+// 不让健康检查整体 DOWN。只返回结果，不返回地址的值。
 import { selector } from './evm-tx.js';
 import { raiseAlert, clearAlert, CHAIN_NAMES } from './sweep.js';
 
@@ -15,9 +16,9 @@ export async function verifyChain(adapter, scheme) {
   try {
     [parent, factory] = await Promise.all([ec(scheme.batcher, 'parent()'), ec(scheme.batcher, 'factory()')]);
     impl = await ec(scheme.factory, 'implementationAddress()');
-  } catch (e) {
-    // 节点明确返回错误（例如这个地址上没有合约，调用回滚）算不一致；连不上算没核对
-    if (e?.code === 'rpc_error') return { result: 'mismatch', fields: ['batcher'] };
+  } catch {
+    // 连不上、限流、节点报错（JSON-RPC 错误）都算"还没核对上"，下一轮再核对：不能因为节点一时出错就停用整条链。
+    // 只有拿到了结果、结果是空的或地址对不上，才算不一致
     return { result: 'unverified' };
   }
   const fields = [];
@@ -36,6 +37,8 @@ export async function verifyLayer(layer, { db, notify, timeoutMs = 8000, now = D
   layer.onchain ||= {};
   const checks = Object.keys(layer.chainsConfigured || {}).map(async (chain) => {
     const c = layer.chainsConfigured[chain];
+    // 已经因为不一致停用的链：不再核对（停用到重新部署、重启为止），状态一直是 mismatch，不会再发"恢复"邮件
+    if (layer.errors?.[chain] === 'onchain_mismatch') return;
     if (c.adapter.fake) { layer.onchain[chain] = { result: 'ok', fake: true, at: new Date(now).toISOString() }; return; }
     let timer;
     const r = await Promise.race([verifyChain(c.adapter, c.scheme), new Promise((ok) => { timer = setTimeout(() => ok({ result: 'unverified' }), timeoutMs); })]).finally(() => clearTimeout(timer));
@@ -44,7 +47,7 @@ export async function verifyLayer(layer, { db, notify, timeoutMs = 8000, now = D
     if (r.result === 'mismatch') {
       layer.disableChain(chain, 'onchain_mismatch');
       if (db) await raiseAlert(db, `onchain_${chain}`, notify, `${name} 合约参数和链上不一致，已停用这条链`,
-        `${name} 链上批量合约的 ${r.fields.join('、')} 和 config/wallets.json 不一致。为了不分配收不了钱的地址，这条链已停用（不分配新地址、不凑批），其他链和收款页面不受影响。\n请核对 config/wallets.json 的 evm.${chain}，改好后走 PR 重新部署。`, { now }).catch(() => {});
+        `${name} 链上批量合约的 ${r.fields.join('、')} 和 config/wallets.json 不一致。为了不分配收不了钱的地址，这条链已停用（不分配新地址、不凑批），本链到账暂停入账（不扫块，恢复后从停下的区块接着扫，不会漏账）；其他链和收款页面不受影响。\n请核对 config/wallets.json 的 evm.${chain}，改好后走 PR 重新部署、重启服务。`, { now }).catch(() => {});
     } else if (r.result === 'ok' && db) {
       await clearAlert(db, `onchain_${chain}`, notify, `${name} 合约参数核对一致`, `${name} 链上批量合约的参数和 config/wallets.json 一致。`).catch(() => {});
     }

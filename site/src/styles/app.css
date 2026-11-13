@@ -402,3 +402,4 @@ button.chain-choice .later-tag { margin-left: auto; }
 @media (prefers-color-scheme: dark) { .st-needs_info { color: #ffa8a8; background: rgba(255, 135, 135, 0.16); } .st-submitted { color: #ffc078; background: rgba(255, 192, 120, 0.14); } }
 .status.st-bad { color: var(--danger); background: rgba(201, 42, 42, 0.12); font-weight: 700; }
 @media (prefers-color-scheme: dark) { .status.st-bad { background: rgba(255, 135, 135, 0.16); } }
+.link-btn.link-plain { color: var(--accent); }

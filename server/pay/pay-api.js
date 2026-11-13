@@ -8,13 +8,20 @@ import { json } from '../kyb/http.js';
 import { stateOf } from './matching.js';
 import { amt, iso } from './common.js';
 import { addressFor } from '../wallet/addresses.js';
+import { createRateLimiter } from './api-v1.js';
+
+/** 付款页每个 IP 每秒最多这么多次查询（页面每 5 秒查一次；同一出口 IP 后面可能有很多付款人） */
+export const PAY_RATE_PER_SEC = 20;
 
 const NETWORK = { eth: 'ETH', bsc: 'BSC', tron: 'TRON' };
 const ORDER = ['eth', 'bsc', 'tron'];
 const err = (status, code, field) => json(status, { error: { code, ...(field ? { field } : {}) } });
 
-export function createPayApi({ db, layer = null, now = () => Date.now() }) {
+export function createPayApi({ db, layer = null, now = () => Date.now(), redis = null, getIp = () => '', log = console, allow = createRateLimiter({ redis, log, prefix: 'payrl', perSec: PAY_RATE_PER_SEC }) }) {
   return async function handle(request) {
+    // 按 IP 限流（计数在 Redis，和开放 API 同一套；Redis 出错时放行）：带 chain 时会生成地址，不能让人随便刷
+    const ip = getIp(request) || '';
+    if (ip && !(await allow(`ip:${ip}`, now()))) return err(429, 'rate_limited');
     const url = new URL(request.url);
     const id = url.searchParams.get('o') || '';
     const want = url.searchParams.get('chain') || '';
