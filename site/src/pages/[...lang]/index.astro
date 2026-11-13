@@ -1,0 +1,19 @@
+---
+// 首页：第一版不做营销页，只放商户后台和开发者文档的入口
+import AppLayout from '../../layouts/AppLayout.astro';
+import { langStaticPaths, href, t, type Lang } from '../../lib/i18n';
+export const getStaticPaths = langStaticPaths;
+const { lang } = Astro.props as { lang: Lang };
+const d = t(lang);
+const other: Lang = lang === 'en' ? 'zh' : 'en';
+---
+<AppLayout lang={lang} title={d.pages.home.title} description={d.pages.home.description} switchHref={href(other, 'home')} switchLabel={d.nav.switchLabel} switchAria={d.nav.switchAria}>
+  <section class="container home">
+    <h1>{d.pages.home.heading}</h1>
+    <p class="muted">{d.pages.home.body}</p>
+    <p class="home-links">
+      <a class="btn btn-primary" href={href(lang, 'merchant')} data-merchant-login>{d.nav.merchantLogin}</a>
+      <a class="btn btn-outline" href={href(lang, 'docs')}>{d.nav.docs}</a>
+    </p>
+  </section>
+</AppLayout>

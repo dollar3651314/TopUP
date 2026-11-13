@@ -1,0 +1,30 @@
+{
+  "brand": {
+    "name": "TopUP"
+  },
+  "nav": {
+    "home": "首页",
+    "merchantLogin": "商户登录",
+    "docs": "开发者文档",
+    "switchLabel": "EN",
+    "switchAria": "Switch to English"
+  },
+  "footer": {
+    "notMainland": "TopUP 不向中国大陆居民或机构提供服务。"
+  },
+  "pages": {
+    "home": {
+      "title": "TopUP",
+      "description": "TopUP：面向商户的稳定币收款和打款。",
+      "heading": "TopUP",
+      "body": "面向商户的稳定币收款和打款。登录商户后台，或阅读开发者文档接入开放 API。"
+    },
+    "notFound": {
+      "title": "页面不存在 - TopUP",
+      "description": "您访问的页面不存在。",
+      "heading": "页面不存在",
+      "body": "您访问的页面可能已被移动。",
+      "back": "返回首页"
+    }
+  }
+}

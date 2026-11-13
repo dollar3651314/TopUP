@@ -1,0 +1,63 @@
+---
+// 全站唯一的布局（第一版不做营销页）：没有营销导航，全部 noindex。
+import '../styles/global.css';
+import '../styles/app.css';
+import Logo from '../components/Logo.astro';
+import PrototypeBanner from '../components/PrototypeBanner.astro';
+import { IS_PROTOTYPE, IS_STAGING } from '../lib/env';
+import StagingBanner from '../components/StagingBanner.astro';
+import { HTML_LANG, href, t, type Lang } from '../lib/i18n';
+interface Props {
+  lang: Lang;
+  title: string;
+  description?: string;
+  /** 右上角文字 */
+  badge?: string;
+  /** 语言切换目标地址（后台不传，不显示切换） */
+  switchHref?: string;
+  switchLabel?: string;
+  switchAria?: string;
+}
+const { lang, title, description = '', badge, switchHref, switchLabel, switchAria } = Astro.props;
+const d = t(lang);
+---
+<!doctype html>
+<html lang={HTML_LANG[lang]}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    {description && <meta name="description" content={description} />}
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta name="theme-color" content="#0B1F3A" />
+  </head>
+  <body class="app-body">
+    {IS_PROTOTYPE && <PrototypeBanner lang={lang} />}
+    {IS_STAGING && <StagingBanner lang={lang} />}
+    <header class="app-header">
+      <div class="container bar">
+        <a class="brand" href={href(lang, 'home')} aria-label={`TopUP - ${d.nav.home}`}><Logo size={28} /></a>
+        <div class="right">
+          {badge && <span class="lock">{badge}</span>}
+          {switchHref && <a class="lang" href={switchHref} data-keep-query aria-label={switchAria}>{switchLabel}</a>}
+        </div>
+      </div>
+    </header>
+    <main id="main" class="app-main">
+      <slot />
+    </main>
+    <footer class="app-footer">
+      <div class="container">
+        {d.footer.notMainland}
+      </div>
+    </footer>
+  </body>
+</html>
+<script>
+  // 语言切换时保留链接里的令牌参数（?t=...）
+  for (const a of document.querySelectorAll<HTMLAnchorElement>('a[data-keep-query]')) {
+    a.href = a.getAttribute('href') + location.search;
+  }
+</script>

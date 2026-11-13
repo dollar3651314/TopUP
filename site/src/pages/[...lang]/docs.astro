@@ -1,0 +1,233 @@
+---
+// 开发者文档（英文为主，同时提供中文）。接口定义以这里为准；正式开发时如有调整，同步更新本页面。
+import AppLayout from '../../layouts/AppLayout.astro';
+import { langStaticPaths, type Lang } from '../../lib/i18n';
+// 示例代码放在单独的文件里，页面原样显示；端到端测试会实际运行它们
+import signNode from '../../docs/sign-request.mjs?raw';
+import signPy from '../../docs/sign_request.py?raw';
+import cbVerify from '../../docs/verify-callback.mjs?raw';
+// 接口的字段说明：test/docs-reference.test.js 逐个调用接口，检查实际返回的字段和这份说明一致
+import { ENDPOINTS, OBJECTS, EVENTS, EVENT_ENVELOPE, ERRORS, TYPES, returnFields } from '../../docs/api-reference.mjs';
+export const getStaticPaths = langStaticPaths;
+const { lang } = Astro.props as { lang: Lang };
+const en = lang === 'en';
+const other: Lang = en ? 'zh' : 'en';
+const base = (l: Lang) => (l === 'en' ? '/' : '/zh/');
+const T = (e: string, z: string) => (en ? e : z);
+
+const toc = [
+  ['overview', T('Overview', '概览')], ['auth', T('Authentication', '请求签名')], ['orders', T('Orders', '订单收款')], ['customers', T('Customers', '客户')], ['matching', T('Matching rules', '匹配规则')],
+  ['balance', T('Balance & ledger', '余额与账本')], ['withdrawals', T('Withdrawals', '提币')], ['callbacks', T('Callbacks', '回调')], ['reference', T('API reference', '接口详情')], ['errors', T('Errors', '错误码')], ['sandbox', T('Sandbox', '沙箱')],
+];
+const L = (x: [string, string]) => (en ? x[0] : x[1]);
+const anchor = (e: { method: string; path: string }) => `ep-${e.method.toLowerCase()}-${e.path.replace(/\W+/g, '-').replace(/-+$/, '')}`;
+type Field = [string, string, [string, string], boolean?];
+const fieldRows = (fields: Field[]) => fields.map(([n, t, d, nullable]) => ({ n, t: L(TYPES[t as keyof typeof TYPES] || [t, t]), d: L(d), nullable: !!nullable }));
+const nullNote = T('may be null', '可能为 null');
+const orderReq = `POST /api/v1/orders/
+{
+  "customer_id": "user_88213",          // required: your own ID for this customer
+  "customer_name": "Lin Trading",       // optional, used only if the customer is new
+  "customer_email": "lin@lintrading.example",
+  "merchant_order_no": "ACME-88513",
+  "amount": "100.00"
+}`;
+const orderRes = `{
+  "order_no": "ORD-20260929-0413",
+  "merchant_order_no": "ACME-88513",
+  "customer_id": "user_88213",
+  "amount": "100.00",
+  "matched": "0.00",
+  "address": "TMa7yK2d9Qp4XvB8sN1cF6rH3wZ5jL0eUt",   // the customer's permanent address
+  "network": "TRON",
+  "token": "USDT",
+  "status": "pending",
+  "created_at": "2026-09-29T09:00:00.000Z",
+  "expires_at": "2026-09-29T09:30:00.000Z",
+  "deposits": [],
+  "pay_url": "https://{BASE_URL}/pay/ORD-20260929-0413/"
+}`;
+const addrReq = `POST /api/v1/customers/
+{ "customer_id": "user_88213", "name": "Lin Trading", "email": "lin@lintrading.example" }
+
+→ {
+  "customer_id": "user_88213", "name": "Lin Trading", "email": "lin@lintrading.example", "remark": "",
+  "address": "TXk8fQ2m9sR7ZcY1hN4vB6pW3aLd5Z3wQe",
+  "total": "0.00", "count": 0, "fees": "0.00", "unmatched": "0.00",
+  "last_payment_at": null, "created_at": "2026-09-11T02:10:00.000Z"
+}`;
+const wdReq = `POST /api/v1/withdrawals/
+{
+  "kind": "payout",              // "payout" = to your customer, "cashout" = to your registered wallet
+  "customer_id": "user_88213",   // optional, for payouts
+  "to": "TXk8fQ2m9sR7ZcY1hN4vB6pW3aLd5Z3wQe",
+  "amount": "1000.00",
+  "merchant_ref": "PAYOUT-7781"
+}
+
+→ {
+  "withdrawal_no": "WD-20260929-7F3A21", "kind": "payout", "customer_id": "user_88213",
+  "to": "TXk8fQ2m9sR7ZcY1hN4vB6pW3aLd5Z3wQe", "amount": "1000.00", "fee": "2.00",   // 1002.00 is frozen
+  "status": "pending", "txid": null, "reason": null, "merchant_ref": "PAYOUT-7781", "source": "api",
+  "created_at": "2026-09-29T09:12:00.000Z"
+}`;
+const cbBody = `POST https://your-server.example/callback
+X-TopUP-Timestamp: 1790665800
+X-TopUP-Signature: 5f1c…
+
+{
+  "id": "evt_9f2a02",
+  "type": "order.matched",       // deposit | order.matched | withdrawal.updated
+  "created_at": "2026-09-29T09:10:03Z",
+  "data": {
+    "order_no": "ORD-20260929-0409",
+    "merchant_order_no": "ACME-88509",
+    "customer_id": "user_88213",
+    "status": "completed",       // pending | partial | completed | overpaid | expired | expired_partial
+    "amount": "500.00",
+    "matched": "500.00",
+    "created_at": "2026-09-29T09:05:00.000Z",
+    "expires_at": "2026-09-29T09:35:00.000Z",
+    "deposits": [{ "id": "1042", "txid": "a3c1…", "amount": "500.00", "matched_by": "deposit", "time": "2026-09-29T09:10:00.000Z" }],
+    "manual": false
+  }
+}`;
+---
+<AppLayout lang={lang} title={T('Developer docs - TopUP', '开发者文档 - TopUP')} badge={T('Developer docs', '开发者文档')} switchHref={`${base(other)}docs/`} switchLabel={en ? '中文' : 'EN'} switchAria={en ? '切换到中文' : 'Switch to English'}>
+  <div class="container docs">
+    <nav class="docs-toc" aria-label="Contents">
+      {toc.map(([id, name]) => <a href={`#${id}`}>{name}</a>)}
+    </nav>
+    <article class="docs-body">
+      <h1>{T('TopUP API', 'TopUP 开放 API')}</h1>
+      <p class="muted">{T('Version 1. Every field in the API reference is checked automatically against the implementation, so the reference and the API cannot drift apart.', '第 1 版。"接口详情"里的每个字段都由自动测试和实际接口逐一核对，文档和接口不会不一致。')}</p>
+
+      <h2 id="overview">{T('Overview', '概览')}</h2>
+      <ul>
+        <li>{T('Network and token: USDT on TRON (TRC20) only. Amounts are decimal strings with up to 6 decimals, e.g. "100.5".', '网络和币种：只支持 TRON 上的 USDT（TRC20）。金额用字符串表示，最多 6 位小数，例如 "100.5"。')}</li>
+        <li>{T('Base URL: ', '接口地址：')}<code>{'https://{BASE_URL}/api/v1/'}</code>{T(' — every path ends with "/". Requests without the trailing slash are redirected, which some HTTP clients do not follow for POST.', '，所有路径都以 "/" 结尾。不带结尾斜杠的请求会被跳转，有些 HTTP 工具在 POST 被跳转时会出错。')}</li>
+        <li>{T('Collect by customer: each of your customers gets one permanent address (deposit callbacks). With order mode on, create orders for a customer and deposits are matched to them automatically (order-matched callbacks).', '按客户收款：你的每个客户有一个永久地址（发到账通知）。开启订单模式后，可以给客户创建订单，系统自动把到账匹配到订单（发订单匹配通知）。')}</li>
+        <li>{T('A deposit counts after 19 confirmations (about 1 minute). Callbacks are normally sent within 2 minutes of payment.', '到账达到 19 个确认（大约 1 分钟）后才算入账，一般在付款后 2 分钟内发出回调。')}</li>
+        <li>{T('Every withdrawal is reviewed manually. Working hours are 8:00–23:00 (UTC+8): requests in working hours are processed within 1 hour; others at the start of the next working period.', '每一笔提币都经过人工审核。工作时间为东八区 8:00–23:00：工作时间内的申请 1 小时内处理，其余的顺延到下一个工作时间。')}</li>
+      </ul>
+      <div class="table-scroll"><table class="data-table">
+        <thead><tr><th>{T('Endpoint', '接口')}</th><th>{T('Purpose', '用途')}</th></tr></thead>
+        <tbody>{ENDPOINTS.map((e) => <tr><td><span class={`method ${e.method === 'POST' ? 'post' : ''}`}>{e.method}</span><a href={`#${anchor(e)}`}><code>{e.path}</code></a></td><td>{L(e.title as [string, string])}</td></tr>)}</tbody>
+      </table></div>
+
+      <h2 id="auth">{T('Authentication', '请求签名')}</h2>
+      <p>{T('Every request carries three headers. The Secret is shown once in the dashboard (API settings); keep it on your server only.', '每个请求都要带上三个请求头。Secret 在商户后台的"API 设置"里生成，只显示一次，请只保存在你的服务器上。')}</p>
+      <div class="table-scroll"><table class="data-table">
+        <thead><tr><th>Header</th><th>{T('Value', '内容')}</th></tr></thead>
+        <tbody>
+          <tr><td><code>X-TopUP-Key</code></td><td>{T('Your API Key', '你的 API Key')}</td></tr>
+          <tr><td><code>X-TopUP-Timestamp</code></td><td>{T('Unix time in seconds; must be within 5 minutes of server time', 'Unix 时间戳（秒），和服务器时间相差不能超过 5 分钟')}</td></tr>
+          <tr><td><code>X-TopUP-Signature</code></td><td>{T('hex( HMAC-SHA256( Secret, timestamp + "\\n" + METHOD + "\\n" + path_and_query + "\\n" + hex(SHA-256(body)) ) ) — use an empty body for GET', 'hex( HMAC-SHA256( Secret, 时间戳 + "\\n" + 请求方法 + "\\n" + 路径和查询参数 + "\\n" + hex(SHA-256(请求体)) ) )；GET 请求的请求体为空')}</td></tr>
+          <tr><td><code>Idempotency-Key</code></td><td>{T('Required on every POST (8–128 characters: letters, digits and _ . : -; a UUID works). Retrying with the same key and body returns the first result instead of creating a duplicate (kept 24 hours). A request that failed does not use up the key.', '每个 POST 请求都必须带上（8 到 128 位，可用字母、数字和 _ . : -，用 UUID 即可）。用同一个 Key 和同样的内容重试，会返回第一次的结果，不会重复创建（保留 24 小时）。失败的请求不占用这个 Key。')}</td></tr>
+        </tbody>
+      </table></div>
+      <h3>Node.js</h3>
+      <pre><code>{signNode}</code></pre>
+      <h3>Python</h3>
+      <pre><code>{signPy}</code></pre>
+
+      <h2 id="orders">{T('Orders', '订单收款')}</h2>
+      <pre><code>{orderReq}</code></pre>
+      <pre><code>{orderRes}</code></pre>
+      <ul>
+        <li>{T('customer_id is required. A new customer_id creates the customer and its permanent address. merchant_order_no must be unique in your account.', 'customer_id 必填；新的 customer_id 会自动创建客户和永久地址。merchant_order_no 在你的账户里不能重复。')}</li>
+        <li>{T('The expiry time and matching thresholds are set for your account by the platform (shown in API settings). Orders require order mode; otherwise the endpoint returns 403 order_mode_disabled.', '过期时间和匹配阈值由平台为你的账户设置（在"API 设置"里可以看到）。创建订单需要开启订单模式，否则返回 403 order_mode_disabled。')}</li>
+        <li>{T('Send your customer to pay_url, or show the address yourself.', '可以把 pay_url 发给付款方，也可以自己展示收款地址。')}</li>
+        <li>{T('The response can already show status completed if earlier deposits from this customer matched when the order was created. See Matching rules.', '如果创建时就匹配到了这个客户之前的到账，返回的状态可能已经是 completed，见"匹配规则"。')}</li>
+      </ul>
+
+      <h2 id="customers">{T('Customers', '客户')}</h2>
+      <pre><code>{addrReq}</code></pre>
+      <ul>
+        <li>{T('Each customer has one permanent address. Every payment to it belongs to that customer, with or without an order. customer_id cannot be changed.', '每个客户一个永久地址，转到这个地址的钱都算这个客户的，不论有没有订单。customer_id 不能修改。')}</li>
+        <li>{T('Payments under 1 USDT are not credited, not matched, trigger no callback and do not appear in your deposits or exports (they are usually spam "dust" transfers).', '低于 1 USDT 的付款不入账、不匹配、不发回调，也不会出现在你的到账明细和导出里（这类付款通常是垃圾"灰尘"转账）。')}</li>
+        <li>{T('customers/stats/ returns received, count, fees and unmatched for a period.', 'customers/stats/ 返回某个时间段的收款合计、笔数、手续费和未匹配金额。')}</li>
+      </ul>
+
+      <h2 id="matching">{T('Matching rules', '匹配规则')}</h2>
+      <p>{T('Matching only links deposits to orders; it never changes your balance. It happens only within the same customer, in both directions:', '匹配只是把到账和订单关联起来，不会改变余额；只在同一个客户内部进行，两个方向都会触发：')}</p>
+      <ul>
+        <li>{T('Deposit first reaches an open order: the deposit goes to the open order where the running total lands between the lower (L) and upper (H) thresholds; otherwise to the oldest open order.', '订单在先、到账在后：到账匹配给"加上这笔后累计落在下限 L 和上限 H 之间"的未完成订单；都不满足时，匹配最早创建的未完成订单。')}</li>
+        <li>{T('Order created after deposits: unmatched deposits from the look-back window are added from the oldest; if the total reaches L without exceeding H they are matched, otherwise none are.', '到账在先、订单在后：从回看时间内最早的未匹配到账开始累计，达到 L 且不超过 H 时匹配，否则一笔都不匹配。')}</li>
+        <li>{T('Status: total < L = partial (keeps waiting), L ≤ total ≤ H = completed, total > H = overpaid; at expiry an order below L becomes expired (nothing received) or expired_partial.', '状态：累计 < L 为 partial（继续等待），L ≤ 累计 ≤ H 为 completed，累计 > H 为 overpaid；过期时还没达到 L 的订单变为 expired（没有收到）或 expired_partial。')}</li>
+        <li>{T('Payments after expiry stay unmatched; match them manually with orders/match/ if needed. Avoid two open orders with similar amounts for the same customer.', '过期后才到的钱记为未匹配，需要时用 orders/match/ 手动匹配。尽量不要让同一个客户同时有两个金额接近的未完成订单。')}</li>
+      </ul>
+
+      <h2 id="balance">{T('Balance & ledger', '余额与账本')}</h2>
+      <p>{T('GET balance/ returns { "available": "48215.40", "frozen": "1002.00" }. The ledger is append-only; each entry has type deposit, fee_in, freeze, unfreeze, withdraw or fee_out. Lists are paginated with cursor.', 'GET balance/ 返回 { "available": "48215.40", "frozen": "1002.00" }。账本只追加，每条记录的类型为 deposit、fee_in、freeze、unfreeze、withdraw、fee_out 之一。列表用 cursor 翻页。')}</p>
+
+      <h2 id="withdrawals">{T('Withdrawals', '提币')}</h2>
+      <pre><code>{wdReq}</code></pre>
+      <ul>
+        <li>{T('API withdrawals require an IP whitelist (API settings). Without one, the endpoint returns 403 ip_not_allowed.', 'API 提币需要先在"API 设置"里设置 IP 白名单；没有白名单时返回 403 ip_not_allowed。')}</li>
+        <li>{T('Amount + fee is frozen on submit and released if the request is rejected or cancelled.', '提交时冻结"金额 + 手续费"，被驳回或取消时解冻。')}</li>
+        <li>{T('Status: pending → approved → broadcast → completed, or rejected / cancelled / failed. Each change sends a withdrawal.updated callback.', '状态：pending → approved → broadcast → completed，或 rejected / cancelled / failed。每次变化都发 withdrawal.updated 回调。')}</li>
+      </ul>
+
+      <h2 id="callbacks">{T('Callbacks', '回调')}</h2>
+      <pre><code>{cbBody}</code></pre>
+      <p>{T('Signature: hex( HMAC-SHA256( Secret, timestamp + "\\n" + raw_body ) ). Reply with any 2xx status. Otherwise we retry 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and 24 h after the first attempt, then stop; you can resend from the dashboard. The same event can arrive more than once: deduplicate by id.', '签名：hex( HMAC-SHA256( Secret, 时间戳 + "\\n" + 原始请求体 ) )。收到后请返回任意 2xx 状态码；否则我们在第一次发送之后的 1 分钟、5 分钟、30 分钟、2 小时、6 小时、12 小时、24 小时重试，然后停止，你可以在商户后台手动重发。同一个事件可能收到不止一次，请按 id 去重。')}</p>
+      <pre><code>{cbVerify}</code></pre>
+      <h3>{T('Callback body', '回调内容')}</h3>
+      <div class="table-scroll"><table class="data-table">
+        <thead><tr><th>{T('Field', '字段')}</th><th>{T('Type', '类型')}</th><th>{T('Description', '说明')}</th></tr></thead>
+        <tbody>{fieldRows(EVENT_ENVELOPE as Field[]).map((f) => <tr><td><code>{f.n}</code></td><td>{f.t}</td><td>{f.d}</td></tr>)}</tbody>
+      </table></div>
+      {EVENTS.map((ev) => (
+        <>
+          <h3><code>{ev.type}</code></h3>
+          <p>{L(ev.when as [string, string])}{T('. data fields:', '。data 的字段：')}</p>
+          <div class="table-scroll"><table class="data-table">
+            <thead><tr><th>{T('Field', '字段')}</th><th>{T('Type', '类型')}</th><th>{T('Description', '说明')}</th></tr></thead>
+            <tbody>{fieldRows([...ev.data.flatMap((n) => OBJECTS[n as keyof typeof OBJECTS]), ...((ev as any).extra || [])] as Field[]).map((f) => <tr><td><code>{f.n}</code></td><td>{f.t}</td><td>{f.d}{f.nullable ? `（${nullNote}）` : ''}</td></tr>)}</tbody>
+          </table></div>
+        </>
+      ))}
+
+      <h2 id="reference">{T('API reference', '接口详情')}</h2>
+      <p>{T('Amounts are decimal strings in USDT (e.g. "100.50"); times are ISO 8601 in UTC. Lists return { items, next_cursor }: pass next_cursor as cursor to get the next page.', '金额是 USDT 的字符串（例如 "100.50"），时间是 UTC 的 ISO 8601 格式。列表接口返回 { items, next_cursor }：把 next_cursor 作为 cursor 传入，取下一页。')}</p>
+      <h3>OrderDeposit</h3>
+      <p>{T('Used in the deposits array of an order.', '订单里 deposits 数组的每一项。')}</p>
+      <div class="table-scroll"><table class="data-table">
+        <thead><tr><th>{T('Field', '字段')}</th><th>{T('Type', '类型')}</th><th>{T('Description', '说明')}</th></tr></thead>
+        <tbody>{fieldRows(OBJECTS.OrderDeposit as Field[]).map((f) => <tr><td><code>{f.n}</code></td><td>{f.t}</td><td>{f.d}</td></tr>)}</tbody>
+      </table></div>
+      {ENDPOINTS.map((e: any) => (
+        <section class="ep" id={anchor(e)}>
+          <h3><span class={`method ${e.method === 'POST' ? 'post' : ''}`}>{e.method}</span><code>{`/api/v1/${e.path}`}</code> · {L(e.title)}</h3>
+          {e.note && <p>{L(e.note)}</p>}
+          {[['query', T('Query parameters', '查询参数')], ['body', T('Request body (JSON)', '请求体（JSON）')]].map(([k, label]) => e[k]?.length ? (
+            <>
+              <p class="ep-label">{label}</p>
+              <div class="table-scroll"><table class="data-table">
+                <thead><tr><th>{T('Field', '字段')}</th><th>{T('Type', '类型')}</th><th>{T('Required', '必填')}</th><th>{T('Description', '说明')}</th></tr></thead>
+                <tbody>{e[k].map(([n, t, req, d]: any) => <tr><td><code>{n}</code></td><td>{L(TYPES[t as keyof typeof TYPES])}</td><td>{req ? T('Yes', '是') : T('No', '否')}</td><td>{L(d)}</td></tr>)}</tbody>
+              </table></div>
+            </>
+          ) : null)}
+          <p class="ep-label">{e.list ? T('Response: { items, next_cursor }; each item:', '返回：{ items, next_cursor }，每一项的字段：') : T('Response', '返回')}</p>
+          <div class="table-scroll"><table class="data-table">
+            <thead><tr><th>{T('Field', '字段')}</th><th>{T('Type', '类型')}</th><th>{T('Description', '说明')}</th></tr></thead>
+            <tbody>{fieldRows(returnFields(e) as Field[]).map((f) => <tr><td><code>{f.n}</code></td><td>{f.t}</td><td>{f.d}{f.nullable ? `（${nullNote}）` : ''}</td></tr>)}</tbody>
+          </table></div>
+          {e.errors?.length ? <p class="ep-label">{T('Errors: ', '可能的错误：')}{e.errors.map((c: string, i: number) => <>{i ? '、' : ''}<code>{c}</code></>)}</p> : null}
+        </section>
+      ))}
+
+      <h2 id="errors">{T('Errors', '错误码')}</h2>
+      <p>{T('Errors return { "error": { "code": "…", "message": "…", "field": "…" } }.', '出错时返回 { "error": { "code": "…", "message": "…", "field": "…" } }。')}</p>
+      <div class="table-scroll"><table class="data-table">
+        <thead><tr><th>HTTP</th><th>code</th><th>{T('Meaning', '含义')}</th></tr></thead>
+        <tbody>{ERRORS.map(([s, code, d]) => <tr><td>{s}</td><td><code>{code}</code></td><td>{L(d as [string, string])}</td></tr>)}</tbody>
+      </table></div>
+
+      <h2 id="sandbox">{T('Sandbox', '沙箱')}</h2>
+      <p>{T('A sandbox is not available yet. During the early-access period, integrate on production with small amounts (for example 1 USDT).', '暂时不提供沙箱。试用阶段请在正式环境用小金额（例如 1 USDT）联调。')}</p>
+    </article>
+  </div>
+</AppLayout>

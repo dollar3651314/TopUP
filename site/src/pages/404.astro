@@ -1,0 +1,18 @@
+---
+import AppLayout from '../layouts/AppLayout.astro';
+import { t, href } from '../lib/i18n';
+const en = t('en').pages.notFound;
+const zh = t('zh').pages.notFound;
+---
+<AppLayout lang="en" title={en.title} description={en.description}>
+  <section class="container nf">
+    <h1>{en.heading}</h1>
+    <p class="muted">{en.body}</p>
+    <p><a class="btn btn-primary" href={href('en', 'home')}>{en.back}</a></p>
+    <div lang="zh-Hans">
+      <h2>{zh.heading}</h2>
+      <p class="muted">{zh.body}</p>
+      <p><a class="btn btn-outline" href={href('zh', 'home')}>{zh.back}</a></p>
+    </div>
+  </section>
+</AppLayout>

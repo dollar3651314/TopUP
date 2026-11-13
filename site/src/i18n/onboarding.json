@@ -1,0 +1,560 @@
+{
+  "en": {
+    "meta": {
+      "title": "Business onboarding - TopUP",
+      "description": "Complete your TopUP business onboarding (KYB)."
+    },
+    "header": {
+      "secure": "Secure onboarding",
+      "switch": "中文",
+      "switchAria": "切换到中文"
+    },
+    "intro": {
+      "title": "Business onboarding",
+      "body": "Please complete all four steps and upload an identity document for each person. You can save at any time and continue later using the same link.",
+      "company": "Application for",
+      "ref": "Reference",
+      "expires": "Link valid until"
+    },
+    "nav": {
+      "back": "Back",
+      "next": "Save & continue",
+      "save": "Save",
+      "saved": "Saved",
+      "submit": "Submit application",
+      "stepOf": "Step {n} of {total}"
+    },
+    "required": "Required",
+    "optional": "optional",
+    "select": "Select...",
+    "other": "Please specify",
+    "yes": "Yes",
+    "no": "No",
+    "done": {
+      "title": "Application submitted",
+      "body": "Thank you. We have received your application and will review it shortly. We will contact you by email if anything else is needed.",
+      "readonly": "This application can no longer be edited."
+    },
+    "prototype": {
+      "demo": "Demo data"
+    },
+    "locked": "This section does not need changes. Only the sections requested by our team can be edited.",
+    "steps": [
+      "Company",
+      "People",
+      "Wallet",
+      "Declaration"
+    ],
+    "s1": {
+      "title": "1. Company information",
+      "legalName": "Full legal name of entity",
+      "tradingName": "Registered trading name(s) / brand(s)",
+      "legalForm": "Legal form / entity type",
+      "legalFormHint": "As shown on the certificate of incorporation or registration, e.g. IBC, Ltd.",
+      "regNumber": "Registration / incorporation number",
+      "incDate": "Date of incorporation",
+      "incPlace": "Country & place of incorporation",
+      "regAddress": "Registered address",
+      "physAddress": "Physical address",
+      "sameAddress": "Same as registered address",
+      "nature": "Nature of business",
+      "natureOptions": {
+        "export": "Export",
+        "manufacturing": "Manufacturing",
+        "b2b": "Cross-border B2B trade",
+        "cfd": "CFD trading",
+        "securities": "Securities and investment trading",
+        "fx": "Foreign exchange and financial market trading",
+        "other": "Other"
+      },
+      "purpose": "Purpose of the business relationship with TopUP",
+      "purposeOptions": {
+        "crypto": "Accepting crypto payments from customers",
+        "exchange": "Facilitating crypto-to-fiat or fiat-to-crypto payments",
+        "deposits": "Processing client deposits and withdrawals",
+        "other": "Other payment-related activities"
+      },
+      "purposeHint": "Select all that apply.",
+      "volume": "Expected transaction volume (per month, USD)",
+      "volumeOptions": {
+        "lt50k": "Less than 50,000",
+        "50k-100k": "50,000 to 100,000",
+        "100k-500k": "100,001 to 500,000",
+        "gt500k": "More than 500,000"
+      },
+      "volumeAmount": "Estimated monthly amount (USD)",
+      "currencies": "Currencies / digital assets expected to be used",
+      "currencyOptions": {
+        "usd": "USD",
+        "eur": "EUR",
+        "usdt": "USDT",
+        "usdc": "USDC",
+        "btc": "BTC",
+        "eth": "ETH",
+        "other": "Other"
+      },
+      "markets": "Target markets",
+      "marketOptions": {
+        "europe": "Europe",
+        "na": "North America",
+        "latam": "LATAM",
+        "uk": "UK",
+        "me": "Middle East",
+        "apac": "APAC",
+        "other": "Other"
+      },
+      "sanctions": "Does the company expect any direct or indirect transactions involving sanctioned countries/territories or sanctioned persons?",
+      "sanctionsDetails": "Please provide the relevant jurisdictions, nature of activity and expected transaction volume.",
+      "contactTitle": "Company contact details",
+      "website": "Official website / domain(s)",
+      "email": "Company email",
+      "phone": "Contact number (with country code)",
+      "docsTitle": "Company documents (optional)",
+      "docsHint": "You can upload: certificate of incorporation, certificate of incumbency / good standing or commercial registry extract, articles of association, register of shareholders / ownership chart, company proof of address, organisation chart, regulatory licence or legal opinion, board resolution / power of attorney, bank account confirmation, financial statements, AML policy summary, etc. These are optional — we will contact you if anything else is needed. PDF, JPG or PNG, up to 10 MB each, up to 20 files.",
+      "docsRow": "Company documents"
+    },
+    "s2": {
+      "person": "Person",
+      "add": "Add a person",
+      "remove": "Remove",
+      "roles": "Role(s)",
+      "fullName": "Full legal name",
+      "dob": "Date of birth",
+      "nationality": "Nationality",
+      "address": "Residential address",
+      "ownershipPct": "Ownership (%)",
+      "votingPct": "Voting rights (%)",
+      "pctHint": "UBOs only. Enter 0–100. If ownership and voting rights are the same, enter the same number.",
+      "pep": "Is this person a Politically Exposed Person (PEP), or a family member or close associate of a PEP?",
+      "pepDetails": "Please provide the official title/position and public function, or the nature of the relationship together with the PEP's full name and title.",
+      "email": "Email",
+      "phone": "Contact number (with country code)",
+      "title": "2. People: directors, UBOs, signatories and contact person",
+      "body": "Add every director, ultimate beneficial owner (25% or more ownership or control), authorized signatory and the authorized contact person. If one person holds several roles, add them once and tick all roles. At least one director and one UBO, and exactly one authorized contact person, are required. Our account activation email will be sent to the authorized contact person.",
+      "roleOptions": {
+        "director": "Director",
+        "ubo": "UBO",
+        "signatory": "Authorized signatory",
+        "contact": "Authorized contact person"
+      },
+      "idType": "ID document type",
+      "idTypeOptions": {
+        "passport": "Passport",
+        "id_card": "National ID card"
+      },
+      "idNo": "ID document number",
+      "idCountry": "Issuing country",
+      "idExpiry": "Expiry date",
+      "idDoc": "Identity document (passport or ID card)",
+      "idDocHint": "A clear colour copy. For ID cards, upload both sides. Up to 3 files.",
+      "contactHint": "Required for the authorized contact person."
+    },
+    "s3": {
+      "title": "3. Virtual asset wallet authorization",
+      "body": "This declaration is required before we can process deposits into, or withdrawals to, your virtual asset wallet.",
+      "clientName": "Full legal name",
+      "email": "Email",
+      "wallet": "Wallet address",
+      "network": "Blockchain / network",
+      "networkOptions": {
+        "tron": "TRON",
+        "ethereum": "Ethereum",
+        "other": "Other"
+      },
+      "use": "Intended use of wallet",
+      "useOptions": {
+        "deposit": "Deposit",
+        "withdrawal": "Withdrawal",
+        "both": "Both"
+      },
+      "ownershipTitle": "Declaration of ownership",
+      "ownership": [
+        "I am the sole owner of, and have full and exclusive control over, the private keys of the wallet above.",
+        "I have not authorised any other person to access or control this wallet on my behalf.",
+        "I authorise TopUP to process deposits and/or withdrawals to and from this wallet for the purpose(s) indicated above.",
+        "The information in this form is true, accurate and complete, and I will promptly notify TopUP of any change.",
+        "I understand that false or misleading information may result in rejection, delay or refusal, and may be reported to the relevant authorities as required by law."
+      ],
+      "ownershipCheck": "I confirm the declaration of ownership above.",
+      "riskTitle": "Risk acknowledgement",
+      "risk": [
+        "Virtual asset transactions are recorded on public blockchains and, once submitted, cannot be reversed, cancelled or recovered by TopUP, including transactions sent to an incorrect address.",
+        "I am responsible for the accuracy of the wallet information and for safeguarding the private keys and credentials of the wallet.",
+        "Where a loss results from inaccurate wallet information or my failure to safeguard access, I agree to bear that loss and to indemnify TopUP, except to the extent caused by TopUP's own negligence, wilful misconduct or breach of applicable law.",
+        "Deposits and withdrawals are subject to TopUP's identity verification and AML checks, and may be delayed, declined or reported as required by law."
+      ],
+      "riskCheck": "I acknowledge the risks above.",
+      "prefill": "Pre-filled from step 1; you can change it."
+    },
+    "s4": {
+      "title": "4. Declaration and signature",
+      "declaration": "I/We confirm that the information and documents provided are complete and accurate to the best of my/our knowledge. I/We undertake to notify TopUP of any material changes to the information provided.",
+      "repName": "Name of authorized representative",
+      "position": "Position / role",
+      "confirm": "I confirm the declaration above.",
+      "signature": "Signature",
+      "signHint": "Sign inside the box using your mouse, finger or stylus.",
+      "clear": "Clear",
+      "recorded": "The date, time and IP address of signing will be recorded.",
+      "repPrefill": "Pre-filled with the authorized contact person; you can change it."
+    },
+    "files": {
+      "upload": "Upload file",
+      "uploaded": "Uploaded",
+      "remove": "Remove"
+    },
+    "errors": {
+      "required": "This field is required.",
+      "email": "Please enter a valid email address.",
+      "phone": "Use digits, spaces, +, - or () only.",
+      "date": "Please enter a valid date.",
+      "future": "The ID document must not be expired.",
+      "people": "Add at least one director, one UBO and exactly one authorized contact person.",
+      "roles": "Select at least one role.",
+      "docs": "Please upload all required documents.",
+      "fileType": "Only PDF, JPG or PNG files are accepted.",
+      "fileSize": "Each file must be 10 MB or smaller.",
+      "signature": "Please sign in the box.",
+      "summary": "Please correct the highlighted fields.",
+      "invalid": "This link is invalid or has expired. Please contact us for a new link.",
+      "loadFailed": "We could not load your application right now. Please check your connection and try again.",
+      "retry": "Try again",
+      "percent": "Enter a number from 0 to 100 (up to 2 decimal places).",
+      "idDoc": "Upload an identity document for this person.",
+      "tooMany": "Too many files: up to {n}."
+    },
+    "legacy": {
+      "contact": {
+        "title": "2. Company contact details",
+        "website": "Official website / domain(s)",
+        "email": "Company email",
+        "phone": "Contact number (with country code)",
+        "otherContact": "Other contact details (e.g. Telegram, Teams)"
+      },
+      "rep": {
+        "title": "3. Authorized contact person",
+        "name": "Full name",
+        "email": "Email",
+        "phone": "Contact number (with country code)",
+        "otherContact": "Other contact details (e.g. Telegram, Teams)"
+      },
+      "entity": {
+        "lei": "Legal Entity Identifier (LEI), if held",
+        "tin": "Tax Identification Number (TIN), if any",
+        "parent": "Group / parent company name, if any"
+      },
+      "person": {
+        "residence": "Country of residence",
+        "passportNo": "Passport number",
+        "passportCountry": "Passport issuing country",
+        "passportExpiry": "Passport expiry date"
+      },
+      "wallet": {
+        "idTypeNo": "Identification type & number",
+        "userId": "User ID, if any",
+        "proof": "Proof of wallet ownership",
+        "proofOptions": {
+          "provider": "Screenshot from the wallet provider or exchange showing the address linked to an account in the entity's name",
+          "explorer": "Blockchain explorer screenshot plus proof of control (signed message or reference code provided by us)",
+          "other": "Other documentation (please specify)"
+        }
+      },
+      "docs": {
+        "d1": "Certificate of Incorporation / Constitutive Deed",
+        "d2": "Certificate of Incumbency / Good Standing / Commercial Registry extract (issued within the last 90 days)",
+        "d3": "Articles of Association / Bylaws",
+        "d4": "Register of Shareholders / Capitalization Table",
+        "d5": "Company proof of address (within the last 3 months)",
+        "d6": "Organizational chart",
+        "d10": "Regulatory status verification / Financial license / Legal opinion",
+        "d11": "Source of initial funding / capital supporting evidence",
+        "d12": "Source of Funds (SOF) & Source of Wealth (SOW) supporting evidence",
+        "d13": "Board resolution / Power of attorney",
+        "d14": "Bank account confirmation",
+        "d15": "Financial statements (last 1 to 2 years)",
+        "d16": "AML/CFT policy summary",
+        "passport": "Passport (clear colour copy)",
+        "poa": "Proof of address (within the last 3 months)"
+      }
+    }
+  },
+  "zh": {
+    "meta": {
+      "title": "企业开户 - TopUP",
+      "description": "完成 TopUP 企业开户资料（KYB）。"
+    },
+    "header": {
+      "secure": "安全开户通道",
+      "switch": "EN",
+      "switchAria": "Switch to English"
+    },
+    "intro": {
+      "title": "企业开户",
+      "body": "请完成全部 4 个步骤，并为每位人员上传身份证明。您可以随时保存，之后用同一个链接继续填写。",
+      "company": "申请企业",
+      "ref": "编号",
+      "expires": "链接有效期至"
+    },
+    "nav": {
+      "back": "上一步",
+      "next": "保存并继续",
+      "save": "保存",
+      "saved": "已保存",
+      "submit": "提交申请",
+      "stepOf": "第 {n} 步，共 {total} 步"
+    },
+    "required": "必填",
+    "optional": "选填",
+    "select": "请选择……",
+    "other": "请注明",
+    "yes": "是",
+    "no": "否",
+    "done": {
+      "title": "申请已提交",
+      "body": "感谢您的提交。我们已收到您的申请，会尽快审核；如需补充资料，我们会通过邮件联系您。",
+      "readonly": "此申请已无法修改。"
+    },
+    "prototype": {
+      "demo": "演示数据"
+    },
+    "locked": "这一部分无需修改。只能修改我们要求补充的部分。",
+    "steps": [
+      "企业信息",
+      "人员",
+      "钱包",
+      "声明"
+    ],
+    "s1": {
+      "title": "1. 企业信息",
+      "legalName": "企业法定全称",
+      "tradingName": "注册商号 / 品牌",
+      "legalForm": "法律形式 / 企业类型",
+      "legalFormHint": "按注册证书上的写法填写，例如 IBC、Ltd。",
+      "regNumber": "注册号",
+      "incDate": "成立日期",
+      "incPlace": "注册国家和地点",
+      "regAddress": "注册地址",
+      "physAddress": "实际经营地址",
+      "sameAddress": "与注册地址相同",
+      "nature": "业务性质",
+      "natureOptions": {
+        "export": "外贸出口",
+        "manufacturing": "制造业",
+        "b2b": "跨境 B2B 贸易",
+        "cfd": "CFD 交易",
+        "securities": "证券与投资交易",
+        "fx": "外汇与金融市场交易",
+        "other": "其他"
+      },
+      "purpose": "与 TopUP 建立业务关系的用途",
+      "purposeOptions": {
+        "crypto": "接受客户的加密货币付款",
+        "exchange": "加密货币与法币互换",
+        "deposits": "处理客户充值和提现",
+        "other": "其他支付相关业务"
+      },
+      "purposeHint": "可以多选。",
+      "volume": "预计月交易量（美元）",
+      "volumeOptions": {
+        "lt50k": "5 万以下",
+        "50k-100k": "5 万到 10 万",
+        "100k-500k": "10 万到 50 万",
+        "gt500k": "50 万以上"
+      },
+      "volumeAmount": "预计每月金额（美元）",
+      "currencies": "预计使用的币种和数字资产",
+      "currencyOptions": {
+        "usd": "USD",
+        "eur": "EUR",
+        "usdt": "USDT",
+        "usdc": "USDC",
+        "btc": "BTC",
+        "eth": "ETH",
+        "other": "其他"
+      },
+      "markets": "目标市场",
+      "marketOptions": {
+        "europe": "欧洲",
+        "na": "北美",
+        "latam": "拉美",
+        "uk": "英国",
+        "me": "中东",
+        "apac": "亚太",
+        "other": "其他"
+      },
+      "sanctions": "公司是否预计会有直接或间接涉及受制裁国家、地区或受制裁人员的交易？",
+      "sanctionsDetails": "请说明涉及的国家或地区、业务性质和预计交易量。",
+      "contactTitle": "公司联系方式",
+      "website": "官网 / 域名",
+      "email": "公司邮箱",
+      "phone": "联系电话（含国家代码）",
+      "docsTitle": "公司文件（非必传）",
+      "docsHint": "可以上传：公司注册证书 / 设立文件、存续证明或商业登记摘录、公司章程、股东名册 / 股权结构表、公司地址证明、组织架构图、监管牌照或法律意见书、董事会决议 / 授权委托书、银行账户证明、财务报表、反洗钱政策摘要等。非必传，审核时如有需要我们会再联系您。PDF、JPG、PNG，每个不超过 10 MB，最多 20 个。",
+      "docsRow": "公司文件"
+    },
+    "s2": {
+      "person": "人员",
+      "add": "添加人员",
+      "remove": "删除",
+      "roles": "角色",
+      "fullName": "法定全名",
+      "dob": "出生日期",
+      "nationality": "国籍",
+      "address": "住址",
+      "ownershipPct": "持股比例（%）",
+      "votingPct": "投票权比例（%）",
+      "pctHint": "仅 UBO 填写，0 到 100。持股比例和投票权比例相同时，填写相同的数字。",
+      "pep": "此人是否为政治公众人物（PEP），或 PEP 的家庭成员、密切关系人？",
+      "pepDetails": "请填写官方职务及公共职能；如果是家庭成员或密切关系人，请说明与 PEP 的关系，以及 PEP 本人的全名和职务。",
+      "email": "邮箱",
+      "phone": "联系电话（含国家代码）",
+      "title": "2. 人员：董事、最终受益人（UBO）、授权签字人和授权联系人",
+      "body": "请添加每一位董事、最终受益人（直接或间接持股或控制 25% 及以上）、授权签字人和授权联系人。同一个人有多个角色时，只需添加一次并勾选全部角色。至少需要 1 名董事和 1 名 UBO，并且必须有且只有 1 位授权联系人。开通账户的邮件会发给授权联系人。",
+      "roleOptions": {
+        "director": "董事",
+        "ubo": "UBO",
+        "signatory": "授权签字人",
+        "contact": "授权联系人"
+      },
+      "idType": "证件类型",
+      "idTypeOptions": {
+        "passport": "护照",
+        "id_card": "身份证"
+      },
+      "idNo": "证件号码",
+      "idCountry": "签发国",
+      "idExpiry": "到期日",
+      "idDoc": "身份证明（护照或身份证）",
+      "idDocHint": "彩色清晰件；身份证请上传正反两面。最多 3 个文件。",
+      "contactHint": "授权联系人必填。"
+    },
+    "s3": {
+      "title": "3. 数字资产钱包授权",
+      "body": "在我们为您的数字资产钱包处理充值或提现之前，需要您完成这份声明。",
+      "clientName": "法定全称",
+      "email": "邮箱",
+      "wallet": "钱包地址",
+      "network": "区块链 / 网络",
+      "networkOptions": {
+        "tron": "TRON",
+        "ethereum": "Ethereum",
+        "other": "其他"
+      },
+      "use": "钱包用途",
+      "useOptions": {
+        "deposit": "充值",
+        "withdrawal": "提现",
+        "both": "两者"
+      },
+      "ownershipTitle": "所有权声明",
+      "ownership": [
+        "本人是上述钱包私钥的唯一所有者，拥有完全且排他的控制权。",
+        "本人未授权任何其他人代表本人访问或控制该钱包。",
+        "本人授权 TopUP 按上述用途，处理该钱包的充值和/或提现。",
+        "本表所填信息真实、准确、完整；如有变化，本人会及时通知 TopUP。",
+        "本人理解，提供虚假或误导性信息可能导致申请被拒绝、交易被延迟或拒绝，并可能依法上报相关机构。"
+      ],
+      "ownershipCheck": "我确认以上所有权声明。",
+      "riskTitle": "风险确认",
+      "risk": [
+        "数字资产交易记录在公共区块链上，一经提交，TopUP 无法撤销、取消或追回，包括转到错误地址的交易。",
+        "本人对所提供钱包信息的准确性负责，并负责保管该钱包的私钥和凭证。",
+        "因钱包信息不准确或本人未妥善保管导致的损失，由本人承担，并赔偿 TopUP 因此遭受的损失；但因 TopUP 自身过失、故意不当行为或违反法律造成的除外。",
+        "该钱包的充值和提现须经过 TopUP 的身份核验和反洗钱审查，可能会被延迟、拒绝或依法上报。"
+      ],
+      "riskCheck": "我确认以上风险。",
+      "prefill": "已按第 1 步自动填写，可以修改。"
+    },
+    "s4": {
+      "title": "4. 声明与签名",
+      "declaration": "本人/我们确认所提供的信息和文件，就本人/我们所知是完整和准确的；如所提供的信息发生重大变化，本人/我们将通知 TopUP。",
+      "repName": "授权代表姓名",
+      "position": "职位 / 角色",
+      "confirm": "我确认以上声明。",
+      "signature": "签名",
+      "signHint": "请用鼠标、手指或触控笔在框内签名。",
+      "clear": "清除",
+      "recorded": "系统会记录签署的日期、时间和 IP 地址。",
+      "repPrefill": "已自动填写授权联系人的姓名，可以修改。"
+    },
+    "files": {
+      "upload": "上传文件",
+      "uploaded": "已上传",
+      "remove": "删除"
+    },
+    "errors": {
+      "required": "此项为必填项。",
+      "email": "请输入有效的邮箱地址。",
+      "phone": "只能包含数字、空格、+、- 或括号。",
+      "date": "请输入有效的日期。",
+      "future": "证件不能已经过期。",
+      "people": "至少需要 1 名董事、1 名 UBO，并且必须有且只有 1 位授权联系人。",
+      "roles": "请至少选择一个角色。",
+      "docs": "请上传全部必需文件。",
+      "fileType": "只接受 PDF、JPG 或 PNG 格式。",
+      "fileSize": "每个文件不能超过 10MB。",
+      "signature": "请在框内签名。",
+      "summary": "请修改标出的字段。",
+      "invalid": "此链接无效或已过期，请联系我们获取新的链接。",
+      "loadFailed": "暂时无法读取您的申请，请检查网络后重试。",
+      "retry": "重试",
+      "percent": "请输入 0 到 100 的数字，最多 2 位小数。",
+      "idDoc": "请为这位人员上传身份证明。",
+      "tooMany": "文件太多，最多 {n} 个。"
+    },
+    "legacy": {
+      "contact": {
+        "title": "2. 公司联系方式",
+        "website": "官网 / 域名",
+        "email": "公司邮箱",
+        "phone": "联系电话（含国家代码）",
+        "otherContact": "其他联系方式（例如 Telegram、Teams）"
+      },
+      "rep": {
+        "title": "3. 授权联系人",
+        "name": "姓名",
+        "email": "邮箱",
+        "phone": "联系电话（含国家代码）",
+        "otherContact": "其他联系方式（例如 Telegram、Teams）"
+      },
+      "entity": {
+        "lei": "法人机构识别编码（LEI），如有",
+        "tin": "税号（TIN），如有",
+        "parent": "集团 / 母公司名称，如有"
+      },
+      "person": {
+        "residence": "居住国",
+        "passportNo": "护照号码",
+        "passportCountry": "护照签发国",
+        "passportExpiry": "护照到期日"
+      },
+      "wallet": {
+        "idTypeNo": "证件类型及号码",
+        "userId": "User ID，如有",
+        "proof": "钱包所有权证明",
+        "proofOptions": {
+          "provider": "钱包服务商或交易所截图，显示该地址关联在本企业名下的账户",
+          "explorer": "区块浏览器截图，并附控制权证明（签名消息或我们提供的参考码）",
+          "other": "其他证明文件（请注明）"
+        }
+      },
+      "docs": {
+        "d1": "公司注册证书 / 设立文件",
+        "d2": "董事在职证明 / 存续证明 / 商业登记摘录（90 天内签发）",
+        "d3": "公司章程",
+        "d4": "股东名册 / 股权结构表",
+        "d5": "公司地址证明（3 个月内）",
+        "d6": "组织架构图",
+        "d10": "监管身份证明 / 金融牌照 / 法律意见书",
+        "d11": "初始资金来源证明",
+        "d12": "资金来源（SOF）和财富来源（SOW）证明",
+        "d13": "董事会决议 / 授权委托书",
+        "d14": "银行账户证明",
+        "d15": "近 1 到 2 年的财务报表",
+        "d16": "反洗钱 / 反恐融资政策摘要",
+        "passport": "护照（彩色清晰件）",
+        "poa": "地址证明（3 个月内）"
+      }
+    }
+  }
+}

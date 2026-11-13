@@ -1,0 +1,124 @@
+---
+import AppLayout from '../../layouts/AppLayout.astro';
+import { IS_PROTOTYPE, IS_STAGING } from '../../lib/env';
+// 签名页面用哪一组热钱包、冷钱包地址（config/wallets.json）：构建时就确定，服务器改不了
+const WALLET_ENV = IS_STAGING ? 'staging' : !IS_PROTOTYPE && process.env.APP_ENV === 'production' ? 'production' : 'local';
+---
+<AppLayout lang="zh" title="TopUP 审核后台" badge="审核后台">
+  <div id="admin-root" data-prototype={IS_PROTOTYPE ? '1' : undefined} data-wallet-env={WALLET_ENV}>
+    <!-- 首次初始化 -->
+    <section class="container" data-view="setup" hidden>
+      <form class="card login-card form-card" data-setup novalidate>
+        <h2>初始化审核后台</h2>
+        <p class="hint muted m0">只需要做一次。请输入服务器环境变量 ADMIN_SETUP_TOKEN 里设置的初始化口令，并设置后台登录密码（至少 12 位）。</p>
+        <div class="f"><label for="s-token">初始化口令</label><input id="s-token" type="password" autocomplete="off" required /></div>
+        <div class="f"><label for="s-pw">设置登录密码</label><input id="s-pw" type="password" autocomplete="new-password" minlength="12" required /></div>
+        <div class="f"><label for="s-pw2">再次输入密码</label><input id="s-pw2" type="password" autocomplete="new-password" minlength="12" required /></div>
+        <p class="alert" data-setup-err hidden></p>
+        <button class="btn btn-primary" type="submit">下一步</button>
+      </form>
+      <form class="card login-card form-card" data-setup2 novalidate hidden>
+        <h2>绑定手机验证器</h2>
+        <p class="m0">用手机上的验证器 App（例如 Google Authenticator、1Password、Microsoft Authenticator）扫描下面的二维码，然后输入 App 显示的 6 位动态码。</p>
+        <img data-qr alt="验证器二维码" width="220" height="220" class="sig-img" />
+        <p class="hint muted m0">无法扫码时，可以在 App 里手动输入密钥：<code data-secret></code></p>
+        <div class="f"><label for="s-otp">6 位动态码</label><input id="s-otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required /></div>
+        <p class="alert" data-setup2-err hidden></p>
+        <button class="btn btn-primary" type="submit">完成初始化</button>
+      </form>
+    </section>
+
+    <!-- 登录 -->
+    <section class="container" data-view="login" hidden>
+      <form class="card login-card form-card" data-login novalidate>
+        <h2>登录审核后台</h2>
+        <div class="f"><label for="a-pw">密码</label><input id="a-pw" type="password" autocomplete="current-password" required /></div>
+        <div class="f"><label for="a-otp">验证器动态码（6 位）</label><input id="a-otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required /></div>
+        <p class="alert" data-login-err hidden></p>
+        <button class="btn btn-primary" type="submit">登录</button>
+        <p class="hint muted m0">连续输错 5 次将锁定 15 分钟。</p>
+      </form>
+    </section>
+
+    <!-- 已登录 -->
+    <div class="admin-shell" data-view="app" hidden>
+      <nav class="admin-nav" aria-label="后台导航">
+        <button type="button" data-tab="p-overview">概览</button>
+        <button type="button" data-tab="apps" aria-current="page">开户申请 <span class="badge" data-count="apps"></span></button>
+        <span class="nav-group">收付款</span>
+        <button type="button" data-tab="p-merchants">商户 <span class="badge" data-pcount="merchants"></span></button>
+        <button type="button" data-tab="p-customers">客户</button>
+        <button type="button" data-tab="p-sweep">归集</button>
+        <button type="button" data-tab="p-withdrawals">提币审核 <span class="badge" data-pcount="withdrawals"></span></button>
+        <button type="button" data-tab="p-anomalies">异常到账 <span class="badge" data-pcount="anomalies"></span></button>
+        <button type="button" data-tab="p-recon">对账</button>
+        <button type="button" data-tab="p-wallet">钱包设置</button>
+        <button type="button" data-tab="p-status">系统状态</button>
+        <button type="button" data-logout>退出登录</button>
+      </nav>
+      <div class="admin-content">
+        <section data-panel="apps">
+          <div class="toolbar">
+            <h1 class="m0">开户申请</h1>
+            <button type="button" class="btn btn-primary" data-new-invite>+ 手动发送开户链接</button>
+          </div>
+          <div class="filters" role="group" aria-label="按状态筛选" data-filters></div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th>编号</th><th>企业名称</th><th>状态</th><th>最近更新</th><th>保留截止</th></tr></thead>
+              <tbody data-apps-body></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section data-panel="p-overview" hidden></section>
+        <section data-panel="p-merchants" hidden></section>
+        <section data-panel="p-customers" hidden></section>
+        <section data-panel="p-sweep" hidden></section>
+        <section data-panel="p-withdrawals" hidden></section>
+        <section data-panel="p-anomalies" hidden></section>
+        <section data-panel="p-recon" hidden></section>
+        <section data-panel="p-wallet" hidden></section>
+        <section data-panel="p-status" hidden></section>
+
+        <section data-panel="detail" hidden>
+          <button type="button" class="back-link" data-back-list>返回申请列表</button>
+          <div class="detail-grid">
+            <div class="stack" data-detail-sections></div>
+            <aside class="card side-card" data-side></aside>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <dialog class="card" data-dialog>
+      <form method="dialog" class="form-card" data-dialog-form>
+        <h2 data-dialog-title></h2>
+        <div data-dialog-body class="stack"></div>
+        <div class="step-actions">
+          <button class="btn btn-outline" value="cancel" type="submit">取消</button>
+          <span class="spacer"></span>
+          <button class="btn btn-primary" value="ok" type="submit" data-dialog-ok>确定</button>
+        </div>
+      </form>
+    </dialog>
+    <!-- 签名对话框。密钥只在这个对话框里使用，签名后立即清除，不发送给服务器 -->
+    <dialog class="card sign-dialog" data-pdialog>
+      <form method="dialog" class="form-card" data-pdialog-form novalidate>
+        <h2 data-pdialog-title></h2>
+        <div data-pdialog-body class="stack"></div>
+        <div class="step-actions">
+          <button class="btn btn-outline" value="cancel" type="submit" formnovalidate>取消</button>
+          <span class="spacer"></span>
+          <button class="btn btn-primary" value="ok" type="submit" data-pdialog-ok>确定</button>
+        </div>
+      </form>
+    </dialog>
+    <div class="notice" data-toast role="status" hidden></div>
+  </div>
+</AppLayout>
+<script>
+  import '../../scripts/admin.ts';
+  import '../../scripts/admin-pay.ts';
+  import '../../scripts/admin-pay-real.ts';
+</script>
