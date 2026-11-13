@@ -20,6 +20,25 @@ remappings = [
 # CREATE2 测试向量放在后端的测试资源里，后端（test/wallet-create2.test.js）和 Foundry（test/Vectors.t.sol）读同一份文件
 fs_permissions = [{ access = "read", path = "../test/fixtures/wallet" }]
 
+# TRON 派生版合约（src/tron/）的单测放在 test-tron/，单独一个 profile：FOUNDRY_PROFILE=tron forge test
+# 编译参数和上面一致；默认 profile 不编译 test-tron/，TRON 版的测试红了不会连带以太坊版的测试
+[profile.tron]
+src = "src"
+test = "test-tron"
+script = "script"
+out = "out-tron-forge"
+cache_path = "cache-tron-forge"
+libs = ["lib"]
+solc_version = "0.8.20"
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 1000
+remappings = [
+  "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+  "bitgo/=lib/eth-multisig-v4/contracts/",
+  "forge-std/=lib/forge-std/src/",
+]
+
 [fuzz]
 # 每个模糊测试至少 10,000 次
 runs = 10000

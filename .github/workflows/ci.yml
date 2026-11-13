@@ -120,6 +120,9 @@ jobs:
         run: cd contracts && forge build
       - name: forge test
         run: cd contracts && forge test -vvv
+      # TRON 派生版合约（src/tron/）的单测：单独一个 profile（test-tron/），不影响上面以太坊版的编译和测试
+      - name: forge test（TRON 派生版合约，FOUNDRY_PROFILE=tron）
+        run: cd contracts && FOUNDRY_PROFILE=tron forge test -vvv
       - uses: actions/setup-node@v5
         with:
           node-version: 26
@@ -153,6 +156,12 @@ jobs:
           for i in $(seq 1 90); do docker logs tre 2>&1 | grep -qE '^\(0\) [0-9a-f]{64}$' && curl -sf -X POST http://127.0.0.1:9090/wallet/getnowblock >/dev/null && break; sleep 2; done
           TOPUP_NILE_PRIVATE_KEY="$(docker logs tre 2>&1 | grep -m1 -E '^\(0\) [0-9a-f]{64}$' | awk '{print $2}')" \
             node scripts/tron-nile/verify.mjs --node http://127.0.0.1:9090 --report tron-local-report.json
+      # 后端 TRON 合约钱包端到端（test/tron-local/）：同一个私链，分配地址 → 转账 → 扫链入账 → 凑批 → 确认 → 归集进 parent
+      - name: 本机 TRON 私链上的钱包端到端（test/tron-local/）
+        run: |
+          TOPUP_TRON_LOCAL_NODE=http://127.0.0.1:9090 \
+          TOPUP_TRON_LOCAL_PRIVATE_KEY="$(docker logs tre 2>&1 | grep -m1 -E '^\(0\) [0-9a-f]{64}$' | awk '{print $2}')" \
+            node --test test/tron-local/*.test.js
       - name: 保存报告
         if: always()
         uses: actions/upload-artifact@v5
