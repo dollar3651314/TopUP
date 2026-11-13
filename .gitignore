@@ -1,3 +1,10 @@
 node_modules/
 .env*
 !.env.example
+data/
+site/dist/
+site/.astro/
+e2e/.tmp/
+e2e/test-results/
+contracts/out/
+contracts/cache/

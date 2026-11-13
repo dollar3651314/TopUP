@@ -1,0 +1,86 @@
+// 定时任务：由 worker 进程（server/worker.js）每 15 秒调用一次。
+// 顺序：① 扫描已确认的 USDT 转账 → ② 订单过期 → ③ 提币的链上确认 → ④ 发送回调 → ⑤ 合并发送提币通知邮件 → 记录运行时间。
+// 每次整体控制在 25 秒内；没做完的下一次接着做。
+import { recordDeposit, expireOrders, settleWithdrawal, getMeta, setMeta } from './core.js';
+import { deliverDue } from './callbacks.js';
+import { fmtUsdt } from './money.js';
+
+const OVERLAP_MS = 3 * 60_000; // 每次往前多扫 3 分钟，防止边界上的事件漏掉（重复的由唯一约束去掉）
+const INDEX_LAG_MS = 30_000; // 已确认的区块，TronGrid 的事件索引可能还要晚几秒才查得到
+const MAX_WINDOW_MS = 10 * 60_000;
+
+/** ① 扫链：从上次的时间点往后读，只处理转到我们客户地址的转账 */
+export async function scan(db, tron, { now = Date.now(), budgetMs = 12_000, maxPages = 40, onError } = {}) {
+  const started = Date.now();
+  const cursor = (await getMeta(db, 'scan_cursor')) ?? now - 5 * 60_000; // 第一次运行：从 5 分钟前开始
+  const minTs = Math.max(0, cursor - OVERLAP_MS);
+  // 只读到最新的已确认区块为止：还没确认的转账现在查不到，游标不能越过它们，否则下一次也扫不到了
+  const solid = await tron.solidBlock();
+  const maxTs = Math.max(minTs, Math.min(now, solid.time - INDEX_LAG_MS, cursor + MAX_WINDOW_MS));
+  let fp = null, pages = 0, seen = 0, credited = 0, lastTs = cursor, complete = false;
+  const failed = [];
+  while (pages < maxPages && Date.now() - started < budgetMs) {
+    const { events, next } = await tron.transfers({ minTs, maxTs, fingerprint: fp });
+    pages++; seen += events.length;
+    if (events.length) {
+      const mine = new Set((await db.query('select address from customers where address = any($1::text[])', [[...new Set(events.map((e) => e.to))]])).map((r) => r.address));
+      for (const e of events) {
+        if (mine.has(e.to)) {
+          // 一笔处理失败不能卡住所有商户的扫链：记为异常、通知管理员，继续处理后面的
+          try { const r = await recordDeposit(db, e); if (r.status === 'credited') credited++; }
+          catch (err) {
+            console.error(`[tick] deposit ${e.txid}:${e.logIndex} failed: ${err.message}`);
+            await db.query(`insert into anomalies (type, address, amount, ref) values ('process_error', $1, $2, $3) on conflict do nothing`, [e.to, `${e.amount / 1e6} USDT`, `${e.txid}:${e.logIndex}`]);
+            failed.push(`${e.txid}:${e.logIndex}`);
+          }
+        }
+        lastTs = Math.max(lastTs, e.time);
+      }
+    }
+    if (!next || !events.length) { complete = true; break; }
+    fp = next;
+  }
+  // 这一段全部读完：游标移到这一段的结尾；没读完：移到已经处理到的位置
+  await setMeta(db, 'scan_cursor', complete ? maxTs : lastTs);
+  if (failed.length && onError) await onError(failed);
+  return { pages, seen, credited, complete, cursor: complete ? maxTs : lastTs, failed: failed.length };
+}
+
+/** ③ 已广播的提币：链上确认成功就扣除冻结；失败就解冻并通知管理员 */
+export async function confirmWithdrawals(db, tron, { notify } = {}) {
+  const rows = await db.query(`select id, txid from withdrawals where status = 'broadcast' and txid is not null order by updated_at limit 50`);
+  let done = 0;
+  for (const w of rows) {
+    const info = await tron.txInfo(w.txid).catch(() => null);
+    if (!info) continue;
+    await settleWithdrawal(db, w.id, info.ok);
+    if (!info.ok && notify) await notify(`提币失败：${w.id}`, `提币 ${w.id} 的链上交易失败（${w.txid}），冻结的金额已退回商户余额。请到运营后台查看。`);
+    done++;
+  }
+  return done;
+}
+
+/** ⑤ 新的提币申请合并成一封邮件（每分钟最多一封） */
+export async function notifyWithdrawals(db, notify, adminUrl) {
+  const rows = await db.query(`select w.id, w.amount, w.kind, w.source, m.name from withdrawals w join merchants m on m.id = w.merchant_id where w.status = 'pending' and not w.notified order by w.created_at`);
+  if (!rows.length || !notify) return 0;
+  const lines = rows.map((w) => `- ${w.id} · ${w.name} · ${w.kind === 'payout' ? '代付' : '商户提现'} · ${fmtUsdt(w.amount)} USDT · ${w.source === 'api' ? 'API' : '后台'}`);
+  await notify(`有 ${rows.length} 笔新的提币申请待审核`, `${lines.join('\n')}\n\n请到运营后台审核：${adminUrl}\n商户看到的处理时效：东八区 8:00–23:00 内 1 小时处理。`);
+  await db.query('update withdrawals set notified = true where id = any($1::text[])', [rows.map((w) => w.id)]);
+  return rows.length;
+}
+
+export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetchImpl, resolve, confirmSweeps }) {
+  const t0 = Date.now();
+  const out = {};
+  const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = { error: e.message }; console.error(`[tick] ${name}: ${e.message}`); } };
+  await step('scan', () => scan(db, tron, { onError: notify && ((ids) => notify('到账处理失败', `以下链上转账没有处理成功，已记到"异常到账"，请联系研发：\n${ids.join('\n')}`)) }));
+  await step('expired', () => expireOrders(db));
+  await step('withdrawals', () => confirmWithdrawals(db, tron, { notify }));
+  if (confirmSweeps) await step('sweeps', () => confirmSweeps());
+  await step('callbacks', () => deliverDue(db, { getTarget, fetchImpl, resolve }));
+  await step('mail', () => notifyWithdrawals(db, notify, adminUrl));
+  out.ms = Date.now() - t0;
+  await setMeta(db, 'tick_last', { at: new Date().toISOString(), ...out });
+  return out;
+}
