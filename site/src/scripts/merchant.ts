@@ -34,7 +34,10 @@ const laterTag = () => h('span', { class: 'later-tag' }, c.chain.later);
 const addrOf = (list: ChainAddr[] | undefined, ch: string) => (list || []).find((a) => a.chain === ch)?.address || null;
 /** 每条链一张地址卡：地址、复制按钮、"只收某网络的 USDT"；TRON 没有地址时标"第 2 批" */
 function addressCards(list: ChainAddr[] | undefined) {
-  return h('div', { class: 'addr-grid', 'data-addresses': '' }, ...CHAINS.map((ch) => {
+  // 以太坊、BSC 同一串时就近说明一句（免得商户以为只能收一条链）
+  const e = addrOf(list, 'eth'), b = addrOf(list, 'bsc');
+  const same = e && b && e.toLowerCase() === b.toLowerCase() ? h('p', { class: 'info-box m0', 'data-same-note': '' }, c.chain.sameNote) : null;
+  const grid = h('div', { class: 'addr-grid', 'data-addresses': '' }, ...CHAINS.map((ch) => {
     const a = addrOf(list, ch);
     if (!a && ch !== 'tron' && !enabledChains.includes(ch)) return null;
     return h('div', { class: 'addr-card', 'data-chain': ch }, chainTag(ch),
@@ -42,6 +45,7 @@ function addressCards(list: ChainAddr[] | undefined) {
       a ? copyBtn(() => { say(tpl(c.chain.copiedNote, { net: netName(ch), std: netStd(ch) })); return a; }, tpl(c.chain.copy, { net: netName(ch) }), c.common.copied) : null,
       h('span', { class: 'hint muted' }, a ? tpl(c.chain.only, { net: netName(ch), std: netStd(ch) }) : c.chain.laterNote));
   }));
+  return same ? h('div', { class: 'stack-sm' }, same, grid) : grid;
 }
 
 // ---------- 视图与导航 ----------

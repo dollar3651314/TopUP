@@ -287,10 +287,11 @@ export async function approveSweep(db, { id, actor, reason, providers = {}, now 
     res = await providers[b.provider].executeSweep({ chain: b.chain, items });
   } catch (e) {
     if (e?.stage === 'prepare') {
-      // 交易还没签出去（例如节点连不上）：退回待确认，可以稍后再点
-      await db.query(`update wallet_sweep_batches set status = 'awaiting_approval', error = $2, updated_at = now() where id = $1`, [id, String(e.message).slice(0, 300)]);
+      // 交易还没签出去（例如节点连不上）：退回待确认，可以稍后再点；钱没动
+      await db.query(`update wallet_sweep_batches set status = 'awaiting_approval', error = $2, updated_at = now() where id = $1`, [id, `not_sent: ${String(e?.message || e).slice(0, 280)}`]);
       throw new PayError('sweep_not_sent', 502);
     }
+    // 节点明确拒绝（或提供方报了没归类的错）：标为失败，地址放回待归集
     await db.tx(async (t) => {
       await t.query(`update wallet_sweep_batches set status = 'failed', error = $2, updated_at = now() where id = $1`, [id, String(e?.message || e).slice(0, 300)]);
       await t.query(`update wallet_sweep_items set status = 'released', reason = 'send_failed' where batch_id = $1 and status = 'pending'`, [id]);
@@ -298,11 +299,13 @@ export async function approveSweep(db, { id, actor, reason, providers = {}, now 
     throw new PayError('sweep_send_failed', 502);
   }
   const txRefs = res?.txRefs || [];
+  // 广播时连不上节点（broadcast = 'uncertain'）：交易已签名、可能已经发出，照常记"已发送"，由 confirmSweeps 按交易号查
+  const uncertain = res?.broadcast === 'uncertain';
   await db.tx(async (t) => {
-    await t.query(`update wallet_sweep_batches set status = 'sent', tx_refs = $2::jsonb, error = null, updated_at = now() where id = $1`, [id, JSON.stringify(txRefs)]);
+    await t.query(`update wallet_sweep_batches set status = 'sent', tx_refs = $2::jsonb, error = $3, updated_at = now() where id = $1`, [id, JSON.stringify(txRefs), uncertain ? 'broadcast_uncertain' : null]);
     await t.query(`update wallet_sweep_items set status = 'sent' where batch_id = $1 and status = 'pending'`, [id]);
   });
-  return { status: 'sent', txRefs };
+  return uncertain ? { status: 'sent', txRefs, broadcast: 'uncertain' } : { status: 'sent', txRefs };
 }
 
 /** 不归集这批：待确认的批次作废，地址放回待归集 */
@@ -362,7 +365,7 @@ export async function confirmSweeps(db, { providers = {}, notify, now } = {}) {
       const swept = new Set(), failed = new Map();
       for (const ref of b.tx_refs || []) {
         const r = typeof p.sweepOutcome === 'function'
-          ? await p.sweepOutcome(b.chain, ref, plain)
+          ? await p.sweepOutcome(b.chain, ref, plain, { sentAt: b.updated_at, now: at(now).getTime() })
           : await (async () => { const s = await p.txStatus(b.chain, ref); return { status: s, swept: s === 'confirmed' ? plain.map((i) => i.address) : [], failed: s === 'failed' ? plain.map((i) => ({ address: i.address, reason: 'tx_failed' })) : [] }; })();
         if (r.status === 'pending' || r.status === 'unknown') { status = 'wait'; break; }
         for (const a of r.swept) swept.add(a);

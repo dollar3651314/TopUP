@@ -14,6 +14,10 @@ export const EVM_CHAINS = Object.freeze(['eth', 'bsc']);
 const SWEPT_TOPIC = keccakHex(Buffer.from('Swept(bytes32,address,bool)'));
 const SWEEP_FAILED_TOPIC = keccakHex(Buffer.from('SweepFailed(bytes32,address,bytes)'));
 // gas 预估（实测：1 个地址首次 部署 + 归集 157,128；已部署 50,230，见 contracts/README.md）；留余量
+/** 发出后多久还查不到这笔交易，就当没送到节点 */
+export const DROPPED_AFTER_MS = 15 * 60_000;
+/** 连接类错误（连不上、超时、HTTP 出错）：不知道节点收没收到；JSON-RPC 返回的错误才是节点明确拒绝 */
+export const isConnectionError = (e) => ['rpc_unreachable', 'rpc_http'].includes(e?.code) || e?.name === 'TimeoutError' || e?.name === 'AbortError' || e instanceof TypeError;
 export const SWEEP_GAS = Object.freeze({ base: 40_000n, deploy: 160_000n, deployed: 45_000n });
 
 /** 合约参数检查：钱只能进写死的 parent，所以 parent 不能是批量合约或 USDT 合约；错误信息带出字段名 */
@@ -60,6 +64,8 @@ export function createContractProvider({ db, chains = {}, operatorKey = '' }) {
       return cfg[chain] ? { batchSweep: true, batchPayout: false, selfScan: true, webhook: false } : { ...NO_CAPABILITIES };
     },
     schemeVer(chain) { return cfg[chain]?.scheme.ver; },
+    /** 停用一条链（链上参数和配置不一致时由钱包层调用）：之后这条链 chain_not_enabled */
+    disableChain(chain) { delete cfg[chain]; provider.chains = Object.keys(cfg); },
     scheme(chain) { return cfg[chain] ? { ...cfg[chain].scheme } : null; },
 
     async allocateAddress({ merchantId, customerId, chain }) {
@@ -82,24 +88,47 @@ export function createContractProvider({ db, chains = {}, operatorKey = '' }) {
       return { chain, ...plan(candidates, limits) };
     },
 
+    /**
+     * 签名并广播一笔归集交易。分两段处理出错：
+     *   - 签名前（取 chainId、nonce、gasPrice，或者没配发起账户）出错：交易没签出去，错误带 stage = 'prepare'，批次退回待确认
+     *   - 广播时连接类错误（连不上、超时、HTTP 出错）：交易可能已经到了节点，不当失败；返回签名后本地算出的交易号，
+     *     broadcast = 'uncertain'，由 confirmSweeps 按交易号继续查
+     *   - 只有节点明确拒绝（JSON-RPC 返回错误）才算发送失败（stage = 'broadcast'）
+     */
     async executeSweep({ chain, items }) {
-      const { adapter, scheme, usdt } = need(chain);
-      if (!operator) throw new WalletError('operator_not_configured', 'sweep operator key is not configured');
-      if (!items?.length) throw new WalletError('empty_batch', 'nothing to sweep');
+      const prep = (e) => Object.assign(e instanceof Error ? e : new Error(String(e)), { stage: 'prepare' });
+      let c;
+      try { c = need(chain); } catch (e) { throw prep(e); }
+      const { adapter, scheme, usdt } = c;
+      if (!operator) throw prep(new WalletError('operator_not_configured', 'sweep operator key is not configured'));
+      if (!items?.length) throw prep(new WalletError('empty_batch', 'nothing to sweep'));
       const salts = items.map((i) => i.salt);
       const data = encodeSweep(usdt, salts);
-      const [chainId, nonce, gasPrice] = await Promise.all([adapter.chainId(), adapter.nonce(operator), adapter.gasPrice()]);
+      let chainId, nonce, gasPrice;
+      try { [chainId, nonce, gasPrice] = await Promise.all([adapter.chainId(), adapter.nonce(operator), adapter.gasPrice()]); } catch (e) { throw prep(e); }
       let gas;
       try { gas = (await adapter.estimateGas({ from: operator, to: scheme.batcher, data })) * 12n / 10n; } catch { gas = gasFor(items); }
       const { raw, hash } = signLegacyTx({ nonce, gasPrice, gas, to: scheme.batcher, value: 0, data, chainId }, operatorKey);
-      const sent = await adapter.sendRaw(raw);
-      return { txRefs: [sent || hash] };
+      try {
+        await adapter.sendRaw(raw);
+      } catch (e) {
+        if (isConnectionError(e)) return { txRefs: [hash], broadcast: 'uncertain' };
+        if (/already known|known transaction|already imported/i.test(String(e?.message))) return { txRefs: [hash] }; // 节点已经有这笔
+        throw Object.assign(new WalletError('sweep_rejected', `node rejected the sweep transaction: ${String(e?.message || e).slice(0, 200)}`), { stage: 'broadcast' });
+      }
+      return { txRefs: [hash] }; // 以本地算出的交易号为准（和节点返回的一致）
     },
 
     /** 归集交易的结果：按批量合约的 Swept / SweepFailed 事件逐个地址判断（部分成功照记） */
-    async sweepOutcome(chain, txRef, items) {
+    async sweepOutcome(chain, txRef, items, { sentAt = null, now = Date.now() } = {}) {
       const { adapter, scheme } = need(chain);
       const status = await adapter.txStatus(txRef);
+      if (status === 'pending' && sentAt && now - new Date(sentAt).getTime() > DROPPED_AFTER_MS && typeof adapter.txKnown === 'function') {
+        // 发出超过 15 分钟、节点既没有回执也不认识这笔交易：广播时没送到（或被节点丢掉了）。
+        // 地址放回待归集是安全的：就算这笔以后又上链，钱也只会进冷钱包。节点连不上（null）时照常等
+        const known = await adapter.txKnown(txRef).catch(() => null);
+        if (known === false) return { status: 'failed', swept: [], failed: items.map((i) => ({ address: i.address, reason: 'not_broadcast' })) };
+      }
       if (status === 'pending' || status === 'unknown') return { status, swept: [], failed: [] };
       if (status === 'failed') return { status, swept: [], failed: items.map((i) => ({ address: i.address, reason: 'tx_reverted' })) };
       const r = await adapter.receipt(txRef);
@@ -140,6 +169,12 @@ export function createContractProvider({ db, chains = {}, operatorKey = '' }) {
       return { native: gas * gasPrice, gas, gasPrice, detail: `${n} address(es), ${deploy} first-time` };
     },
     async txStatus(chain, txRef) { return need(chain).adapter.txStatus(txRef); },
+    /** 归集交易的确认数：{ have, need }；have 为 null 表示节点连不上 */
+    async txConfirmations(chain, txRef) {
+      const { adapter } = need(chain);
+      const have = typeof adapter.confirmationsOf === 'function' ? await adapter.confirmationsOf(txRef) : null;
+      return { have, need: adapter.confirmations };
+    },
     health() {
       return { enabled: true, status: Object.keys(cfg).length ? 'ok' : 'not_configured', alert: false, chains: Object.keys(cfg), operator: Boolean(operator) };
     },

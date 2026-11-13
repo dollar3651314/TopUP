@@ -14,9 +14,11 @@ export interface OverviewData {
     collected_total: Amt; deposit_count: Num; owed_total: Amt; owed_available: Amt; owed_frozen: Amt;
     assets_total: Amt; unswept_total: Amt; hot_usdt: Amt; cold_usdt: Amt; cold_configured: boolean;
     profit_total: Amt; profit_now: Amt; profit_after_sweep: Amt; income_fee_in: Amt; income_fee_out: Amt; income_dust: Amt;
+    by_chain: Record<string, Partial<{ hot_usdt: Amt; cold_usdt: Amt }>>;
   }>;
   todo: Partial<{ withdrawals_count: Num; withdrawals_amount: Amt; kyb_pending: Num; merchants_to_open: Num; anomalies: Num; callbacks_failed: Num }>;
-  sweep: Partial<{ unswept_total: Amt; address_count: Num; over_threshold: Num; over_threshold_total: Amt; threshold: Amt; hot_trx: Amt; energy_left: Num; energy_per_sweep: Num; month_sweep_trx: Amt }>;
+  sweep: Partial<{ unswept_total: Amt; address_count: Num; over_threshold: Num; over_threshold_total: Amt; threshold: Amt; hot_trx: Amt; energy_left: Num; energy_per_sweep: Num; month_sweep_trx: Amt;
+    by_chain: Record<string, Partial<{ unswept_total: Amt; address_count: Num; over_threshold: Num; over_threshold_total: Amt; threshold: Amt; enabled: boolean }>> }>;
   periods?: Record<'today' | 'd7' | 'd30', Period>;
   top_merchants?: { name: string; amount: Amt; count: number }[];
   system?: { tick_age_s: number | null; recon: { day: string; diff: Amt; complete: boolean } | null; db_bytes: number; disk: { used_mb: number; total_mb: number } | null };
@@ -39,7 +41,7 @@ function merge(d: OverviewData, x: Partial<OverviewData>): OverviewData {
  * 加载并显示概览。load.db / load.chain 各返回一批数据；go(tab) 跳到对应页面。
  * 返回的函数可以再次调用来刷新。
  */
-export function mountOverview(p: HTMLElement, load: Record<Part, () => Promise<Partial<OverviewData>>>, go: (tab: string) => void) {
+export function mountOverview(p: HTMLElement, load: Record<Part, () => Promise<Partial<OverviewData>>>, go: (tab: string, chain?: string) => void) {
   let data = empty();
   let run = 0;
   const state: Record<Part, PartState> = { db: 'loading', chain: 'loading' };
@@ -61,7 +63,10 @@ export function mountOverview(p: HTMLElement, load: Record<Part, () => Promise<P
   return refresh;
 }
 
-function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, PartState>, go: (tab: string) => void, refresh: () => void) {
+const CHAINS = ['tron', 'eth', 'bsc'];
+const CHAIN_NAME: Record<string, string> = { eth: '以太坊', bsc: 'BSC', tron: 'TRON' };
+const chainTag = (c: string) => h('span', { class: `chain-tag c-${c}` }, CHAIN_NAME[c] || c);
+function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, PartState>, go: (tab: string, chain?: string) => void, refresh: () => void) {
   const f = d.funds, t = d.todo, s = d.sweep, sys = d.system;
   const link = (label: string, tab: string, n: Num, sub = '') => h('button', { type: 'button', class: `todo-item${n ? ' todo-on' : ''}`, onclick: () => go(tab) }, h('span', { class: 'todo-n' }, num(n)), h('span', {}, label, sub ? h('span', { class: 'muted' }, ` · ${sub}`) : null));
   const hot = units(f.hot_usdt), cold = units(f.cold_usdt), owed = units(f.owed_total);
@@ -78,7 +83,7 @@ function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, Par
     h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, '概览'), h('div', { class: 'tool-actions' },
       statusLine ? h('span', { class: 'muted', 'data-ov-status': '' }, statusLine) : null,
       h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-ov-refresh': '', disabled: loading, onclick: refresh }, loading ? '加载中…' : '刷新'))),
-    h('p', { class: 'hint muted' }, '金额单位都是 USDT。热钱包和冷钱包的余额实时查询链上，客户地址里没归集的钱按账本计算。'),
+    h('p', { class: 'hint muted' }, '金额单位都是 USDT，三条链（TRON、以太坊、BSC）合在一起算。热钱包和冷钱包的余额实时查询链上，客户地址里没归集的钱按账本计算。以太坊、BSC 第 1 批只有冷钱包（归集直接进冷钱包），没有热钱包。'),
 
     // ① 资金
     h('h2', { class: 'h-sm' }, '资金'),
@@ -93,7 +98,8 @@ function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, Par
       stat('归集后才能转走', usd(f.profit_after_sweep), '这部分还在客户地址里，归集到热钱包或冷钱包之后才能转走'),
       stat('利润来源合计', incomes.every((x) => units(x) !== null) ? fmtUsdt(incomes.reduce((a, x) => a + (units(x) ?? 0), 0)) : '—', `收款手续费 ${usd(f.income_fee_in)} · 提币手续费 ${usd(f.income_fee_out)} · 低于 1 USDT 的转入 ${usd(f.income_dust)}`),
     ),
-    owedCovered === false ? h('p', { class: 'alert' }, '热钱包和冷钱包的 USDT 少于欠商户的金额：商户提币时可能要先归集。不要从钱包里转走利润。') : h('span'),
+    fundsByChain(d),
+    owedCovered === false ? h('p', { class: 'alert', 'data-owed-alert': '' }, '三条链的热钱包和冷钱包合计少于欠商户的金额：商户提币时可能要先归集（看下面每条链的"去归集"）。不要从钱包里转走利润。') : h('span'),
     h('p', { class: 'hint muted' }, '利润来源三项加起来和"利润"之间的差，是还没对上的部分：例如你之前从钱包转走过利润，或者有到账还在确认中。以"对账"页面为准。'),
 
     // ② 待处理
@@ -106,14 +112,18 @@ function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, Par
       link('条回调 24 小时内发送失败', 'p-status', t.callbacks_failed),
     ),
 
-    // ③ 待归集
+    // ③ 待归集（每条链一行，按链去归集）
     h('h2', { class: 'h-sm' }, '待归集'),
+    table(['链', '未归集', '地址', '达到门槛', ''], CHAINS.map((c) => {
+      const x = s.by_chain?.[c];
+      return [chainTag(c), x ? `${usd(x.unswept_total)} USDT` : '—', num(x?.address_count), x ? `${num(x.over_threshold)} 个（门槛 ${usd(x.threshold)}，合计 ${usd(x.over_threshold_total)}）` : '—',
+        h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-ov-sweep': c, disabled: c !== 'tron' && x?.enabled === false, onclick: () => go('p-sweep', c) }, `去归集 ${CHAIN_NAME[c]}`)];
+    }), '—'),
     h('div', { class: 'stats' },
-      stat('未归集', usd(s.unswept_total), `${num(s.address_count)} 个地址；其中 ${num(s.over_threshold)} 个达到 ${usd(s.threshold)} USDT（合计 ${usd(s.over_threshold_total)}）`),
-      stat('热钱包 TRX', usd(s.hot_trx), s.energy_left == null || !s.energy_per_sweep ? '可借出能量：—' : `可借出能量 ${s.energy_left.toLocaleString('en')}，大约够 ${Math.floor(s.energy_left / s.energy_per_sweep)} 笔归集`),
-      stat('本月归集花费', `${usd(s.month_sweep_trx)} TRX`, '补给新地址用于燃烧的 TRX（成本，不从 USDT 利润里扣）'),
+      stat('合计未归集', usd(s.unswept_total), `${num(s.address_count)} 个地址；其中 ${num(s.over_threshold)} 个达到门槛（合计 ${usd(s.over_threshold_total)}）`),
+      stat('TRON 热钱包 TRX', usd(s.hot_trx), s.energy_left == null || !s.energy_per_sweep ? '可借出能量：—' : `可借出能量 ${s.energy_left.toLocaleString('en')}，大约够 ${Math.floor(s.energy_left / s.energy_per_sweep)} 笔归集`),
+      stat('本月 TRON 归集花费', `${usd(s.month_sweep_trx)} TRX`, '补给新地址用于燃烧的 TRX（成本，不从 USDT 利润里扣）。以太坊、BSC 的手续费看"归集"页的发起账户'),
     ),
-    h('p', { class: 'm0' }, h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => go('p-sweep') }, '去归集')),
 
     // ④ 业务趋势
     h('h2', { class: 'h-sm' }, '业务'),
@@ -131,4 +141,19 @@ function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, Par
       stat('磁盘用量', diskPct === null ? '—' : `${diskPct}%`, sys ? `${sys.disk ? `${sys.disk.used_mb.toLocaleString('en')} / ${sys.disk.total_mb.toLocaleString('en')} MB · ` : ''}数据库 ${(sys.db_bytes / 1048576).toFixed(1)} MB` : ''),
     ),
   );
+}
+
+/** 资金按链拆开：未归集 + 热钱包 + 冷钱包（以太坊、BSC 没有热钱包） */
+function fundsByChain(d: OverviewData) {
+  const f = d.funds, s = d.sweep;
+  const rows = CHAINS.map((c) => {
+    const w = f.by_chain?.[c], u = s.by_chain?.[c];
+    const hot = c === 'tron' ? units(w?.hot_usdt) : 0, cold = units(w?.cold_usdt), uns = units(u?.unswept_total);
+    const off = c !== 'tron' && u?.enabled === false;
+    const sum = hot !== null && cold !== null && uns !== null ? hot + cold + uns : null;
+    return [chainTag(c), uns === null ? '—' : fmtUsdt(uns), c === 'tron' ? (hot === null ? '—' : fmtUsdt(hot)) : h('span', { class: 'muted' }, '没有（第 1 批）'),
+      off ? h('span', { class: 'muted' }, '未开通') : cold === null ? '—' : fmtUsdt(cold), sum === null ? '—' : h('b', {}, fmtUsdt(sum))];
+  });
+  return h('details', { class: 'funds-chains', open: true, 'data-funds-chains': '' }, h('summary', {}, '平台资产按链拆开（USDT）'),
+    table(['链', '未归集', '热钱包', '冷钱包', '合计'], rows, '—'));
 }

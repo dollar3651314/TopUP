@@ -14,7 +14,7 @@ import { describeFee, fmtUsdt, parseUsdt, shortAddr } from '../lib/money';
 import { copyBtn, field, fieldErr, fmtTime, h, mono, stat, status, table, toast } from './ui';
 import { dialog, feeInputs, modeInputs, modeText, tronscan, minsAgo, TRONSCAN } from './admin-pay';
 import { mountOverview } from './admin-overview';
-import { renderEvmSweep, renderRoutes, walletStatus, walletTodo, type WalletUi } from './admin-wallet';
+import { pickSweepChain, renderEvmSweep, renderRoutes, walletBadges, walletStatus, walletTodo, type WalletUi } from './admin-wallet';
 
 const root = document.getElementById('admin-root')!;
 const PROTO = root.dataset.prototype === '1';
@@ -58,6 +58,7 @@ async function show(tab: string) {
   } finally { clearTimeout(slow); }
   counts();
 }
+const v2 = (x: string) => `${x}有失败、部分成功或手续费不够，要处理`;
 async function counts() {
   const set = (k: string, n: number | null, meaning: string) => {
     const b = root.querySelector<HTMLElement>(`[data-pcount="${k}"]`);
@@ -71,9 +72,17 @@ async function counts() {
     ['withdrawals', '待审核的提币', async () => (await call('withdrawals')).items.length],
     ['anomalies', '未处理的异常到账', async () => (await call('anomalies')).items.filter((x: any) => !x.handled).length],
   ];
-  await Promise.all(jobs.map(async ([k, meaning, f]) => {
+  await Promise.all([...jobs.map(async ([k, meaning, f]) => {
     try { set(k, await f(), meaning); } catch (e) { set(k, null, meaning); console.warn(`[admin] 导航数字 ${k} 读取失败：${(e as WErr).code || e}`); }
-  }));
+  }),
+  // 归集、系统状态的角标（"!" 表示有出错要处理）
+  walletBadges(wui('p-overview')).then((b) => {
+    for (const [k, v, meaning] of [['sweep', b.sweep, v2('归集')], ['status', b.status, '系统状态有链不正常']] as [string, string | null, string][]) {
+      const el = root.querySelector<HTMLElement>(`[data-pcount="${k}"]`);
+      if (!el) continue;
+      el.textContent = v ?? ''; el.classList.toggle('badge-bad', v === '!'); el.title = v === '!' ? meaning : v ? `等你确认的归集批次：${v}` : '';
+    }
+  }).catch(() => {})]);
 }
 if (!PROTO) {
   root.querySelectorAll<HTMLElement>('[data-tab^="p-"]').forEach((b) => b.addEventListener('click', () => show(b.dataset.tab!)));
@@ -155,7 +164,7 @@ function signDialog(job: SignJob) {
 
 // ============ 商户 ============
 render.overview = async (p) => {
-  const go = (tab: string) => root.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.click();
+  const go = (tab: string, chain?: string) => { if (chain) pickSweepChain(chain); root.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.click(); };
   mountOverview(p, {
     db: async () => {
       try { return await call('overview'); } catch (e) {
@@ -166,9 +175,9 @@ render.overview = async (p) => {
     },
     chain: () => call('overview-chain'),
   }, go);
-  // 第 1 批：最上面加"待处理"（按等了多久排，出错的排最前）；读取失败不影响下面的概览
-  const todo = await walletTodo(wui('p-overview')).catch(() => null);
-  if (todo) { const head = p.querySelector('.toolbar'); if (head) head.after(todo); else p.prepend(todo); }
+  // 第 1 批：最上面加"待处理"（按等了多久排，出错的排最前）；读取失败时显示"待处理读取失败 + 重试"，不显示"现在没事要做"
+  const todo = await walletTodo(wui('p-overview')).catch(() => h('div', { class: 'alert', 'data-todo-error': '' }, '待处理读取失败。 ', h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => show('p-overview') }, '重试')));
+  const head = p.querySelector('.toolbar'); if (head) head.after(todo); else p.prepend(todo);
 };
 render.routes = (p) => renderRoutes(wui('p-routes'), p);
 render.merchants = async (p) => {

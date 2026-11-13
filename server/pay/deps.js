@@ -36,6 +36,8 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   const ops = createOps({ db, keys, payBase: origin, keyPrefix, wallet: layer });
   const gate = createAdminGate({ redis: kyb.redis, kybKeys: kyb.keys });
   const notify = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
+  // 启动时用 eth_call 核对链上批量合约的 parent、factory 和配置一致；不一致的链不开通并告警（最多等 8 秒，连不上下一轮再核对）
+  await layer.verifyOnchain({ db, notify }).catch((e) => console.error(`[wallet] onchain check: ${e.message}`));
   const diskPath = config.blobDir || config.dataDir || '/'; // 用量提醒看这块磁盘
   const getTarget = async (merchantId) => {
     const [m] = await db.query('select callback_url, api_secret_enc from merchants where id = $1', [merchantId]);
@@ -55,6 +57,8 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
       // 归集：TRON 第 0 批的浏览器签名批次；ETH、BSC 合约钱包确认已发出的批次、到点凑批（东八区 10:00、20:00）
       confirmSweeps: async () => {
         const tronSweeps = await sweepProgress(db, tron, { notify });
+        // 启动时节点连不上、还没核对过链上参数的链：每轮再核对一次
+        if (Object.values(layer.onchain).some((x) => x.result === 'unverified')) await layer.verifyOnchain({ db, notify }).catch(() => {});
         const evm = await confirmSweeps(db, { providers: layer.providers, notify });
         const proposed = layer.enabledChains.length ? await proposeDue(db, { chains: layer.enabledChains, providers: layer.providers, notify, adminUrl: `${origin}/admin/` }) : null;
         return { tron: tronSweeps, evm, proposed };

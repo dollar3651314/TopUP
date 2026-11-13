@@ -7,6 +7,7 @@ import { createFakeEvm } from './adapters/fake-evm.js';
 import { createContractProvider, EVM_CHAINS } from './providers/contract.js';
 import { createUnavailableProvider } from './provider.js';
 import { isEvmAddress } from './create2.js';
+import { verifyLayer } from './verify-onchain.js';
 
 const DECIMALS = { eth: 6, bsc: 18 };
 
@@ -51,5 +52,19 @@ export function createWalletLayer({ db, config, evm = {} }) {
   }
   for (const [chain, a] of Object.entries(adapters)) if (a.fake && chains[chain]) a.bindSaltResolver((salt) => contract.addressForSalt(chain, salt));
   const providers = { contract, cobo: createUnavailableProvider('cobo'), fireblocks: createUnavailableProvider('fireblocks') };
-  return { providers, config: cfg, adapters, enabledChains: Object.keys(chains), errors, operatorConfigured: Boolean(config.sweepOperatorKey) || Boolean(config.fakeEvm) };
+  const enabledChains = Object.keys(chains);
+  const layer = {
+    providers, config: cfg, adapters, enabledChains, errors, operatorConfigured: Boolean(config.sweepOperatorKey) || Boolean(config.fakeEvm),
+    chainsConfigured: { ...chains }, onchain: {},
+    /** 停用一条链（链上参数和配置不一致）：从开通列表里拿掉（同一个数组，ops、付款页都看得到）、提供方不再给这条链地址和归集 */
+    disableChain(chain, why) {
+      const i = enabledChains.indexOf(chain);
+      if (i >= 0) enabledChains.splice(i, 1);
+      contract.disableChain?.(chain);
+      errors[chain] = why;
+    },
+    /** 用 eth_call 核对链上合约参数（verify-onchain.js）；启动时、系统状态里调用 */
+    verifyOnchain: (opts) => verifyLayer(layer, opts),
+  };
+  return layer;
 }

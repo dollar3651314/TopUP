@@ -81,7 +81,7 @@ export function makeDialog(root: ParentNode, prefix: string) {
   });
   return (t: string, content: Node, okText: string, onOk: typeof handler, danger = false, hideOk = false) => {
     title.textContent = t; body.replaceChildren(content);
-    ok.textContent = okText; ok.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`; ok.hidden = hideOk;
+    ok.textContent = okText; ok.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`; ok.hidden = hideOk; ok.disabled = false;
     // 只看信息的弹窗（hideOk）：只留一个按钮，文字用 okText（例如"关闭"），不再出现意思重复的"取消"和"确定"
     if (cancel) cancel.textContent = hideOk ? okText : cancelText;
     handler = onOk; dlg.showModal();

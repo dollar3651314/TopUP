@@ -101,7 +101,7 @@ jobs:
             e2e/.tmp/*.log
           retention-days: 7
 
-  # 智能合约 + 本地链端到端：原样源码核对 → forge build → forge test（单元、模糊、不变量、CREATE2 向量）
+  # 智能合约 + 本地链端到端：原样源码核对（含逐字节对照上游）→ forge build → forge test（单元、模糊、不变量、CREATE2 向量）
   # → 起 anvil，用编译产物部署合约，跑后端钱包的端到端（test/anvil/：分配地址 → 扫链入账 → 凑批 → 确认 → 归集）
   contracts:
     runs-on: ubuntu-24.04
@@ -113,8 +113,9 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: v1.5.1
-      - name: 原样源码核对（BitGo、OpenZeppelin 的 sha256）
-        run: cd contracts && bash script/check-vendor.sh
+      # 不只核对仓库里的 sha256 清单（清单和源码可以一起被改），还从 GitHub 拉上游固定提交逐字节比较
+      - name: 原样源码核对（sha256 清单 + 逐字节对照上游 BitGo 9566bcd、OpenZeppelin v5.0.0）
+        run: cd contracts && bash script/check-vendor.sh --upstream
       - name: forge build
         run: cd contracts && forge build
       - name: forge test

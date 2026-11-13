@@ -111,8 +111,16 @@ export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decim
     }
   }
 
+  /** 已经有几个确认（上链那个区块算 1 个）；还没上链 0；连不上 null */
+  async function confirmationsOf(hash) {
+    try {
+      const [r, h] = await rpc.batch([['eth_getTransactionReceipt', [hash]], ['eth_blockNumber', []]]);
+      return r ? Math.max(0, num(h) - num(r.blockNumber) + 1) : 0;
+    } catch { return null; }
+  }
+
   return {
-    chain, usdt, decimals, confirmations, rpc,
+    chain, usdt, decimals, confirmations, rpc, confirmationsOf,
     head, transfers, receipt, txStatus,
     /** USDT 余额（原始数，bigint） */
     async tokenBalanceRaw(address, token = usdt) { return BigInt(await rpc.call('eth_call', [{ to: token, data: encodeBalanceOf(address) }, 'latest'])); },
@@ -123,5 +131,7 @@ export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decim
     async nonce(address) { return BigInt(await rpc.call('eth_getTransactionCount', [address, 'pending'])); },
     async estimateGas(tx) { return BigInt(await rpc.call('eth_estimateGas', [tx])); },
     async sendRaw(raw) { return rpc.call('eth_sendRawTransaction', [raw]); },
+    /** 节点认不认识这笔交易（在交易池里或已上链）；连不上时抛出 */
+    async txKnown(hash) { return (await rpc.call('eth_getTransactionByHash', [hash])) !== null; },
   };
 }

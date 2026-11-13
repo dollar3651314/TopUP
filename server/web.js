@@ -85,6 +85,7 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
           wallet.chains.push(walletChainStatus(chain === 'tron' ? { chain, enabled: false } : {
             chain, rpcConfigured: Boolean(cc?.rpcUrl), usdtConfigured: Boolean(cc?.usdt), scheme: cc?.scheme || {},
             cursor: scan?.cursor ?? null, head: scan?.head ?? null, confirmations: cc?.confirmations ?? 0, lastScanAt: scan?.at ?? null,
+            onchain: d.layer?.onchain?.[chain]?.result ?? null,
           }));
         }
         wallet.operator = Boolean(c.sweepOperatorKey);

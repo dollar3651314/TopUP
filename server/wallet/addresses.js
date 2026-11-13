@@ -55,3 +55,21 @@ export async function sweepCandidates(db, { chain, provider }) {
   const rows = await db.query(`select address, salt, scheme_ver, status from customer_addresses where chain = $1 and provider = $2 order by id`, [chain, provider]);
   return rows.map((r) => ({ address: r.address, salt: r.salt, schemeVer: r.scheme_ver, status: r.status }));
 }
+
+/**
+ * ETH、BSC 合约钱包地址里还没归集的钱（按账本估算：到账合计 − 已归集），每条链一行：
+ * { chain: { total, count, over, overTotal } }（金额是 0.000001 单位的 bigint）。thresholds：每条链的门槛（bigint），给了才算"达到门槛"
+ */
+export async function evmUnswept(db, { chains = ['eth', 'bsc'], thresholds = {} } = {}) {
+  const out = {};
+  for (const chain of chains) {
+    const [r] = await db.query(`with a as (
+        select coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address)), 0)
+          - coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept'), 0) v
+        from customer_addresses ca where ca.chain = $1)
+      select count(*) filter (where v > 0)::int n, coalesce(sum(v) filter (where v > 0), 0)::bigint total,
+        count(*) filter (where v >= $2)::int over_n, coalesce(sum(v) filter (where v >= $2), 0)::bigint over_total from a`, [chain, String(thresholds[chain] ?? 0n)]);
+    out[chain] = { total: BigInt(r.total), count: r.n, over: r.over_n, overTotal: BigInt(r.over_total) };
+  }
+  return out;
+}

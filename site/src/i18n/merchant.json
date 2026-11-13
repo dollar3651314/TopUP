@@ -339,6 +339,7 @@
       "orderNo": "Order",
       "powered": "Secure payment",
       "notFound": "Payment request not found. Check the link or ask the merchant for a new one.",
+      "unavailable": "We can't load the payment status right now. If you have already paid, please do not pay again — this page retries automatically.",
       "proto": "Prototype controls:",
       "protoPay": "Simulate exact payment",
       "protoPartial": "Simulate partial payment",
@@ -453,6 +454,7 @@
       "only": "USDT on {net} ({std}) only · never changes",
       "copy": "Copy {net} address",
       "laterNote": "Assigned automatically when release 2 goes live; nothing to do.",
+      "sameNote": "The Ethereum and BSC addresses are the same string: this customer can receive USDT on both networks. Tell the payer which network to use.",
       "copiedNote": "Copied. Tell the payer to use the {net} ({std}) network only."
     }
   },
@@ -796,6 +798,7 @@
       "orderNo": "订单号",
       "powered": "安全付款",
       "notFound": "找不到这笔付款，请检查链接，或联系商户获取新的链接。",
+      "unavailable": "暂时查不到状态；已付款请不要重复付。页面会自动重试。",
       "proto": "原型操作：",
       "protoPay": "模拟足额付款",
       "protoPartial": "模拟部分付款",
@@ -910,6 +913,7 @@
       "only": "只收 {net}（{std}）网络的 USDT · 永久不变",
       "copy": "复制 {net} 地址",
       "laterNote": "第 2 批上线后自动分配，不用你操作。",
+      "sameNote": "以太坊和 BSC 的地址是同一串：这个客户两条链都能收 USDT。付款时按付款人用的网络告诉他。",
       "copiedNote": "已复制。告诉付款人只用 {net}（{std}）网络转账。"
     }
   }

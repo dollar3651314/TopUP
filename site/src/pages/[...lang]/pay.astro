@@ -13,6 +13,7 @@ const base = (l: Lang) => (l === 'en' ? '/' : '/zh/');
 <AppLayout lang={lang} title={copy[lang].meta.payTitle} badge={c.powered} switchHref={`${base(other)}pay/`} switchLabel={copy[lang].header.switch} switchAria={copy[lang].header.switchAria}>
   <div class="container pay-wrap" id="pay-root" data-prototype={IS_PROTOTYPE ? '1' : undefined} data-lang={lang} data-base={base(lang)}>
     <p class="alert" data-pay-notfound hidden>{c.notFound}</p>
+    <p class="note-box" data-pay-unavailable role="status" hidden></p>
     <div class="card pay-card" data-pay-card hidden>
       <p class="muted m0" data-pay-merchant></p>
       <div class="pay-amount"><span data-pay-amount></span> <small>USDT</small></div>

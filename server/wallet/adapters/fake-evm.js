@@ -85,5 +85,7 @@ export function createFakeEvm({ chain, usdt, decimals, confirmations = 0, parent
     },
     async receipt(hash) { const t = txs.get(hash); return t ? { transactionHash: hash, ...t } : null; },
     async txStatus(hash) { return txs.has(hash) ? 'confirmed' : 'pending'; },
+    async confirmationsOf(hash) { const t = txs.get(hash); return t ? block - Number(BigInt(t.blockNumber)) + 1 : 0; },
+    async txKnown(hash) { return txs.has(hash); },
   };
 }

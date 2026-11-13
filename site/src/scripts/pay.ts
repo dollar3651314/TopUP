@@ -76,8 +76,13 @@ function paintChoose(s: PayState) {
   box.replaceChildren(...rows);
 }
 
+// 查询状态失败（服务器 500、网络不通）：没拿到过订单时不能说成"链接写错"，提示"暂时查不到；已付款不要重复付"
+let unavailable = false;
 function paint() {
-  if (!st) { $('[data-pay-notfound]').hidden = false; $('[data-pay-card]').hidden = true; return; }
+  // 文字只在出错时放进去（藏起来的文字也算在页面文字里，恢复后要整段拿掉）
+  const un = $('[data-pay-unavailable]');
+  un.hidden = !unavailable; un.textContent = unavailable ? c.unavailable : '';
+  if (!st) { $('[data-pay-notfound]').hidden = unavailable; $('[data-pay-card]').hidden = true; return; }
   const net = currentNet(st);
   const multi = (st.nets?.length || 0) > 1;
   if (net) st.address = net.address;
@@ -178,13 +183,14 @@ async function poll() {
   if (document.visibilityState === 'visible') {
     try {
       const r = await fetch(`/api/pay/?o=${encodeURIComponent(id)}`);
+      unavailable = !r.ok && r.status !== 404;
       if (r.ok) {
         const d = await r.json();
         st = { id: d.order_no, merchant: d.merchant, amount: parseUsdt(d.amount) || 0, received: parseUsdt(d.matched) ?? 0, address: d.address || '', expiresAt: Date.parse(d.expires_at), status: d.status, confirmations: 0, low: d.low, high: d.high,
           nets: Array.isArray(d.addresses) ? d.addresses : undefined, fixed: !!d.chain };
       }
       else if (r.status === 404) st = null;
-    } catch { /* 网络暂时不通时保持当前显示 */ }
+    } catch { unavailable = true; /* 网络暂时不通：保持当前显示，并提示暂时查不到 */ }
     paint();
     if (st && !open(st)) return;
   }

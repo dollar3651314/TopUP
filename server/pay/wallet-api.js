@@ -14,6 +14,8 @@ import { checkXpub, deriveAddress, isValidAddress } from './tron.js';
 import { inviteMerchantUser } from './merchant-api.js';
 import { diskUsage } from './disk.js';
 import { walletAdminActions } from '../wallet/admin-actions.js';
+import { evmUnswept } from '../wallet/addresses.js';
+import { getSweepSettings } from '../wallet/sweep.js';
 
 const TRX = 1_000_000;
 const SIGN_TTL_MS = 30 * 60 * 1000; // 待签名交易的有效期
@@ -276,7 +278,16 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const fout = await one(`select coalesce(-sum(amount), 0)::bigint v from ledger where type = 'fee_out'`);
       const dust = await one(`select coalesce(sum(amount), 0)::bigint v from deposits where result = 'below_min'`);
       const uns = await one('select coalesce(sum(onchain), 0)::bigint v, count(*) filter (where onchain > 0)::int n from customers');
-      const big = await one(`select count(*)::int n, coalesce(sum(onchain), 0)::bigint v from customers where onchain >= $1`, [100 * 1_000_000]);
+      const settings = await getSweepSettings(db);
+      const tronTh = Number(settings.thresholds.tron);
+      const big = await one(`select count(*)::int n, coalesce(sum(onchain), 0)::bigint v from customers where onchain >= $1`, [tronTh]);
+      // ETH、BSC 合约钱包地址里没归集的（按账本：到账 − 已归集）
+      const evm = await evmUnswept(db, { thresholds: settings.thresholds });
+      const byChain = {
+        tron: { unswept_total: Number(uns.v), address_count: uns.n, over_threshold: big.n, over_threshold_total: Number(big.v), threshold: tronTh, enabled: true },
+        ...Object.fromEntries(Object.entries(evm).map(([c, x]) => [c, { unswept_total: Number(x.total), address_count: x.count, over_threshold: x.over, over_threshold_total: Number(x.overTotal), threshold: Number(settings.thresholds[c]), enabled: Boolean(layer?.enabledChains.includes(c)) }])),
+      };
+      const sumOf = (k) => Object.values(byChain).reduce((a, x) => a + x[k], 0);
       // 本月归集补给地址的 TRX（燃烧用，是成本；TRX 不是 USDT，不从利润里扣）
       const batches = await db.query(`select plan from sign_batches where kind = 'sweep' and status <> 'planned' and created_at >= date_trunc('month', now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai'`);
       const sweepTrx = batches.reduce((s, b) => s + (b.plan.items || []).reduce((x, it) => x + (it.steps || []).filter((st) => st.kind === 'fee_trx').reduce((y, st) => y + Number(st.amount || 0), 0), 0), 0);
@@ -301,11 +312,11 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
         funds: {
           collected_total: col.v, deposit_count: col.n,
           owed_total: bal.available + bal.frozen, owed_available: bal.available, owed_frozen: bal.frozen,
-          unswept_total: uns.v, cold_configured: !!cold,
+          unswept_total: sumOf('unswept_total'), cold_configured: !!cold || Boolean(layer?.enabledChains.length),
           income_fee_in: fin.v, income_fee_out: fout.v, income_dust: dust.v,
         },
         todo: { withdrawals_count: wd.n, withdrawals_amount: wd.amount, anomalies: an.n, callbacks_failed: cbf.n },
-        sweep: { unswept_total: uns.v, address_count: uns.n, over_threshold: big.n, over_threshold_total: big.v, threshold: 100 * 1_000_000, energy_per_sweep: ENERGY_PER_SWEEP, month_sweep_trx: sweepTrx },
+        sweep: { unswept_total: sumOf('unswept_total'), address_count: sumOf('address_count'), over_threshold: sumOf('over_threshold'), over_threshold_total: sumOf('over_threshold_total'), threshold: tronTh, energy_per_sweep: ENERGY_PER_SWEEP, month_sweep_trx: sweepTrx, by_chain: byChain },
         periods: { today, d7, d30 },
         top_merchants: top.map((t) => ({ name: t.name, amount: t.amount, count: t.n })),
         system: { tick_age_s: tick ? Math.round((Date.now() - Date.parse(tick.at)) / 1000) : null, recon: rc ? { day: iso(rc.day).slice(0, 10), diff: rc.diff, complete: !!rc.detail?.complete } : null, db_bytes: size.bytes, disk: diskUsage(diskPath) },
@@ -321,18 +332,30 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const within = async (p, ms = 6000) => { let timer; try { return await Promise.race([p, new Promise((res) => { timer = setTimeout(() => res(null), ms); })]); } catch (e) { console.error(`[overview-chain] ${e.message}`); return null; } finally { clearTimeout(timer); } };
       const chain = async (a) => { if (!a) return { usdt: 0, trx: 0 }; const acc = await tron.account(a); return { usdt: Number(acc.trc20[tron.contract]) || 0, trx: acc.trx }; };
       const [h, c, r, approved, kybPending] = await Promise.all([within(chain(hot)), within(chain(cold)), within(tron.resources(hot)), within(listApproved()), within(pendingKyb())]);
+      // ETH、BSC：冷钱包（合约里写死的 parent）的 USDT 余额；第 1 批 ETH、BSC 没有热钱包（打款在后续批次）
+      const evmChains = layer ? [...layer.enabledChains] : [];
+      const evmCold = Object.fromEntries(await Promise.all(evmChains.map(async (ch) => [ch, await within((async () => Number(await layer.providers.contract.balance(ch, { vault: 'cold' })))())])));
       const [bal] = await db.query('select coalesce(sum(available + frozen), 0)::bigint owed from balances');
       const [uns] = await db.query('select coalesce(sum(onchain), 0)::bigint v from customers');
+      const evmUns = await evmUnswept(db);
+      const unsAll = Number(uns.v) + Object.values(evmUns).reduce((a, x) => a + Number(x.total), 0);
       const opened = new Set((await db.query('select kyb_ref from merchants where kyb_ref is not null')).map((x) => x.kyb_ref));
-      const owed = bal.owed, wallets = h && c ? h.usdt + c.usdt : null, assets = wallets === null ? null : uns.v + wallets;
+      const evmColdKnown = Object.values(evmCold).every((x) => x !== null);
+      const coldAll = c && evmColdKnown ? c.usdt + Object.values(evmCold).reduce((a, x) => a + x, 0) : null;
+      // 任何一条开通的链查不到余额，合计就显示"—"（不拿缺一块的数字算利润和告警）
+      const owed = bal.owed, wallets = h && coldAll !== null ? h.usdt + coldAll : null, assets = wallets === null ? null : unsAll + wallets;
       console.log(`[overview-chain] ${Date.now() - t0} ms`);
       return {
         elapsed_ms: Date.now() - t0,
         funds: {
-          hot_usdt: h ? h.usdt : null, cold_usdt: c ? c.usdt : null, assets_total: assets,
+          hot_usdt: h ? h.usdt : null, cold_usdt: coldAll, assets_total: assets,
           profit_total: assets === null ? null : assets - owed,
           profit_now: wallets === null ? null : Math.max(0, wallets - owed),
           profit_after_sweep: assets === null ? null : assets - owed - Math.max(0, wallets - owed),
+          by_chain: {
+            tron: { hot_usdt: h ? h.usdt : null, cold_usdt: c ? c.usdt : null },
+            ...Object.fromEntries(evmChains.map((ch) => [ch, { hot_usdt: null, cold_usdt: evmCold[ch] }])),
+          },
         },
         todo: { kyb_pending: kybPending, merchants_to_open: approved === null ? null : approved.filter((a) => !opened.has(a.ref)).length },
         sweep: { hot_trx: h ? h.trx : null, energy_left: r ? Math.max(0, r.energyLimit - r.energyUsed) : null },
