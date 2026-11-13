@@ -137,7 +137,7 @@ async function refreshUnmatched(t, merchantId, customerId) {
     where merchant_id = $1 and customer_id = $2`, [merchantId, customerId]);
 }
 
-export async function createOrder(db, merchant, { customerId, customerName = '', customerEmailEnc = '', customerEmailHash = '', merchantOrderNo, amount }) {
+export async function createOrder(db, merchant, { customerId, customerName = '', customerEmailEnc = '', customerEmailHash = '', merchantOrderNo, amount, chain = null }) {
   const mode = merchant.order_mode;
   if (!mode.enabled) throw new PayError('order_mode_disabled', 403);
   if (!ORDER_NO_RE.test(merchantOrderNo || '')) throw new PayError('invalid_param', 422, 'merchant_order_no');
@@ -148,9 +148,9 @@ export async function createOrder(db, merchant, { customerId, customerName = '',
     const id = newId.order();
     const now = new Date();
     try {
-      await t.query(`insert into orders (id, merchant_id, merchant_order_no, customer_id, amount, status, low, high, created_at, expires_at)
-        values ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9)`,
-        [id, merchant.id, merchantOrderNo, customerId, amount, mode.low, mode.high, now, new Date(now.getTime() + mode.ttlMin * 60_000)]);
+      await t.query(`insert into orders (id, merchant_id, merchant_order_no, customer_id, amount, status, low, high, created_at, expires_at, chain)
+        values ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, $10)`,
+        [id, merchant.id, merchantOrderNo, customerId, amount, mode.low, mode.high, now, new Date(now.getTime() + mode.ttlMin * 60_000), chain]);
     } catch (e) {
       if (/unique|duplicate/i.test(e.message)) throw new PayError('duplicate_merchant_order_no', 409, 'merchant_order_no');
       throw e;
@@ -264,7 +264,7 @@ export async function recordDeposit(db, { chain = 'tron', txid, logIndex, block,
     }
     await refreshUnmatched(t, c.merchant_id, c.customer_id);
     await enqueueCallback(t, c.merchant_id, 'deposit', {
-      customer_id: c.customer_id, address: to, txid, amount, fee, credited: amount - fee, order_no: order ? order.id : null, time: new Date(time).toISOString(),
+      customer_id: c.customer_id, chain, address: to, txid, amount, fee, credited: amount - fee, order_no: order ? order.id : null, time: new Date(time).toISOString(),
     });
     if (order) await orderCallback(t, c.merchant_id, order.id);
     return { status: 'credited', deposit: d, order: order ? order.id : null };

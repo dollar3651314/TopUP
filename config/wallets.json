@@ -1,18 +1,72 @@
 {
-  "_说明": "热钱包、冷钱包的地址（公开信息，不是密钥）。签名页面只允许把钱归集到这两个地址，修改必须提交 PR。production 和 staging 的地址在部署时提供后走 PR 填写；local 是本地测试用的地址，对应公开的测试私钥，只用于自动化测试。usdt 是签名页面认可的 USDT 合约地址（生产是主网，测试环境和本地是 Nile 测试网）。",
+  "_说明": "热钱包、冷钱包的地址（公开信息，不是密钥）。签名页面只允许把钱归集到这两个地址，修改必须提交 PR。production 和 staging 的地址在部署时提供后走 PR 填写；local 是本地测试用的地址，对应公开的测试私钥，只用于自动化测试。usdt 是签名页面认可的 USDT 合约地址（生产是主网，测试环境和本地是 Nile 测试网）。 evm 是 ETH、BSC 合约钱包的参数（公开地址）：usdt、factory（BitGo 工厂）、implementation（转发合约实现）、parent（冷钱包，Safe 多签）、batcher（批量合约 SweepBatcher）、ver（这套参数的版本，换参数时加 1）；空着的链不开通。local 的是本地替身用的假地址，不在任何链上。",
   "production": {
     "hot": "",
     "cold": "",
-    "usdt": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+    "usdt": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+    "evm": {
+      "eth": {
+        "usdt": "",
+        "factory": "",
+        "implementation": "",
+        "parent": "",
+        "batcher": "",
+        "ver": 1
+      },
+      "bsc": {
+        "usdt": "",
+        "factory": "",
+        "implementation": "",
+        "parent": "",
+        "batcher": "",
+        "ver": 1
+      }
+    }
   },
   "staging": {
     "hot": "",
     "cold": "",
-    "usdt": "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf"
+    "usdt": "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf",
+    "evm": {
+      "eth": {
+        "usdt": "",
+        "factory": "",
+        "implementation": "",
+        "parent": "",
+        "batcher": "",
+        "ver": 1
+      },
+      "bsc": {
+        "usdt": "",
+        "factory": "",
+        "implementation": "",
+        "parent": "",
+        "batcher": "",
+        "ver": 1
+      }
+    }
   },
   "local": {
     "hot": "TCLBgkbfVkJroVBJVqBEsxtPNQEQMTQCLQ",
     "cold": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-    "usdt": "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf"
+    "usdt": "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf",
+    "evm": {
+      "eth": {
+        "usdt": "0x000000000000000000000000000000000000E7d6",
+        "factory": "0x00000000000000000000000000000000000Fac01",
+        "implementation": "0x0000000000000000000000000000000000001001",
+        "parent": "0x0000000000000000000000000000000000005afe",
+        "batcher": "0x000000000000000000000000000000000000ba7c",
+        "ver": 1
+      },
+      "bsc": {
+        "usdt": "0x000000000000000000000000000000000000B5c6",
+        "factory": "0x00000000000000000000000000000000000Fac01",
+        "implementation": "0x0000000000000000000000000000000000001001",
+        "parent": "0x0000000000000000000000000000000000005afe",
+        "batcher": "0x000000000000000000000000000000000000ba7c",
+        "ver": 1
+      }
+    }
   }
 }

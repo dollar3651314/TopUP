@@ -44,6 +44,15 @@ export function loadConfig(rawEnv = process.env) {
     usdtContract: env.USDT_CONTRACT || '',
     // 本地和自动化测试：用 TronGrid 替身（只在 APP_ENV=local 时生效）
     fakeTron: appEnv === 'local' && env.FAKE_TRON !== '0',
+    // ETH、BSC 合约钱包：节点地址（可能带 API Key，只放 .env）、确认数；合约地址在 config/wallets.json（公开信息，改要走 PR）
+    ethRpcUrl: env.ETH_RPC_URL || '',
+    bscRpcUrl: env.BSC_RPC_URL || '',
+    ethConfirmations: int(env.ETH_CONFIRMATIONS, 12),
+    bscConfirmations: int(env.BSC_CONFIRMATIONS, 15),
+    // 归集发起账户的私钥（只在服务器的 .env；它只能调用批量合约，钱只能进冷钱包）。没有时只能分配地址、扫链，不能执行归集
+    sweepOperatorKey: env.SWEEP_OPERATOR_KEY || '',
+    // 本地和自动化测试：ETH、BSC 用内存替身（只在 APP_ENV=local 时生效）
+    fakeEvm: appEnv === 'local' && env.FAKE_EVM !== '0',
     // worker 进程：扫链间隔、每日任务的时间（UTC 小时:分钟）
     tickIntervalMs: int(env.TICK_INTERVAL_MS, 15_000),
     dailyAtUtc: env.DAILY_AT_UTC || '19:15',

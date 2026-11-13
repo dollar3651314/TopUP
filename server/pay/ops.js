@@ -6,18 +6,42 @@ import * as core from './core.js';
 import { PayError, CUSTOMER_RE } from './core.js';
 import { parseAmount, iso, page, emailHash } from './common.js';
 import { checkCallbackUrl } from './callbacks.js';
+import { addressFor } from '../wallet/addresses.js';
+
+export const NETWORK = { eth: 'ETH', bsc: 'BSC', tron: 'TRON' };
+const CHAIN_ORDER = ['eth', 'bsc', 'tron'];
 
 const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,255}$/;
 const cleanText = (v, max) => String(v ?? '').trim().slice(0, max);
 
-export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_' }) {
+export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', wallet = null }) {
+  const enabledChains = wallet?.enabledChains || [];
+  /** 新客户、老客户第一次要地址：给每条已开通的链分配地址（合约钱包是纯计算）；分配失败只记日志，下次再要时重试 */
+  async function ensureAddresses(m, customerId) {
+    for (const chain of enabledChains) {
+      try { await addressFor(db, { merchantId: m.id, customerId, chain, providers: wallet.providers }); }
+      catch (e) { console.error(`[pay] address ${chain}: ${e.code || e.message}`); }
+    }
+  }
+  /** 一批客户每条链现在用的地址（停用的不给）：Map(customer_id → [{ chain, address }]) */
+  async function addressesOf(merchantId, ids) {
+    const out = new Map(ids.map((id) => [id, []]));
+    if (!ids.length) return out;
+    const rows = await db.query(`select customer_id, chain, address from customer_addresses where merchant_id = $1 and customer_id = any($2::text[]) and status = 'active'`, [merchantId, ids]);
+    for (const r of rows.sort((a, b) => CHAIN_ORDER.indexOf(a.chain) - CHAIN_ORDER.indexOf(b.chain))) out.get(r.customer_id)?.push({ chain: r.chain, address: r.address });
+    return out;
+  }
+  const withAddrs = async (m, rows) => {
+    const map = await addressesOf(m.id, rows.map((r) => r.customer_id));
+    return rows.map((r) => customerView(r, map.get(r.customer_id)));
+  };
   const enc = (s) => (s ? encryptJson(keys.enc, s) : '');
   const dec = (s) => { if (!s) return ''; try { return decryptJson(keys.enc, s); } catch { return ''; } };
   const payUrl = (id) => `${payBase}/pay/${id}/`;
   const eh = (s) => emailHash(keys, s);
 
-  const customerView = (c) => ({
-    customer_id: c.customer_id, name: c.name, email: dec(c.email_enc), remark: c.remark, address: c.address,
+  const customerView = (c, addresses = []) => ({
+    customer_id: c.customer_id, name: c.name, email: dec(c.email_enc), remark: c.remark, address: c.address ?? null, addresses,
     total: c.total, count: c.count, fees: c.fees, unmatched: c.unmatched, last_payment_at: iso(c.last_at), created_at: iso(c.created_at),
   });
   const needCustomer = async (m, id) => {
@@ -25,7 +49,13 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_' })
     if (!c) throw new PayError('not_found', 404);
     return c;
   };
-  const withPay = (o, address) => ({ ...o, address, network: 'TRON', token: 'USDT', pay_url: payUrl(o.order_no) });
+  /** 订单的付款信息：指定了链时 address 是这条链的地址；没有指定时是 TRON 地址（旧字段），addresses 给出每条链的地址 */
+  const withPay = async (m, o, chain) => {
+    const addrs = (await addressesOf(m.id, [o.customer_id])).get(o.customer_id);
+    const [c] = await db.query('select address from customers where merchant_id = $1 and customer_id = $2', [m.id, o.customer_id]);
+    const picked = chain ? addrs.find((a) => a.chain === chain)?.address ?? null : c?.address ?? null;
+    return { ...o, address: picked, network: NETWORK[chain || 'tron'], chain: chain || null, addresses: addrs, token: 'USDT', pay_url: payUrl(o.order_no) };
+  };
   const orderOwned = async (m, id) => {
     const [o] = await db.query('select id from orders where merchant_id = $1 and (id = $2 or merchant_order_no = $3)', [m.id, id?.orderNo || '', id?.merchantOrderNo || '']);
     if (!o) throw new PayError('not_found', 404);
@@ -33,6 +63,8 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_' })
   };
 
   return {
+    /** 已开通的链（第 1 批：ETH、BSC；TRON 只给已有地址的老客户） */
+    chains: () => [...enabledChains],
     // ---------- 客户 ----------
     async upsertCustomer(m, b) {
       const id = String(b.customer_id || '');
@@ -48,9 +80,16 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_' })
         if (!sets.length) return row;
         return (await t.query(`update customers set ${sets.join(', ')} where merchant_id = $1 and customer_id = $2 returning *`, vals))[0];
       });
-      return customerView(c);
+      await ensureAddresses(m, id);
+      return (await withAddrs(m, [c]))[0];
     },
-    async getCustomer(m, id) { return customerView(await needCustomer(m, id)); },
+    async getCustomer(m, id) { return (await withAddrs(m, [await needCustomer(m, id)]))[0]; },
+    /** 这个客户每条链的地址（商户后台新建客户后弹出） */
+    async customerAddresses(m, id) {
+      await needCustomer(m, id);
+      await ensureAddresses(m, id);
+      return { customer_id: id, addresses: (await addressesOf(m.id, [id])).get(id), chains: enabledChains };
+    },
     async listCustomers(m, { q = '', cursor = null, limit = 50 }) {
       const vals = [m.id];
       let where = 'merchant_id = $1';
@@ -62,7 +101,8 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_' })
         // - 部分邮箱：解密最近的 5000 个客户后比对（保持 的体验）
         const needle = q.toLowerCase();
         const cand = await db.query(`select * from customers where ${where} order by created_at desc limit 5000`, vals);
-        rows = cand.filter((r) => r.address === q || [r.customer_id, r.name, dec(r.email_enc)].some((v) => (v || '').toLowerCase().includes(needle)));
+        const byAddr = new Set((await db.query(`select customer_id from customer_addresses where merchant_id = $1 and lower(address) = lower($2)`, [m.id, q.trim()])).map((r) => r.customer_id));
+        rows = cand.filter((r) => r.address === q || byAddr.has(r.customer_id) || [r.customer_id, r.name, dec(r.email_enc)].some((v) => (v || '').toLowerCase().includes(needle)));
         if (EMAIL_RE.test(q.trim())) {
           const exact = await db.query(`select * from customers where ${where} and email_hash = $${vals.length + 1} order by created_at desc limit ${limit + 1}`, [...vals, eh(q)]);
           const seen = new Set(rows.map((r) => r.customer_id));
@@ -74,7 +114,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_' })
         rows = await db.query(`select * from customers where ${where} order by created_at desc limit $${vals.length}`, vals);
       }
       const p = page(rows.map((r) => ({ ...r, cursor: new Date(r.created_at).getTime() })), limit);
-      return { items: p.items.map(customerView), next_cursor: p.next_cursor };
+      return { items: await withAddrs(m, p.items), next_cursor: p.next_cursor };
     },
     /** 客户在一个时间段内的统计（只算已入账的到账） */
     async customerStats(m, id, { from, to }) {
@@ -92,18 +132,22 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_' })
     // ---------- 订单 ----------
     async createOrder(m, b) {
       if (b.customer_email && !EMAIL_RE.test(String(b.customer_email))) throw new PayError('invalid_param', 422, 'customer_email');
+      const chain = b.chain === undefined || b.chain === null || b.chain === '' ? null : String(b.chain);
+      if (chain && !['eth', 'bsc', 'tron'].includes(chain)) throw new PayError('invalid_param', 422, 'chain');
+      if (chain && !enabledChains.includes(chain)) throw new PayError('chain_not_enabled', 409, 'chain');
       const o = await core.createOrder(db, m, {
         customerId: String(b.customer_id || ''), customerName: cleanText(b.customer_name, 200), customerEmailEnc: enc(cleanText(b.customer_email, 320)), customerEmailHash: eh(cleanText(b.customer_email, 320)),
-        merchantOrderNo: String(b.merchant_order_no || ''), amount: parseAmount(b.amount),
+        merchantOrderNo: String(b.merchant_order_no || ''), amount: parseAmount(b.amount), chain,
       });
       const { address, ...v } = o;
-      return withPay(v, address);
+      await ensureAddresses(m, v.customer_id);
+      return withPay(m, v, chain);
     },
     async getOrder(m, { orderNo, merchantOrderNo }) {
       const id = await orderOwned(m, { orderNo, merchantOrderNo });
       const v = await core.orderView(db, id);
-      const [c] = await db.query('select address from customers where merchant_id = $1 and customer_id = $2', [m.id, v.customer_id]);
-      return withPay(v, c.address);
+      const [o] = await db.query('select chain from orders where id = $1', [id]);
+      return withPay(m, v, o.chain);
     },
     async listOrders(m, { status = '', customerId = '', cursor = null, limit = 50 }) {
       const vals = [m.id, limit + 1];
@@ -150,7 +194,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_' })
       const rows = await db.query(`select * from deposits where ${where} order by id desc limit $2`, vals);
       const p = page(rows.map((r) => ({ ...r, cursor: r.id })), limit);
       return {
-        items: p.items.map((d) => ({ id: String(d.id), customer_id: d.customer_id, address: d.address, txid: d.txid, amount: d.amount, fee: d.fee, credited: d.result === 'credited' ? d.amount - d.fee : 0, result: d.result, order_no: d.order_id, matched_by: d.match_type, time: iso(d.time) })),
+        items: p.items.map((d) => ({ id: String(d.id), customer_id: d.customer_id, chain: d.chain, address: d.address, txid: d.txid, amount: d.amount, fee: d.fee, credited: d.result === 'credited' ? d.amount - d.fee : 0, result: d.result, order_no: d.order_id, matched_by: d.match_type, time: iso(d.time) })),
         next_cursor: p.next_cursor,
       };
     },

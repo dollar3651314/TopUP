@@ -11,6 +11,9 @@ import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { createApp, initReason, refuseLocal, ROOT } from './app.js';
 import { json } from './kyb/http.js';
+import { walletChainStatus } from './wallet/status.js';
+
+const getMetaSafe = async (db, key) => { try { const [r] = await db.query('select value from pay_meta where key = $1', [key]); return r ? r.value : null; } catch { return null; } };
 
 const TYPES = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json',
   '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.xml': 'application/xml', '.txt': 'text/plain' };
@@ -70,8 +73,25 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
       const age = r ? Math.round((Date.now() - Date.parse(r.value.at)) / 1000) : null;
       worker = { age_s: age, ok: age !== null && age <= 300 };
     } catch (err) { if (ready) worker.error = 'query_failed'; else if (reason(err)) payInfo.reason = reason(err); }
+    // 钱包（ETH、BSC 每条链的扫块、合约地址配没配齐，只给是否）：单独显示，不进整体 ok
+    let wallet = null;
+    if (ready) {
+      try {
+        const d = await pay();
+        wallet = { chains: [] };
+        for (const chain of ['eth', 'bsc', 'tron']) {
+          const cc = d.layer?.config?.[chain];
+          const scan = chain === 'tron' ? null : await getMetaSafe(d.db, `evm_scan_${chain}`);
+          wallet.chains.push(walletChainStatus(chain === 'tron' ? { chain, enabled: false } : {
+            chain, rpcConfigured: Boolean(cc?.rpcUrl), usdtConfigured: Boolean(cc?.usdt), scheme: cc?.scheme || {},
+            cursor: scan?.cursor ?? null, head: scan?.head ?? null, confirmations: cc?.confirmations ?? 0, lastScanAt: scan?.at ?? null,
+          }));
+        }
+        wallet.operator = Boolean(c.sweepOperatorKey);
+      } catch { wallet = { error: 'query_failed' }; }
+    }
     const ok = storage && db && secret && blob && mail && payInfo.trongridKey && ready;
-    return json(ok ? 200 : 503, { ok, env: c.appEnv, commit, storage, db, mail, mailMode, secret, blob, pay: payInfo, worker });
+    return json(ok ? 200 : 503, { ok, env: c.appEnv, commit, storage, db, mail, mailMode, secret, blob, pay: payInfo, worker, ...(wallet ? { wallet } : {}) });
   }
   async function fake(path, request) {
     const d = await pay();
@@ -79,6 +99,11 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
     if (path === '/__fake/tron/pay/') return Response.json(d.tron.pay({ to: body.to, amount: Number(body.amount), time: body.time ? Number(body.time) : Date.now() }));
     if (path === '/__fake/tron/account/') { d.tron.accounts.set(body.address, body.account); return Response.json({ ok: true }); }
     if (path === '/__fake/tron/confirm-all/') { for (const b of d.tron.broadcasts) if (!d.tron.txs.get(b.txId)?.ok) d.tron.confirm(b.txId, body.ok !== false); return Response.json({ ok: true, n: d.tron.broadcasts.length }); }
+    if (path === '/__fake/evm/pay/') {
+      const ad = d.layer?.adapters?.[body.chain];
+      if (!ad?.fake) return Response.json({ error: 'chain_not_enabled' }, { status: 409 });
+      return Response.json(ad.pay({ to: body.to, amount: Number(body.amount), time: body.time ? Number(body.time) : Date.now() }));
+    }
     if (path === '/__fake/tick/') return Response.json(await d.tick());
     if (path === '/__fake/daily/') return Response.json(await d.daily());
     if (path === '/__fake/cleanup/') return Response.json({ ok: true, ...(await (await app()).kyb.cleanup()) });

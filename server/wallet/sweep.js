@@ -396,6 +396,8 @@ export async function proposeDue(db, { chains = SWEEP_CHAINS, providers, notify,
   const slot = sweepSlotDue(now, last);
   if (!slot) return { slot: null };
   await setMeta(db, 'wallet_sweep_slot', slot);
+  // 第一次运行（刚部署）：只记下最近的时间点，不立刻凑批；从下一个时间点开始
+  if (!last) return { slot, first: true };
   const out = { slot, chains: {} };
   for (const chain of chains) {
     try {

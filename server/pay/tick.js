@@ -71,11 +71,12 @@ export async function notifyWithdrawals(db, notify, adminUrl) {
   return rows.length;
 }
 
-export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetchImpl, resolve, confirmSweeps }) {
+export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetchImpl, resolve, confirmSweeps, scanEvm }) {
   const t0 = Date.now();
   const out = {};
   const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = { error: e.message }; console.error(`[tick] ${name}: ${e.message}`); } };
   await step('scan', () => scan(db, tron, { onError: notify && ((ids) => notify('到账处理失败', `以下链上转账没有处理成功，已记到"异常到账"，请联系研发：\n${ids.join('\n')}`)) }));
+  if (scanEvm) await step('scan_evm', () => scanEvm()); // ETH、BSC（server/wallet/scan.js，每条链各自出错各自告警）
   await step('expired', () => expireOrders(db));
   await step('withdrawals', () => confirmWithdrawals(db, tron, { notify }));
   // 归集（确认已发出的批次、到点凑批）：出错只告警（故障一次、恢复一次、长期没恢复每天一次），不影响其他步骤和运行时间

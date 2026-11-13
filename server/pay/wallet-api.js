@@ -13,6 +13,7 @@ import { signerOf } from './signing.js';
 import { checkXpub, deriveAddress, isValidAddress } from './tron.js';
 import { inviteMerchantUser } from './merchant-api.js';
 import { diskUsage } from './disk.js';
+import { walletAdminActions } from '../wallet/admin-actions.js';
 
 const TRX = 1_000_000;
 const SIGN_TTL_MS = 30 * 60 * 1000; // 待签名交易的有效期
@@ -20,7 +21,7 @@ const VERIFY_TTL_MS = 5 * 60 * 1000; // 验证码通过后 5 分钟内必须提�
 const ENERGY_PER_SWEEP = 65_000; // 转 USDT 到已经有 USDT 的地址，大约需要的能量
 const USDT_FEE_LIMIT = 30 * TRX;
 
-export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now() }) {
+export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null }) {
   const hot = wallets.hot, cold = wallets.cold;
   const need = (cond, code, status = 422, field) => { if (!cond) throw new PayError(code, status, field); };
   const merchantRow = async (id) => { const m = await core.getMerchant(db, id); need(m, 'not_found', 404); return m; };
@@ -337,6 +338,9 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
         sweep: { hot_trx: h ? h.trx : null, energy_left: r ? Math.max(0, r.energyLimit - r.energyUsed) : null },
       };
     },
+
+    // ---------- 合约钱包（ETH、BSC）：归集、钱包提供方、每条链的状态（server/wallet/admin-actions.js） ----------
+    ...walletAdminActions({ db, layer, verifyAdminCode, notify, origin, now }),
 
     // ---------- 钱包 ----------
     async wallet() {

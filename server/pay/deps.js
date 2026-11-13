@@ -14,9 +14,13 @@ import { createAdminGate } from './admin-gate.js';
 import { runTick } from './tick.js';
 import { runDaily } from './daily.js';
 import { decryptJson } from '../kyb/crypto.js';
+import { createWalletLayer } from '../wallet/index.js';
+import { scanEvm } from '../wallet/scan.js';
+import { confirmSweeps, proposeDue } from '../wallet/sweep.js';
 
 const WALLETS = JSON.parse(readFileSync(new URL('../../config/wallets.json', import.meta.url), 'utf8'));
 export const walletsFor = (appEnv) => WALLETS[appEnv === 'production' ? 'production' : appEnv === 'staging' ? 'staging' : 'local'];
+
 
 /** config：loadConfig() 的结果；kyb：{ redis, keys }（管理员登录）；send：发邮件；origin：站点地址（邮件里的链接） */
 export async function createPayDeps({ config, kyb, send, getIp, origin }) {
@@ -26,10 +30,12 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   const keys = derivePayKeys(config.appSecret);
   await backfillEmailHash(db, { decrypt: (s) => decryptJson(keys.enc, s), hash: (e) => emailHash(keys, e) });
   const keyPrefix = config.appEnv === 'production' ? 'topup_live_' : 'topup_test_';
-  const ops = createOps({ db, keys, payBase: origin, keyPrefix });
+  const wallets = walletsFor(config.appEnv);
+  // 钱包层（ETH、BSC 合约钱包；cobo、fireblocks 未开通）
+  const layer = createWalletLayer({ db, config, evm: wallets.evm || {} });
+  const ops = createOps({ db, keys, payBase: origin, keyPrefix, wallet: layer });
   const gate = createAdminGate({ redis: kyb.redis, kybKeys: kyb.keys });
   const notify = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
-  const wallets = walletsFor(config.appEnv);
   const diskPath = config.blobDir || config.dataDir || '/'; // 用量提醒看这块磁盘
   const getTarget = async (merchantId) => {
     const [m] = await db.query('select callback_url, api_secret_enc from merchants where id = $1', [merchantId]);
@@ -38,12 +44,22 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   const listApproved = kyb.listApproved || (async () => []);
   const pendingKyb = kyb.pendingKyb || (async () => 0);
   return {
-    db, tron, keys, ops, wallets,
+    db, tron, keys, ops, wallets, layer,
     v1: createApiV1({ db, keys, ops, getIp, redis: kyb.redis }), // 限流计数和开户共用同一个 Redis
     merchant: createMerchantApi({ db, keys, ops, send }),
-    pay: createPayApi({ db }),
-    wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, notify, diskPath }), diskPath, ...gate }),
-    tick: () => runTick({ db, tron, getTarget, notify, adminUrl: `${origin}/admin/`, confirmSweeps: () => sweepProgress(db, tron, { notify }) }),
+    pay: createPayApi({ db, layer }),
+    wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, notify, diskPath }), diskPath, ...gate }),
+    tick: () => runTick({
+      db, tron, getTarget, notify, adminUrl: `${origin}/admin/`,
+      scanEvm: () => scanEvm(db, { layer, notify }),
+      // 归集：TRON 第 0 批的浏览器签名批次；ETH、BSC 合约钱包确认已发出的批次、到点凑批（东八区 10:00、20:00）
+      confirmSweeps: async () => {
+        const tronSweeps = await sweepProgress(db, tron, { notify });
+        const evm = await confirmSweeps(db, { providers: layer.providers, notify });
+        const proposed = layer.enabledChains.length ? await proposeDue(db, { chains: layer.enabledChains, providers: layer.providers, notify, adminUrl: `${origin}/admin/` }) : null;
+        return { tron: tronSweeps, evm, proposed };
+      },
+    }),
     daily: () => runDaily({ db, tron, wallets, notify, diskPath }),
   };
 }
