@@ -60,6 +60,13 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     return { status: r.status, body: await r.json() };
   }, [a, body] as const);
   const isWallet = (name: string) => (url: URL) => url.pathname === '/api/wallet/' && url.searchParams.get('a') === name;
+  /** 拦截接口、改返回再交给页面。页面切走或用例结束时请求可能已经作废（响应被释放）：这时不再处理，不把错误留给后面的用例 */
+  const patchJson = (edit: (j: any) => void) => async (r: any) => {
+    let res, j;
+    try { res = await r.fetch(); j = await res.json(); } catch { await r.abort().catch(() => {}); return; }
+    edit(j);
+    await r.fulfill({ response: res, json: j }).catch(() => {});
+  };
   async function adminTab(tab: string) {
     if (!(await admin.locator('[data-view="app"]').isVisible())) await admin.goto('/admin/');
     await expect(admin.locator('[data-view="app"]')).toBeVisible();
@@ -452,21 +459,16 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
   test('TC-W14 概览"待处理"：链上合约参数不一致（已停用）、发起账户手续费不够、等确认的批次都列出；出错的排在等确认的前面，第一条配大按钮', async () => {
     await adminTab('p-overview');
     const created = new Date(Date.now() - 3 * 3600_000).toISOString();
-    await admin.route(isWallet('wallet-chains'), async (r) => {
-      const res = await r.fetch(); const j = await res.json();
+    await admin.route(isWallet('wallet-chains'), patchJson((j) => {
       for (const c of j.chains) {
         if (c.chain === 'eth') Object.assign(c, { status: 'onchain_mismatch', ok: false, config_error: 'onchain_mismatch', onchain_fields: ['parent'] });
         if (c.chain === 'bsc') c.operator = { ...c.operator, configured: true, gas: '0.001', symbol: 'BNB', batches_left: 1, low: true };
       }
-      await r.fulfill({ response: res, json: j });
-    });
-    await admin.route(isWallet('wallet-sweep'), async (r) => {
-      const res = await r.fetch(); const j = await res.json();
+    }));
+    await admin.route(isWallet('wallet-sweep'), patchJson((j) => {
       const eth = (j.chains || []).find((c: any) => c.chain === 'eth');
-      expect(eth, '前提：归集接口有以太坊这一条').toBeTruthy();
-      eth.batches = [...(eth.batches || []), { id: 'QA-AWAIT-1', status: 'awaiting_approval', chain: 'eth', total_usdt: '123.45', address_count: 2, split_of: 1, created_at: created }];
-      await r.fulfill({ response: res, json: j });
-    });
+      if (eth) eth.batches = [...(eth.batches || []), { id: 'QA-AWAIT-1', status: 'awaiting_approval', chain: 'eth', total_usdt: '123.45', address_count: 2, split_of: 1, created_at: created }];
+    }));
     await admin.click('[data-tab="p-sweep"]'); await admin.click('[data-tab="p-overview"]');
     const todo = admin.locator('[data-panel="p-overview"] [data-todo]');
     await expect(todo).toContainText('以太坊：合约参数和链上不一致，已停用');
@@ -483,24 +485,26 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     // 按钮去对的页面：手续费不够 → 归集页
     await todo.locator('tbody tr', { hasText: '不够付手续费' }).locator('button', { hasText: '去补手续费' }).click();
     await expect(admin.locator('[data-panel="p-sweep"]')).toBeVisible();
-    await admin.unroute(isWallet('wallet-chains'));
-    await admin.unroute(isWallet('wallet-sweep'));
+    // 归集页（和侧栏角标）还在读 wallet-sweep、wallet-chains：等页面读完，再等在途的拦截处理完才撤拦截，不把没处理完的请求留给下一条用例
+    await expect(admin.locator('[data-panel="p-sweep"] [data-loading]')).toHaveCount(0);
+    await admin.unroute(isWallet('wallet-chains'), { behavior: 'wait' });
+    await admin.unroute(isWallet('wallet-sweep'), { behavior: 'wait' });
   });
 
   test('TC-W15 概览资金按链拆开：BSC 冷钱包查不到时 BSC 那行冷钱包和合计显示"—"，平台资产、利润显示"—"；TRON、以太坊那行照常有数', async () => {
     await adminTab('p-overview');
-    await admin.route(isWallet('overview-chain'), async (r) => {
-      const res = await r.fetch(); const j = await res.json();
-      expect(j.funds.by_chain?.bsc, '前提：接口按链返回资金').toBeTruthy();
+    let byChain = false;
+    await admin.route(isWallet('overview-chain'), patchJson((j) => {
+      byChain = Boolean(j.funds.by_chain?.bsc);
       Object.assign(j.funds, { cold_usdt: null, assets_total: null, profit_total: null, profit_now: null, profit_after_sweep: null });
-      j.funds.by_chain.bsc.cold_usdt = null;
-      await r.fulfill({ response: res, json: j });
-    });
+      if (j.funds.by_chain?.bsc) j.funds.by_chain.bsc.cold_usdt = null;
+    }));
     await admin.click('[data-tab="p-sweep"]'); await admin.click('[data-tab="p-overview"]');
     const p = admin.locator('[data-panel="p-overview"]');
     const box = p.locator('[data-funds-chains]');
     await expect(box).toBeVisible();
     await expect(p.locator('[data-ov-refresh]')).toBeEnabled(); // 两批数据都回来了
+    expect(byChain, '前提：接口按链返回资金').toBe(true);
     const row = (name: string) => box.locator('tbody tr', { hasText: name });
     const cells = async (name: string) => (await row(name).locator('td').allInnerTexts()).map((x) => x.trim());
     const bsc = await cells('BSC');
@@ -514,7 +518,7 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(statV('平台资产')).toHaveText('—');
     await expect(statV('利润')).toHaveText('—');
     await expect(statV('现在就能转走的利润')).toHaveText('—');
-    await admin.unroute(isWallet('overview-chain'));
+    await admin.unroute(isWallet('overview-chain'), { behavior: 'wait' });
   });
 
 });
