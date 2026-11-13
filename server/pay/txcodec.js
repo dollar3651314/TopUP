@@ -50,13 +50,15 @@ export function fields(b) {
 }
 /**
  * 严格读一层字段：只许出现 allowed 里的字段号（{ 字段号: 线型 }），线型要对得上，每个字段号最多一次（repeated 里列出的除外）。
- * 返回 Map(字段号 → 值)；repeated 字段的值是数组。不符合就抛出。
+ * 返回 Map(字段号 → 值)；repeated 字段的值是数组。不符合就抛出。签名页面（decodeRaw）和 TRON 归集（contract-tron.js 的 checkTriggerRaw）共用这一份。
  * 为什么：protobuf 同一个字段号可以出现多次，java-tron 取最后一个，"取第一个"的解码会让页面核对一组、链上执行另一组；
  * java-tron 遇到线型不对的字段当作未知字段跳过（值留默认），所以线型不对、白名单外的字段也一律不认。
  */
 export function strictFields(bytes, allowed, where, repeated = []) {
+  let fs;
+  try { fs = fields(bytes); } catch (e) { throw new Error(`${where}: ${e.message}`); }
   const m = new Map();
-  for (const f of fields(bytes)) {
+  for (const f of fs) {
     if (!(f.no in allowed)) throw new Error(`${where}: unexpected field ${f.no}`);
     if (allowed[f.no] !== f.wire) throw new Error(`${where}: field ${f.no} has wire type ${f.wire}`);
     if (repeated.includes(f.no)) { if (!m.has(f.no)) m.set(f.no, []); m.get(f.no).push(f.value); continue; }

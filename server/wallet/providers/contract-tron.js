@@ -7,7 +7,7 @@ import { hex } from '@scure/base';
 import { WalletError } from '../provider.js';
 import { forwarderAddress as tronForwarder, isTronAddress, hex20 } from '../tron-create2.js';
 import { addressOfPrivateKey, signTxId } from '../../pay/signing.js';
-import { encodeSigned, fields } from '../../pay/txcodec.js';
+import { encodeSigned, strictFields as sharedStrictFields } from '../../pay/txcodec.js';
 import { keccakHex } from '../evm-tx.js';
 import { logAddr, nodeMessage } from '../adapters/tron.js';
 
@@ -62,18 +62,9 @@ const lenF = (no, bytes) => [...vint((no << 3) | 2), ...vint(bytes.length), ...b
 const intF = (no, v) => [...vint((no << 3) | 0), ...vint(v)];
 const mismatch = (why) => new WalletError('tx_mismatch', `node built a transaction that does not match the sweep call (tx_mismatch: ${why})`);
 
-/** 一层字段：每个字段号最多一次、只许出现 allowed 里的、线型对得上；返回 Map(no → value) */
+/** 一层字段：每个字段号最多一次、只许出现 allowed 里的、线型对得上；返回 Map(no → value)。和签名页面共用 txcodec 的 strictFields */
 function strictFields(bytes, allowed, where) {
-  let fs;
-  try { fs = fields(bytes); } catch (e) { throw mismatch(`${where}: ${e.message}`); }
-  const m = new Map();
-  for (const f of fs) {
-    if (!(f.no in allowed)) throw mismatch(`${where}: unexpected field ${f.no}`);
-    if (allowed[f.no] !== f.wire) throw mismatch(`${where}: field ${f.no} has wire type ${f.wire}`);
-    if (m.has(f.no)) throw mismatch(`${where}: duplicate field ${f.no}`);
-    m.set(f.no, f.value);
-  }
-  return m;
+  try { return sharedStrictFields(bytes, allowed, where); } catch (e) { throw mismatch(e.message); }
 }
 
 /**
