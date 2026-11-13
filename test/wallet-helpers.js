@@ -1,6 +1,6 @@
 // 钱包接口层测试共用的小工具（不是测试文件，npm test 不单独运行它）：
-//   - fakeEvm：替身以太坊 JSON-RPC 节点（eth_blockNumber、eth_getLogs、eth_getBlockByNumber、eth_getTransactionReceipt、eth_getCode、eth_call、eth_chainId），
-//     记录每次请求，支持批量请求；down = true 时模拟连不上节点
+//   - fakeEvm：替身以太坊 JSON-RPC 节点（读日志、区块、回执、代码、余额，以及发交易要用的 chainId、gasPrice、nonce、estimateGas、sendRawTransaction），
+//     记录每次请求，支持批量请求；down = true 时模拟连不上节点，downFor 列出的方法单独连不上
 //   - setupDb：建表后插入一个商户和若干客户
 //   - Transfer 事件的编码
 import { createTestDb } from '../server/pay/db.js';
@@ -30,7 +30,7 @@ export function transferLog({ token, from, to, raw, block, txid, logIndex = 0 })
  * eth_getLogs 按 address、topics[0]、topics[2]（to）和区块范围过滤，和真实节点一样。
  */
 export function fakeEvm(state = {}) {
-  const s = { head: 100, logs: [], blockTime: (n) => 1_700_000_000 + n * 12, receipts: {}, code: {}, down: false, ...state };
+  const s = { head: 100, logs: [], blockTime: (n) => 1_700_000_000 + n * 12, receipts: {}, code: {}, down: false, downFor: [], sent: [], balances: {}, ...state };
   const calls = [];
   const handle = ({ id, method, params = [] }) => {
     calls.push({ method, params });
@@ -59,12 +59,23 @@ export function fakeEvm(state = {}) {
         return ok(r ? { transactionHash: params[0], status: r.status, blockNumber: '0x' + r.blockNumber.toString(16), logs: r.logs || [] } : null);
       }
       case 'eth_getCode': return ok(s.code[String(params[0]).toLowerCase()] || '0x');
+      case 'eth_gasPrice': return ok('0x3b9aca00');
+      case 'eth_getTransactionCount': return ok('0x0');
+      case 'eth_estimateGas': return ok('0x30d40');
+      case 'eth_getBalance': return ok('0x' + (10n ** 18n).toString(16));
+      case 'eth_call': { // 只支持 balanceOf(address)
+        const d = String(params[0]?.data || '');
+        if (d.startsWith('0x70a08231')) return ok('0x' + BigInt(s.balances[('0x' + d.slice(-40)).toLowerCase()] || 0).toString(16).padStart(64, '0'));
+        return ok('0x');
+      }
+      case 'eth_sendRawTransaction': { s.sent.push(params[0]); return ok('0x' + hex(keccak_256(Buffer.from(String(params[0]).slice(2), 'hex')))); }
       default: return { jsonrpc: '2.0', id, error: { code: -32601, message: `method not found: ${method}` } };
     }
   };
   const fetchImpl = async (url, init = {}) => {
-    if (s.down) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
     const body = JSON.parse(init.body);
+    // down：整个节点连不上；downFor：请求里有这些方法时连不上（模拟广播时断线）
+    if (s.down || [].concat(body).some((x) => s.downFor.includes(x.method))) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
     const out = Array.isArray(body) ? body.map(handle) : handle(body);
     return new Response(JSON.stringify(out), { status: 200, headers: { 'content-type': 'application/json' } });
   };
