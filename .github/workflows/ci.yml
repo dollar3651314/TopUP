@@ -72,8 +72,18 @@ jobs:
       - run: npm ci
       - name: 构建页面（先检查中英文案结构）
         run: cd site && npm ci && npm run build
+      - name: 浏览器缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package-lock.json') }}
       - name: 安装测试浏览器
-        run: cd e2e && npm ci && npx playwright install --with-deps chromium
+        timeout-minutes: 15
+        # 系统依赖装一次；浏览器下载偶尔会卡住不动：每次最多等 4 分钟，最多试 3 次
+        run: |
+          cd e2e && npm ci && npx playwright install-deps chromium
+          for i in 1 2 3; do timeout 240 npx playwright install chromium && exit 0; echo "第 $i 次下载浏览器没有完成，重试"; done
+          exit 1
       - name: 端到端测试
         env:
           E2E_DATABASE_URL: postgres://postgres:ci@127.0.0.1:5432/postgres
