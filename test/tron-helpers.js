@@ -94,7 +94,7 @@ export function fakeTronNode(state = {}) {
     head: 1000, solidLag: 19, energyFee: 100, blocks: new Map(), infos: new Map(), txs: new Map(),
     tokens: new Map(), accounts: new Map(), code: new Set(),
     down: false, downFor: [], httpStatus: 0, broadcasts: [], rejectBroadcast: null, failSalts: new Set(), nextReceipt: 'SUCCESS',
-    scheme: null, usdt: null, onchain: null, constantError: null, estimateEnergy: null,
+    scheme: null, usdt: null, onchain: null, constantError: null, estimateEnergy: null, tamperTrigger: null,
     ...state,
   };
   const calls = [];
@@ -193,7 +193,9 @@ export function fakeTronNode(state = {}) {
         const sel = String(body.function_selector || '');
         const data = (sel === 'sweep(address,bytes32[])' ? SWEEP_SELECTOR : kHex(sel).slice(0, 8)) + String(body.parameter || '');
         const bid = blockId(s.head);
-        const raw = encodeTrigger({ owner: body.owner_address, contract: body.contract_address, data, feeLimit: Number(body.fee_limit || 0), callValue: Number(body.call_value || 0), refBlock: bid.slice(12, 16), refHash: bid.slice(16, 32) });
+        // tamperTrigger：测试用，模拟节点（被劫持或出错）建出一笔和请求不一样的交易；返回要改的字段 { owner, contract, data, feeLimit, callValue }
+        const t = { owner: body.owner_address, contract: body.contract_address, data, feeLimit: Number(body.fee_limit || 0), callValue: Number(body.call_value || 0), ...(s.tamperTrigger ? s.tamperTrigger({ ...body, data }) : {}) };
+        const raw = encodeTrigger({ ...t, refBlock: bid.slice(12, 16), refHash: bid.slice(16, 32) });
         const id = hex.encode(sha256(hex.decode(raw)));
         return { result: { result: true }, transaction: { txID: id, raw_data_hex: raw, raw_data: { contract: [{ type: 'TriggerSmartContract' }] }, visible: false } };
       }
