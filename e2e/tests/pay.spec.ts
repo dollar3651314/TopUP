@@ -55,7 +55,7 @@ async function adminOk(page: Page) { await page.click('[data-pdialog-ok]'); }
 // 金额全局检查：接口里的金额一律是字符串（例如 "20.00"）。数据库里存的是 0.000001 USDT 为单位的整数，
 // 哪个字段漏了转换，页面就会把它当成 USDT 显示，放大 100 万倍。这里记录每个收付款接口的返回：
 // 任何不在"数量类字段"名单里、却 ≥ 1,000,000 的整数都算漏转换（测试里的金额都 ≥ 1 USDT，漏转换时一定 ≥ 1,000,000）
-const COUNT_KEYS = new Set(['count', 'customers', 'attempts', 'last_code', 'index', 'energy_left', 'energy_per_sweep', 'left', 'limit', 'per_sweep', 'db_bytes', 'db_limit_bytes', 'ms', 'age_s', 'payout_count', 'checked', 'address_count', 'stage', 'cursor', 'number', 'time', 'at_ms',
+const COUNT_KEYS = new Set(['count', 'customers', 'attempts', 'last_code', 'index', 'energy_left', 'energy_per_sweep', 'left', 'limit', 'per_sweep', 'db_bytes', 'used_mb', 'total_mb', 'ms', 'age_s', 'payout_count', 'checked', 'address_count', 'stage', 'cursor', 'number', 'time', 'at_ms',
   // 设置项：手续费规则（ppm、fixed、min）和订单模式（low、high）按内部单位传给页面，页面和服务器用同一份计算代码（lib/money.ts）
   'ppm', 'fixed', 'min', 'low', 'high']);
 const rawAmounts: string[] = [];

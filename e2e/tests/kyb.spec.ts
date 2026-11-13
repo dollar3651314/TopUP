@@ -4,6 +4,9 @@ import { resolve } from 'node:path';
 import { readJsonl, decodeQP, MAILS, DATA_MAIN, KYB_ENV } from '../stack.mjs';
 // @ts-ignore 与后端同一份 TOTP 实现（已用 RFC 6238 测试向量验证）
 import { totpCode } from '../../server/kyb/totp.js';
+import { createHash } from 'node:crypto';
+// 不能出现在邮件里的名字（母公司名、旧品牌名）的 sha256，见 TC-K03
+const FORBIDDEN_NAME_SHA256 = new Set(['5ff71287fd9266818d9cb41eaf3ccedba0fd766fc484ae2e467068fb613a95d0', 'd6098ccca0cdca1220cb64edb5d139109dfc31a45322ed0e939d84d60f0ddc70']);
 
 // 开户（KYB）端到端：初始化后台 → 登录 → 后台发送开户链接 → 客户填写 4 步并上传、签名、提交
 // → 后台要求补件 → 客户只改被开放的部分再提交 → 通过 → 删除。串行执行，共享同一个后台账号。
@@ -117,6 +120,12 @@ test.describe.serial('TC-K 在线开户', () => {
     expect(mail).toContain('TopUP');
     expect(mail).toContain(ref);
     expect(mail).toMatch(/^from:.*TopUP/im); // 发件人是本产品（不出现其他公司的名字）
+    // 测试经理补（第 0 批复核）：原断言"邮件里没有母公司名、旧品牌名"是否定断言，上一行是肯定断言，含义不同，这里恢复。
+    // 公开仓库不写名字，只放它们的 sha256（小写、去掉空格）；邮件里每个词、相邻两个词连起来都不能命中
+    const words = mail.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    const grams = [...words, ...words.slice(1).map((w, i) => words[i] + w)];
+    const hit = grams.filter((g) => FORBIDDEN_NAME_SHA256.has(createHash('sha256').update(g).digest('hex')));
+    expect(hit, '邮件里出现了其他公司或旧品牌的名字').toEqual([]);
     const link = linkIn(mail);
     expect(new URL(link).searchParams.get('t')!.length).toBeGreaterThanOrEqual(43);
   });
