@@ -42,7 +42,9 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   // 启动时用 eth_call 核对链上批量合约的 parent、factory 和配置一致；不一致的链不开通并告警（最多等 8 秒，连不上下一轮再核对）
   await layer.verifyOnchain({ db, notify }).catch((e) => console.error(`[wallet] onchain check: ${e.message}`));
   // config/wallets.json 和上次启动时不一样：发邮件（web、worker 同时启动也只发一封）
-  await checkWalletsChange(db, { raw: WALLETS_RAW, appEnv: config.appEnv, section: wallets, notify }).catch((e) => console.error(`[pay] wallets.json check: ${e.message}`));
+  // 发信函数不吞错误：发失败时记录恢复成上一次，下次启动重试
+  const notifyStrict = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }) : null;
+  await checkWalletsChange(db, { raw: WALLETS_RAW, appEnv: config.appEnv, section: wallets, notify: notifyStrict }).catch((e) => console.error(`[pay] wallets.json check: ${e.message}`));
   const diskPath = config.blobDir || config.dataDir || '/'; // 用量提醒看这块磁盘
   const getTarget = async (merchantId) => {
     const [m] = await db.query('select callback_url, api_secret_enc from merchants where id = $1', [merchantId]);

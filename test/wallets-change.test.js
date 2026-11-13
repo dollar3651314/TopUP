@@ -24,5 +24,23 @@ test('config/wallets.json 改动提醒：第一次记录发一封；没变不发
   // 没配收件人：只记录不发
   const r3 = await checkWalletsChange(db, { raw: a, appEnv: 'staging', section: {}, notify: null });
   assert.equal(r3.changed, true);
+  assert.equal(r3.notified, false);
+  await db.end?.();
+});
+
+test('config/wallets.json 改动提醒：发信失败不记下这次（下次启动重试），发成功才记 notified；健康检查的 config_watch', async () => {
+  const { walletsWatchStatus } = await import('../server/pay/wallets-change.js');
+  const db = await setupDb();
+  const ok = async () => {};
+  await checkWalletsChange(db, { raw: 'A', appEnv: 'production', section: {}, notify: ok });
+  const fail = async () => { throw new Error('smtp down'); };
+  await assert.rejects(checkWalletsChange(db, { raw: 'B', appEnv: 'production', section: {}, notify: fail }));
+  const mails = [];
+  const r = await checkWalletsChange(db, { raw: 'B', appEnv: 'production', section: {}, notify: async (s) => mails.push(s) });
+  assert.equal(r.changed, true, '上次发信失败，这次重试');
+  assert.equal(r.notified, true);
+  assert.equal(mails.length, 1);
+  assert.deepEqual((({ mail, notified, ok: o }) => ({ mail, notified, ok: o }))(await walletsWatchStatus(db, { mailConfigured: true })), { mail: true, notified: true, ok: true });
+  assert.equal((await walletsWatchStatus(db, { mailConfigured: false })).ok, false, '没配收件人：标红');
   await db.end?.();
 });

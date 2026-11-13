@@ -358,8 +358,9 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
           profit_now: wallets === null ? null : Math.max(0, wallets - owed),
           profit_after_sweep: assets === null ? null : assets - owed - Math.max(0, wallets - owed),
           by_chain: {
-            tron: { hot_usdt: h ? h.usdt : null, cold_usdt: c ? c.usdt : null },
-            ...Object.fromEntries(evmChains.map((ch) => [ch, { hot_usdt: null, cold_usdt: evmCold[ch] }])),
+            // TRON 一行：第 0 批热钱包、冷钱包 + 合约钱包的 parent（parent 就是第 0 批冷钱包时只算一次）
+            tron: { hot_usdt: h ? h.usdt : null, cold_usdt: !c ? null : 'tron' in evmCold ? (evmCold.tron === null ? null : c.usdt + evmCold.tron) : c.usdt },
+            ...Object.fromEntries(evmChains.filter((ch) => ch !== 'tron').map((ch) => [ch, { hot_usdt: null, cold_usdt: evmCold[ch] }])),
           },
         },
         todo: { kyb_pending: kybPending, merchants_to_open: approved === null ? null : approved.filter((a) => !opened.has(a.ref)).length },

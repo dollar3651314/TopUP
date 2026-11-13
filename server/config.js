@@ -57,6 +57,9 @@ export function loadConfig(rawEnv = process.env) {
     tronConfirmations: int(env.TRON_CONFIRMATIONS, 19),
     sweepOperatorKeyTron: env.SWEEP_OPERATOR_KEY_TRON || '',
     tronsaveApiKey: env.TRONSAVE_API_KEY || '',
+    // 租能量的单价上限（sun / 能量，默认 90）和单次最多租多少能量（默认 6,500,000），依据见 server/wallet/energy.js
+    tronsaveMaxPriceSun: int(env.TRONSAVE_MAX_PRICE_SUN, 90),
+    tronRentMaxEnergy: int(env.TRON_RENT_MAX_ENERGY, 6_500_000),
     // 本地和自动化测试：ETH、BSC 用内存替身（只在 APP_ENV=local 时生效）
     fakeEvm: appEnv === 'local' && env.FAKE_EVM !== '0',
     // worker 进程：扫链间隔、每日任务的时间（UTC 小时:分钟）

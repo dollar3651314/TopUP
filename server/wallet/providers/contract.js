@@ -39,7 +39,7 @@ export function checkScheme(chain, scheme, usdt) {
  * chains：{ eth|bsc: { adapter, scheme: { ver, factory, implementation, parent, batcher }, usdt } }，没配置的链不放进来；
  * operatorKey：归集发起账户的私钥（只在服务器的 .env 里）。没有时只能分配地址、扫链，不能执行归集
  */
-export function createContractProvider({ db, chains = {}, operatorKey = '', tronOperatorKey = '', tronEnergy = null }) {
+export function createContractProvider({ db, chains = {}, operatorKey = '', tronOperatorKey = '', tronEnergy = null, tronRentMaxEnergy = null }) {
   const cfg = {};
   for (const [chain, c] of Object.entries(chains)) {
     if (!CONTRACT_CHAINS.includes(chain)) throw new Error(`contract provider: unsupported chain ${chain}`);
@@ -54,7 +54,7 @@ export function createContractProvider({ db, chains = {}, operatorKey = '', tron
   };
   // TRON 发起账户（SWEEP_OPERATOR_KEY_TRON）：只能调用 TRON 批量合约；租能量平台（TronSave）只给它租
   const tronOp = tronOperatorKey ? tronOperatorOf(tronOperatorKey) : null;
-  const tron = createTronOps({ need: () => need('tron'), operator: tronOp, renter: tronEnergy || null });
+  const tron = createTronOps({ need: () => need('tron'), operator: tronOp, renter: tronEnergy || null, rentMaxEnergy: tronRentMaxEnergy ? BigInt(tronRentMaxEnergy) : null });
   const addrFor = (chain, salt) => {
     if (chain === 'tron') return tron.addressForSalt(salt);
     const { scheme } = need(chain);

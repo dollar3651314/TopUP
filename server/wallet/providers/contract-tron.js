@@ -52,22 +52,75 @@ export function tronOperatorOf(key) {
 export const sweepEnergyStatic = (n, deploy) => TRON_SWEEP_ENERGY.base + BigInt(deploy) * (TRON_SWEEP_ENERGY.deploy + TRON_SWEEP_ENERGY.flush) + BigInt(Math.max(0, n - deploy)) * TRON_SWEEP_ENERGY.flush;
 export const encodeSweepParams = (usdt, salts) => word(hex20(usdt)) + word('40') + word(salts.length.toString(16)) + salts.map(word).join('');
 
-/** 解节点建好的交易原文：{ type, owner, contract, data, callValue, feeLimit }（核对用） */
-function decodeTrigger(rawHex) {
-  const one = (fs, no) => fs.find((f) => f.no === no)?.value;
-  const rf = fields(hex.decode(rawHex));
-  const cs = rf.filter((f) => f.no === 11);
-  if (cs.length !== 1) return null;
-  const cf = fields(cs[0].value);
-  const p = fields(one(fields(one(cf, 2)), 2));
-  const a = (no) => { const v = one(p, no); return v ? hex.encode(v.slice(1)) : null; };
-  return { type: Number(one(cf, 1)), owner: a(1), contract: a(2), callValue: Number(one(p, 3) ?? 0), data: hex.encode(one(p, 4) || new Uint8Array()), feeLimit: Number(one(rf, 18) ?? 0) };
+// ---------- 签名前核对节点建的交易 ----------
+// 不"解出来再比"：protobuf 同一个字段号出现两次时，java-tron 取最后一个，而简单的解码取第一个——恶意节点可以让我们核对一组、链上执行另一组。
+// 做法：只从原文里取我们不在乎的字段（参考区块、过期时间、时间戳），其余全部用我们自己核对过的值重新编码一遍，和节点给的原文逐字节比较，
+// 不一致就拒签。顺带拒绝：重复字段号、未知字段、TriggerSmartContract 的 call_value / call_token_value / token_id（字段 3、5、6）。
+const TRIGGER_TYPE_URL = 'type.googleapis.com/protocol.TriggerSmartContract';
+const vint = (x) => { const out = []; let v = BigInt(x); do { let c = Number(v & 0x7fn); v >>= 7n; if (v) c |= 0x80; out.push(c); } while (v); return out; };
+const lenF = (no, bytes) => [...vint((no << 3) | 2), ...vint(bytes.length), ...bytes];
+const intF = (no, v) => [...vint((no << 3) | 0), ...vint(v)];
+const mismatch = (why) => new WalletError('tx_mismatch', `node built a transaction that does not match the sweep call (tx_mismatch: ${why})`);
+
+/** 一层字段：每个字段号最多一次、只许出现 allowed 里的、线型对得上；返回 Map(no → value) */
+function strictFields(bytes, allowed, where) {
+  let fs;
+  try { fs = fields(bytes); } catch (e) { throw mismatch(`${where}: ${e.message}`); }
+  const m = new Map();
+  for (const f of fs) {
+    if (!(f.no in allowed)) throw mismatch(`${where}: unexpected field ${f.no}`);
+    if (allowed[f.no] !== f.wire) throw mismatch(`${where}: field ${f.no} has wire type ${f.wire}`);
+    if (m.has(f.no)) throw mismatch(`${where}: duplicate field ${f.no}`);
+    m.set(f.no, f.value);
+  }
+  return m;
+}
+
+/**
+ * 核对节点建的 TriggerSmartContract 交易原文：want = { owner, contract（T 开头）, data（十六进制）, feeLimit（bigint） }。
+ * 通过返回 { expiration }（毫秒）；不通过抛出 tx_mismatch
+ */
+export function checkTriggerRaw(rawHex, want) {
+  const raw = hex.decode(rawHex);
+  // raw_data：1 ref_block_bytes、4 ref_block_hash、8 expiration、11 contract、14 timestamp、18 fee_limit；别的（memo、auths、scripts…）一律不要
+  const r = strictFields(raw, { 1: 2, 4: 2, 8: 0, 11: 2, 14: 0, 18: 0 }, 'raw_data');
+  for (const k of [1, 4, 8, 11, 14]) if (!r.has(k)) throw mismatch(`raw_data: field ${k} missing`);
+  const refBlock = r.get(1), refHash = r.get(4);
+  if (refBlock.length !== 2 || refHash.length !== 8) throw mismatch('raw_data: bad reference block');
+  // contract：1 type、2 parameter（Any）；Permission_id 等不要
+  const c = strictFields(r.get(11), { 1: 0, 2: 2 }, 'contract');
+  if (Number(c.get(1)) !== 31) throw mismatch('contract: not TriggerSmartContract');
+  const any = strictFields(c.get(2) || new Uint8Array(), { 1: 2, 2: 2 }, 'parameter');
+  if (Buffer.from(any.get(1) || []).toString() !== TRIGGER_TYPE_URL) throw mismatch('parameter: bad type_url');
+  // TriggerSmartContract：只许 1 owner、2 contract、4 data（不许 3 call_value、5 call_token_value、6 token_id）
+  const t = strictFields(any.get(2) || new Uint8Array(), { 1: 2, 2: 2, 4: 2 }, 'trigger');
+  for (const [no, name] of [[1, 'owner'], [2, 'contract']]) {
+    const v = t.get(no);
+    if (!v || v.length !== 21 || v[0] !== 0x41) throw mismatch(`trigger: ${name} must be 21 bytes starting with 0x41`);
+  }
+  // 用核对过的值重新编码，和原文逐字节比较
+  const addr21 = (a) => [0x41, ...hex.decode(hex20(a))];
+  const trigger = [...lenF(1, addr21(want.owner)), ...lenF(2, addr21(want.contract)), ...lenF(4, Array.from(hex.decode(want.data)))];
+  const anyBytes = [...lenF(1, Array.from(Buffer.from(TRIGGER_TYPE_URL))), ...lenF(2, trigger)];
+  const contract = [...intF(1, 31), ...lenF(2, anyBytes)];
+  const expect = Uint8Array.from([
+    ...lenF(1, Array.from(refBlock)), ...lenF(4, Array.from(refHash)), ...intF(8, r.get(8)), ...lenF(11, contract), ...intF(14, r.get(14)),
+    ...(want.feeLimit ? intF(18, want.feeLimit) : []),
+  ]);
+  if (expect.length !== raw.length || !expect.every((b, i) => b === raw[i])) {
+    // 说清是哪一项不对（只给字段名，方便排查）
+    const got = (no) => (t.get(no) ? hex.encode(t.get(no).slice(1)) : '');
+    const why = got(1) !== hex20(want.owner) ? 'owner' : got(2) !== hex20(want.contract) ? 'contract' : hex.encode(t.get(4) || new Uint8Array()) !== want.data ? 'data'
+      : BigInt(r.get(18) ?? 0) !== BigInt(want.feeLimit) ? 'fee_limit' : 'encoding';
+    throw mismatch(why);
+  }
+  return { expiration: Number(r.get(8)) };
 }
 
 /**
  * c：() => { adapter, scheme, usdt } | 抛出 chain_not_enabled；operator：{ address, priv } | null；renter：租能量平台（rent、balance）| null
  */
-export function createTronOps({ need, operator, renter, log = console }) {
+export function createTronOps({ need, operator, renter, rentMaxEnergy = null, log = console }) {
   const addressForSalt = (salt) => {
     const { scheme } = need();
     return tronForwarder({ factory: scheme.factory, implementation: scheme.implementation, parent: scheme.parent, feeAddress: scheme.batcher, salt }).tron;
@@ -81,7 +134,7 @@ export function createTronOps({ need, operator, renter, log = console }) {
   }
 
   /**
-   * 签名并广播一笔归集交易（出错分段同 ETH / BSC：签名前 stage = prepare；广播时连接出错 uncertain；节点明确拒绝 stage = broadcast）。
+   * 签名并广播一笔归集交易。顺序：预估 → 节点建交易、逐字节核对 → 租能量 → TRX 够不够 → 签名 → 广播（出错分段同 ETH / BSC：签名前 stage = prepare；广播时连接出错 uncertain；节点明确拒绝 stage = broadcast）。
    * 返回 { txRefs: [交易号], broadcast?, energy: { mode: 'rented' | 'burn', orderId?, reason?, energy, feeLimit } }
    */
   async function executeSweep(items) {
@@ -104,31 +157,40 @@ export function createTronOps({ need, operator, renter, log = console }) {
     const energy = (simulated && simulated > base ? simulated : base) * (100n + ENERGY_MARGIN_PCT) / 100n;
     let feeLimit = energy * energyFee;
     if (maxFeeLimit && feeLimit > maxFeeLimit) feeLimit = maxFeeLimit;
-    // 2. 租能量（一批租一次，给发起账户）；租不到回退烧 TRX
-    let energyInfo = { mode: 'burn', energy: String(energy), feeLimit: String(feeLimit) };
+    // 2. 先让节点建交易并逐字节核对（核对不过不租能量、不签名）
+    const want = { owner: operator.address, contract: scheme.batcher, data: SWEEP_SELECTOR + parameter, feeLimit };
+    const build = async () => {
+      let tx;
+      try { tx = await adapter.buildTrigger({ owner: operator.address, contract: scheme.batcher, selector: SWEEP_SIG, parameter, feeLimit }); } catch (e) { throw prep(e); }
+      let checked;
+      try { checked = checkTriggerRaw(tx.raw, want); } catch (e) { throw prep(e); }
+      return { ...tx, expiration: checked.expiration };
+    };
+    let tx = await build();
+    // 3. 租能量（一批租一次，给发起账户，量不超过单次上限）；租不到回退烧 TRX
+    let energyInfo = { mode: 'burn', energy: String(energy), feeLimit: String(feeLimit), reason: null };
     if (renter) {
-      try {
-        const r = await renter.rent({ receiver: operator.address, energy: String(energy) });
-        energyInfo = { ...energyInfo, mode: 'rented', orderId: r?.orderId ?? null };
-      } catch (e) {
-        energyInfo = { ...energyInfo, mode: 'burn', reason: String(e?.code || e?.message || 'rent_failed').slice(0, 80) };
-        log.error?.(`[sweep:tron] energy rental failed (${energyInfo.reason}), burning TRX instead`);
+      const rentAmount = rentMaxEnergy && energy > rentMaxEnergy ? null : energy;
+      if (rentAmount === null) energyInfo.reason = 'over_rent_limit';
+      else {
+        try {
+          const r = await renter.rent({ receiver: operator.address, energy: String(rentAmount) });
+          energyInfo = { ...energyInfo, mode: 'rented', orderId: r?.orderId ?? null, reason: null };
+        } catch (e) {
+          energyInfo = { ...energyInfo, mode: 'burn', reason: String(e?.code || e?.message || 'rent_failed').slice(0, 80), ...(e?.orderId ? { orderId: String(e.orderId) } : {}) };
+          log.error?.(`[sweep:tron] energy rental failed (${energyInfo.reason}), burning TRX instead`);
+        }
       }
-    } else energyInfo.reason = null;
-    // 3. 烧 TRX 时，发起账户的 TRX 要够烧（fee_limit 是上限，按预估的量算够不够）
+    }
+    // 4. 烧 TRX 时，发起账户的 TRX 要够烧（fee_limit 是上限，按预估的量算够不够）
     if (energyInfo.mode === 'burn') {
       let trx;
       try { trx = await adapter.nativeBalance(operator.address); } catch (e) { throw prep(e); }
       const needSun = energy * energyFee;
       if (trx < needSun) throw prep(new WalletError('insufficient_trx', `TRON operator has ${trx} sun TRX, needs about ${needSun} sun to burn for energy (rental ${energyInfo.reason || 'not configured'})`));
     }
-    // 4. 节点建交易 → 核对（发起地址、只调批量合约的 sweep、调用数据、不带 TRX、fee_limit）→ 签名
-    let tx;
-    try { tx = await adapter.buildTrigger({ owner: operator.address, contract: scheme.batcher, selector: SWEEP_SIG, parameter, feeLimit }); } catch (e) { throw prep(e); }
-    const d = decodeTrigger(tx.raw);
-    if (!d || d.type !== 31 || d.owner !== hex20(operator.address) || d.contract !== hex20(scheme.batcher) || d.data !== SWEEP_SELECTOR + parameter || d.callValue !== 0 || BigInt(d.feeLimit) !== feeLimit) {
-      throw prep(new WalletError('tx_mismatch', 'node built a transaction that does not match the sweep call'));
-    }
+    // 租能量等了一阵：交易快过期（少于 20 秒）就重新建一笔、重新核对
+    if (tx.expiration && tx.expiration - Date.now() < 20_000) tx = await build();
     const signed = encodeSigned(tx.raw, signTxId(tx.txID, operator.priv));
     // 5. 广播
     let r;

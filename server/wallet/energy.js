@@ -14,6 +14,16 @@ const SUN = 1_000_000n;
 export const TRONSAVE_BASE = Object.freeze({ mainnet: 'https://api.tronsave.io', nile: 'https://api-dev.tronsave.io' });
 /** 租多久（秒）：一批归集几分钟内发完，租 1 小时（平台默认 3 天，按时长计价） */
 export const RENT_DURATION_SEC = 3600;
+/**
+ * 单价上限（sun / 能量，TRONSAVE_MAX_PRICE_SUN）默认 90：主网烧 TRX 的单价是链参数 getEnergyFee（2026-11 为 100 sun，推断，上线前核对），
+ * 租比烧便宜才值得租；高于 90 平台不会成交，就回退烧 TRX
+ */
+export const RENT_MAX_PRICE_SUN = 90;
+/**
+ * 单次最多租多少能量（TRON_RENT_MAX_ENERGY）默认 6,500,000：按后端的预估，一批 20 个地址全部首次部署约 627 万能量（含 20% 余量），
+ * 正常的一批都能租；超过说明预估异常，不租、改烧 TRX 并告警。按单价上限 90 sun 算，一单最多约 585 TRX（预存余额上限 1,000 TRX 以内）
+ */
+export const RENT_MAX_ENERGY = 6_500_000;
 
 const errOf = (code, message = code) => Object.assign(new Error(message), { code });
 
@@ -21,7 +31,7 @@ const errOf = (code, message = code) => Object.assign(new Error(message), { code
  * TronSave 客户端：rent({ receiver, energy }) → { orderId }（等到成交才返回，等不到抛出）；balance() → 预存余额（sun，bigint）。
  * 每个请求有超时；下单不自动重试（避免重复下单）；出错抛出带 code 的错误（平台的错误文字，例如 INTERNAL_BALANCE_ACCOUNT_TOO_LOW）。
  */
-export function createTronSaveRenter({ apiKey, network = 'mainnet', base, fetchImpl = fetch, timeoutMs = 10_000, fillWaitMs = 30_000, pollMs = 3000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export function createTronSaveRenter({ apiKey, network = 'mainnet', base, maxPriceSun = RENT_MAX_PRICE_SUN, fetchImpl = fetch, timeoutMs = 10_000, fillWaitMs = 30_000, pollMs = 3000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   if (!apiKey) throw new Error('tronsave: api key missing');
   const root = (base || TRONSAVE_BASE[network] || TRONSAVE_BASE.mainnet).replace(/\/+$/, '');
   async function call(method, path, body) {
@@ -44,7 +54,8 @@ export function createTronSaveRenter({ apiKey, network = 'mainnet', base, fetchI
     id: 'tronsave',
     async rent({ receiver, energy }) {
       const d = await call('POST', '/v2/buy-resource', {
-        resourceType: 'ENERGY', unitPrice: 'MEDIUM', resourceAmount: Number(energy), receiver, durationSec: RENT_DURATION_SEC,
+        // 单价写成数值上限（sun / 能量），不用 FAST / MEDIUM 这类随行情变的档位
+        resourceType: 'ENERGY', unitPrice: Number(maxPriceSun), resourceAmount: Number(energy), receiver, durationSec: RENT_DURATION_SEC,
         // 只在能立刻全部成交时下单；同样参数还有没成交的单时不再下
         options: { allowPartialFill: false, onlyCreateWhenFulfilled: true, preventDuplicateIncompleteOrders: true },
       });
@@ -55,7 +66,8 @@ export function createTronSaveRenter({ apiKey, network = 'mainnet', base, fetchI
       for (;;) {
         const o = await call('GET', `/v2/order/${encodeURIComponent(orderId)}`).catch(() => null);
         if (o && Number(o.fulfilledPercent) >= 100) return { orderId };
-        if (Date.now() >= end) throw errOf('not_filled', `tronsave: order ${orderId} not filled in time`);
+        // 带出订单号：这一单之后仍可能成交、照样扣预存余额，要能对账
+        if (Date.now() >= end) throw Object.assign(errOf('not_filled', `tronsave: order ${orderId} not filled in time`), { orderId: String(orderId) });
         await sleep(pollMs);
       }
     },

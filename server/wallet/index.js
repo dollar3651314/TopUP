@@ -74,13 +74,13 @@ export function createWalletLayer({ db, config, evm = {}, tron = null }) {
   // 租能量平台（TronSave）：配了 API Key 才用；没配就直接烧 TRX
   let tronEnergy = null;
   if (config.tronsaveApiKey && chains.tron && !config.fakeTron) {
-    try { tronEnergy = createTronSaveRenter({ apiKey: config.tronsaveApiKey, network: config.tronNetwork === 'nile' ? 'nile' : 'mainnet' }); } catch (e) { errors.tron_energy = e.message; }
+    try { tronEnergy = createTronSaveRenter({ apiKey: config.tronsaveApiKey, network: config.tronNetwork === 'nile' ? 'nile' : 'mainnet', maxPriceSun: config.tronsaveMaxPriceSun || undefined }); } catch (e) { errors.tron_energy = e.message; }
   }
   // 本地替身没有真的私钥：每次启动随机生成一个（只活在这个进程里）
   const operatorKey = config.sweepOperatorKey || (config.fakeEvm ? '0x' + randomBytes(32).toString('hex') : '');
   let contract;
   try {
-    contract = createContractProvider({ db, chains, operatorKey, tronOperatorKey, tronEnergy });
+    contract = createContractProvider({ db, chains, operatorKey, tronOperatorKey, tronEnergy, tronRentMaxEnergy: config.tronRentMaxEnergy || null });
   } catch (e) {
     // 合约参数不对（例如 parent 等于批量合约）：不开通，系统状态里显示，不让整个服务起不来
     for (const chain of Object.keys(chains)) errors[chain] = e.message;

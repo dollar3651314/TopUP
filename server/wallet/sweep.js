@@ -334,15 +334,18 @@ export async function approveSweep(db, { id, actor, reason, providers = {}, noti
   const txRefs = res?.txRefs || [];
   // TRON：配了租能量平台却租不到、回退烧 TRX：告警（同类 24 小时最多一封，不发"恢复"）
   if (res?.energy?.mode === 'burn' && res.energy.reason) {
+    const order = res.energy.orderId ? `\n租能量平台的订单 ${res.energy.orderId} 当时没有成交：这一单之后仍可能成交，照样扣预存余额（扣费），请到平台核对这张订单。` : '';
     await raiseAlert(db, `energy_fallback_${b.chain}`, notify, `${CHAIN_NAMES[b.chain]} 归集租不到能量，已改为烧 TRX`,
-      `批次 ${id} 给发起账户租能量没有租到（原因：${res.energy.reason}），这次改为烧 TRX 付手续费（约 ${res.energy.energy} 能量，fee_limit ${res.energy.feeLimit} sun），归集照常发出，钱只会进冷钱包。\n`
+      `批次 ${id} 给发起账户租能量没有租到（原因：${res.energy.reason}），这次改为烧 TRX 付手续费（约 ${res.energy.energy} 能量，fee_limit ${res.energy.feeLimit} sun），归集照常发出，钱只会进冷钱包。${order}\n`
       + `请看一下租能量平台（TronSave）的余额和状态；一直租不到会多花 TRX。同类提醒 24 小时内最多一封。`, { now }).catch((e) => console.error(`[sweep] energy alert: ${e.message}`));
   }
   // 广播时连不上节点（broadcast = 'uncertain'）：交易已签名、可能已经发出，照常记"已发送"，由 confirmSweeps 按交易号查
   const uncertain = res?.broadcast === 'uncertain';
   await db.tx(async (t) => {
     // 只改还在"发送中"的批次：发送拖了超过 15 分钟、已被 confirmSweeps 标为失败的不再改回（只记下交易号，按日志人工核对）
-    const done = await t.query(`update wallet_sweep_batches set status = 'sent', tx_refs = $2::jsonb, error = $3, updated_at = now() where id = $1 and status = 'sending' returning id`, [id, JSON.stringify(txRefs), uncertain ? 'broadcast_uncertain' : null]);
+    // TRON：能量怎么付的（租到 / 烧 TRX、原因、租能量订单号）记进批次的 fee_estimate，方便和租能量平台对账
+    const energy = res?.energy ? JSON.stringify({ energy_mode: res.energy.mode, energy_reason: res.energy.reason || null, rent_order_id: res.energy.orderId || null, energy_used_estimate: res.energy.energy, fee_limit: res.energy.feeLimit }) : '{}';
+    const done = await t.query(`update wallet_sweep_batches set status = 'sent', tx_refs = $2::jsonb, error = $3, fee_estimate = coalesce(fee_estimate, '{}'::jsonb) || $4::jsonb, updated_at = now() where id = $1 and status = 'sending' returning id`, [id, JSON.stringify(txRefs), uncertain ? 'broadcast_uncertain' : null, energy]);
     if (done.length) await t.query(`update wallet_sweep_items set status = 'sent' where batch_id = $1 and status = 'pending'`, [id]);
     else await t.query(`update wallet_sweep_batches set tx_refs = $2::jsonb, error = 'sent_after_interrupted', updated_at = now() where id = $1`, [id, JSON.stringify(txRefs)]);
   });
