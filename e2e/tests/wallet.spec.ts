@@ -129,7 +129,7 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     expect(d.body.items[0].chain).toBe('eth');
   });
 
-  test('TC-W02 归集（ETH）：现在就凑一批 → 确认三步（核对：冷钱包、地址明细、跳过的地址和原因；原因必填）→ 已发出 → 链上确认后"已完成"', async () => {
+  test('TC-W02 归集（ETH）：现在就凑一批 → 确认三步（核对：冷钱包、地址明细、跳过的地址和原因；原因预填"例行归集"，直接确认）→ 已发出 → 链上确认后"已完成"，记录里原因是"例行归集"', async () => {
     await adminTab('p-sweep');
     await admin.click('[data-propose="eth"]');
     await expect(admin.locator('[data-toast]')).toContainText('1 批');
@@ -149,11 +149,8 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await dlg.locator('summary', { hasText: '跳过的' }).click();
     await expect(dlg.locator('tr', { has: admin.locator(`[title="${st.ev.sw_e2}"]`) })).toContainText('超过每地址上限');
     await expect(dlg.locator('tr', { has: admin.locator(`[title="${st.ev.sw_e3}"]`) })).toContainText('低于门槛');
-    // 原因必填：不填时不发出、弹窗不关
-    await adminOk(admin);
-    await expect(dlg).toBeVisible();
-    await expect(dlg).toContainText('请填写原因');
-    await admin.fill('#sw-reason', '端到端：例行归集');
+    // 原因按原型预填"例行归集"（可清空）；不改直接确认就能发出
+    await expect(admin.locator('#sw-reason')).toHaveValue('例行归集');
     await adminOk(admin);
     // 第 3 步：已发出一笔交易
     await expect(dlg).toContainText('已发出一笔交易');
@@ -164,6 +161,33 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(admin.locator('[data-panel="p-sweep"] #sw-records tr', { hasText: id })).toContainText('已完成');
     // 超上限、低于门槛的地址留在"各链待归集地址"里
     await expect(admin.locator('[data-panel="p-sweep"] #sw-addresses')).toContainText('sw_e2');
+    const rec = await wcall(`wallet-sweep-batch&id=${id}`);
+    expect(rec.status).toBe(200);
+    expect(rec.body.reason).toBe('例行归集');
+  });
+
+  test('TC-W02B 归集（ETH）：确认时把预填的原因清空也能确认，记录里原因仍是"例行归集"', async () => {
+    const r = await mcall('customer-save', { customer_id: 'sw_e4' });
+    expect(r.status).toBe(200);
+    const a = (await mcall('customer-addresses', undefined, '&customer_id=sw_e4')).body.addresses.find((x: any) => x.chain === 'eth').address;
+    st.ev.sw_e4 = a;
+    expect((await admin.request.post(`${B}/__fake/evm/pay/`, { data: { chain: 'eth', to: a, amount: 200 * U } })).status()).toBe(200);
+    await tick(admin);
+    await adminTab('p-sweep');
+    await admin.click('[data-propose="eth"]');
+    const c = admin.locator('[data-panel="p-sweep"] [data-batch]', { hasText: '以太坊' }).filter({ hasText: '待确认' });
+    await expect(c).toHaveCount(1);
+    const id = (await c.getAttribute('data-batch'))!;
+    await c.locator(`[data-confirm="${id}"]`).click();
+    const dlg = admin.locator('[data-pdialog]');
+    await expect(admin.locator('#sw-reason')).toHaveValue('例行归集');
+    await admin.fill('#sw-reason', '');
+    await adminOk(admin);
+    await expect(dlg).toContainText('已发出一笔交易');
+    await admin.keyboard.press('Escape');
+    const rec = await wcall(`wallet-sweep-batch&id=${id}`);
+    expect(rec.status).toBe(200);
+    expect(rec.body.reason).toBe('例行归集');
   });
 
   test('TC-W03 归集（BSC）：合计超过每批上限自动拆成两批，每批 ≤ 20,000', async () => {
@@ -180,7 +204,7 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
       sum += v;
     }
     expect(sum).toBe(24500);
-    await expect(admin.locator('[data-panel="p-sweep"] [data-hero]')).toContainText('2 个批次');
+    await expect(admin.locator('[data-panel="p-sweep"] [data-hero]')).toContainText(/\d+ 个批次等你确认/); // 前面的用例红了时可能还有别的待确认批次
   });
 
   test('TC-W04 确认失败的提示：节点连不上没发出（仍待确认）、等确认超过 24 小时作废、另一个窗口已经确认', async () => {
