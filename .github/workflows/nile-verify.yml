@@ -1,0 +1,38 @@
+# TRON Nile 测试网验证（scripts/tron-nile/README.md）：激活后能否 CREATE2 部署、0x41 地址计算是否和链上一致。
+# 只连 Nile 测试网（脚本会拒绝主网）。测试账户私钥放在 GitHub 环境 "nile" 的环境密钥 TOPUP_NILE_PRIVATE_KEY 里，
+# 只有管理员能填；环境 "nile" 设了"需要审批"，每次运行都要管理员在 GitHub 上点批准，批准前拿不到密钥、不会上链。
+# 触发：推送到 nile-run/ 开头的分支（不需要先合进默认分支），或在 Actions 页面手动运行（这个文件进了默认分支之后）。
+name: nile-verify
+on:
+  push:
+    branches: ['nile-run/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: nile-verify
+  cancel-in-progress: false
+jobs:
+  nile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: nile
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Nile 验证
+        env:
+          TOPUP_NILE_PRIVATE_KEY: ${{ secrets.TOPUP_NILE_PRIVATE_KEY }}
+          TRONGRID_API_KEY: ${{ secrets.TRONGRID_API_KEY }}
+        run: node scripts/tron-nile/verify.mjs --report nile-report.json
+      - name: 保存报告（只有公开的链上数据）
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: nile-report
+          path: nile-report.json
+          retention-days: 90

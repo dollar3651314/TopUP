@@ -12,6 +12,7 @@ import { loadConfig } from './config.js';
 import { createApp, initReason, refuseLocal, ROOT } from './app.js';
 import { json } from './kyb/http.js';
 import { walletChainStatus } from './wallet/status.js';
+import { walletsWatchStatus } from './pay/wallets-change.js';
 
 const getMetaSafe = async (db, key) => { try { const [r] = await db.query('select value from pay_meta where key = $1', [key]); return r ? r.value : null; } catch { return null; } };
 
@@ -81,14 +82,19 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
         wallet = { chains: [] };
         for (const chain of ['eth', 'bsc', 'tron']) {
           const cc = d.layer?.config?.[chain];
-          const scan = chain === 'tron' ? null : await getMetaSafe(d.db, `evm_scan_${chain}`);
-          wallet.chains.push(walletChainStatus(chain === 'tron' ? { chain, enabled: false } : {
+          // TRON：config/wallets.json 有 tron 一节才算这条链（第 2 批）；没有时照旧"不在本批"
+          const off = chain === 'tron' && !cc;
+          const scan = off ? null : await getMetaSafe(d.db, `evm_scan_${chain}`);
+          wallet.chains.push(walletChainStatus(off ? { chain, enabled: false } : {
             chain, rpcConfigured: Boolean(cc?.rpcUrl), usdtConfigured: Boolean(cc?.usdt), scheme: cc?.scheme || {},
             cursor: scan?.cursor ?? null, head: scan?.head ?? null, confirmations: cc?.confirmations ?? 0, lastScanAt: scan?.at ?? null,
             onchain: d.layer?.onchain?.[chain]?.result ?? null,
           }));
         }
         wallet.operator = Boolean(c.sweepOperatorKey);
+        wallet.operator_tron = Boolean(c.sweepOperatorKeyTron);
+        // config/wallets.json 改动提醒：收件人没配或这份配置还没通知过 → ok = false（系统状态标红）
+        wallet.config_watch = await walletsWatchStatus(d.db, { mailConfigured: mail });
       } catch { wallet = { error: 'query_failed' }; }
     }
     const ok = storage && db && secret && blob && mail && payInfo.trongridKey && ready;

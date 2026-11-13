@@ -1,4 +1,4 @@
-// 合约钱包归集（ETH / BSC，半自动）：
+// 合约钱包归集（ETH / BSC / TRON，半自动；第 0 批的老 TRON 地址 legacy_hd 不在这里，仍走原来的浏览器签名归集）：
 //   凑批（每天东八区 10:00、20:00 各一次，另有"现在就凑一批"）→ 存成"待确认"的批次、发一封邮件（没有确认按钮，要登录后台）
 //   → 管理员在后台确认（原因必填，不要动态码）→ 发起账户签名、一笔交易 → worker 按回执逐个地址确认（部分成功照记）。
 // 待确认超过 24 小时作废，下一轮重凑；失败的地址放回待归集、不自动重试（下一批还要人确认）。
@@ -24,7 +24,13 @@ export const SWEEP_DEFAULTS = {
 export const SWEEP_TIMES = Object.freeze(['10:00', '20:00']); // 东八区
 export const SWEEP_TZ_OFFSET_H = 8;
 export const SWEEP_EXPIRE_HOURS = 24;
-export const SWEEP_CHAINS = Object.freeze(['eth', 'bsc']);
+export const SWEEP_CHAINS = Object.freeze(['eth', 'bsc', 'tron']);
+/**
+ * 每条链每批最多几个地址（和设置里的"每批地址数"取小的）：TRON 单笔交易 CPU 上限 80 毫秒（OUT_OF_TIME），
+ * 先按 20 个一批（技术方案 04 页 2.3，推断），Nile 实测后再调
+ */
+export const MAX_ADDRESSES_PER_CHAIN = Object.freeze({ tron: 20 });
+const capAddresses = (chain, n) => { const m = MAX_ADDRESSES_PER_CHAIN[chain]; return m ? Math.min(Number(n) || m, m) : n; };
 export const CHAIN_NAMES = Object.freeze({ eth: '以太坊', bsc: 'BSC', tron: 'TRON' });
 const ACTIVE_ITEM = ['pending', 'sent'];
 const H = 3_600_000;
@@ -220,7 +226,8 @@ export async function proposeSweep(db, { chain, providers = {}, notify, provider
   if (existing.length) return existing;
 
   const settings = limits?.thresholds ? limits : limits ? null : await getSweepSettings(db);
-  const lim = settings ? limitsFor(settings, chain, p) : { ...limits, schemeVer: limits.schemeVer ?? p.schemeVer?.(chain) };
+  const lim0 = settings ? limitsFor(settings, chain, p) : { ...limits, schemeVer: limits.schemeVer ?? p.schemeVer?.(chain) };
+  const lim = { ...lim0, maxAddresses: capAddresses(chain, lim0.maxAddresses) };
   // 候选和余额在事务外读（访问节点，不能放进事务）
   const inBatch = new Set((await db.query(`select lower(address) a from wallet_sweep_items where chain = $1 and status = any($2::text[])`, [chain, ACTIVE_ITEM])).map((r) => r.a));
   const cands = await sweepCandidates(db, { chain, provider: providerId });
@@ -241,7 +248,7 @@ export async function proposeSweep(db, { chain, providers = {}, notify, provider
       try {
         const deploy = b.items.filter((i) => i.deploy).length;
         const f = await p.estimateFee(chain, 'sweep', b.items.length, { deploy });
-        fee = { native: String(f.native ?? ''), gas: f.gas != null ? String(f.gas) : undefined, gas_price: f.gasPrice != null ? String(f.gasPrice) : undefined };
+        fee = { native: String(f.native ?? ''), gas: f.gas != null ? String(f.gas) : undefined, gas_price: f.gasPrice != null ? String(f.gasPrice) : undefined, energy: f.energy != null ? String(f.energy) : undefined };
       } catch { fee = {}; }
     }
     fees.push(fee);
@@ -286,7 +293,7 @@ export async function proposeSweep(db, { chain, providers = {}, notify, provider
 }
 
 /** 管理员确认一批：原因必填（不要动态码）；只有待确认、没过期的能确认，确认后只执行一次 */
-export async function approveSweep(db, { id, actor, reason, providers = {}, now }) {
+export async function approveSweep(db, { id, actor, reason, providers = {}, notify, now }) {
   const why = String(reason ?? '').trim();
   if (!why) throw new PayError('reason_required', 422, 'reason');
   const when = at(now);
@@ -325,11 +332,20 @@ export async function approveSweep(db, { id, actor, reason, providers = {}, now 
     throw new PayError('sweep_send_failed', 502);
   }
   const txRefs = res?.txRefs || [];
+  // TRON：配了租能量平台却租不到、回退烧 TRX：告警（同类 24 小时最多一封，不发"恢复"）
+  if (res?.energy?.mode === 'burn' && res.energy.reason) {
+    const order = res.energy.orderId ? `\n租能量平台的订单 ${res.energy.orderId} 当时没有成交：这一单之后仍可能成交，照样扣预存余额（扣费），请到平台核对这张订单。` : '';
+    await raiseAlert(db, `energy_fallback_${b.chain}`, notify, `${CHAIN_NAMES[b.chain]} 归集租不到能量，已改为烧 TRX`,
+      `批次 ${id} 给发起账户租能量没有租到（原因：${res.energy.reason}），这次改为烧 TRX 付手续费（约 ${res.energy.energy} 能量，fee_limit ${res.energy.feeLimit} sun），归集照常发出，钱只会进冷钱包。${order}\n`
+      + `请看一下租能量平台（TronSave）的余额和状态；一直租不到会多花 TRX。同类提醒 24 小时内最多一封。`, { now }).catch((e) => console.error(`[sweep] energy alert: ${e.message}`));
+  }
   // 广播时连不上节点（broadcast = 'uncertain'）：交易已签名、可能已经发出，照常记"已发送"，由 confirmSweeps 按交易号查
   const uncertain = res?.broadcast === 'uncertain';
   await db.tx(async (t) => {
     // 只改还在"发送中"的批次：发送拖了超过 15 分钟、已被 confirmSweeps 标为失败的不再改回（只记下交易号，按日志人工核对）
-    const done = await t.query(`update wallet_sweep_batches set status = 'sent', tx_refs = $2::jsonb, error = $3, updated_at = now() where id = $1 and status = 'sending' returning id`, [id, JSON.stringify(txRefs), uncertain ? 'broadcast_uncertain' : null]);
+    // TRON：能量怎么付的（租到 / 烧 TRX、原因、租能量订单号）记进批次的 fee_estimate，方便和租能量平台对账
+    const energy = res?.energy ? JSON.stringify({ energy_mode: res.energy.mode, energy_reason: res.energy.reason || null, rent_order_id: res.energy.orderId || null, energy_used_estimate: res.energy.energy, fee_limit: res.energy.feeLimit }) : '{}';
+    const done = await t.query(`update wallet_sweep_batches set status = 'sent', tx_refs = $2::jsonb, error = $3, fee_estimate = coalesce(fee_estimate, '{}'::jsonb) || $4::jsonb, updated_at = now() where id = $1 and status = 'sending' returning id`, [id, JSON.stringify(txRefs), uncertain ? 'broadcast_uncertain' : null, energy]);
     if (done.length) await t.query(`update wallet_sweep_items set status = 'sent' where batch_id = $1 and status = 'pending'`, [id]);
     else await t.query(`update wallet_sweep_batches set tx_refs = $2::jsonb, error = 'sent_after_interrupted', updated_at = now() where id = $1`, [id, JSON.stringify(txRefs)]);
   });
