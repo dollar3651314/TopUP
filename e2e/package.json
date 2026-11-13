@@ -1,0 +1,16 @@
+{
+  "name": "topup-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "TopUP 端到端测试（测试工程师维护）",
+  "scripts": {
+    "test": "playwright test",
+    "lighthouse": "node lighthouse.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "lighthouse": "^13.5.0",
+    "smtp-server": "^3.19.13"
+  }
+}
