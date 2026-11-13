@@ -10,7 +10,7 @@
 |---|---|
 | `lib/eth-multisig-v4/` | BitGo `eth-multisig-v4` 的 6 个合约文件 + LICENSE，**原样复制，一行不改** |
 | `lib/openzeppelin-contracts/` | OpenZeppelin Contracts v5.0.0（BitGo 依赖的版本）里用到的 11 个文件 + LICENSE，原样复制 |
-| `lib/SHA256SUMS` | 上面每个文件的 sha256；`script/check-vendor.sh` 在 CI 里核对，`--upstream` 时再从 GitHub 拉上游逐字节比较 |
+| `lib/SHA256SUMS` | 上面每个文件的 sha256；CI 每次跑 `script/check-vendor.sh --upstream`：先按清单核对，再从 GitHub 拉上游固定提交逐字节比较 |
 | `lib/forge-std/` | Foundry 测试库（git submodule，固定 v1.11.0 = `8e40513d678f392f398620b3ef2b418648b33e89`），只用于测试和脚本，不部署 |
 | `src/SweepBatcher.sol` | 批量合约（约 60 行有效代码） |
 | `src/DepositSalt.sol` | 充值地址的盐 `keccak256("topup-deposit" ‖ 客户序号)`（只给测试和脚本用，不部署） |
