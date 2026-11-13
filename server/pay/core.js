@@ -219,23 +219,31 @@ export async function expireOrders(db, now = new Date()) {
 
 // ---------- 到账 ----------
 /**
- * 记一笔链上到账（已确认的 USDT 转账）。重复的转账（同一交易号 + 日志序号）自动忽略。
+ * 记一笔链上到账（已确认的 USDT 转账）。重复的转账（同一条链、交易号 + 日志序号）自动忽略。
+ * chain：eth / bsc 的到账按（链、地址）在 customer_addresses 里找客户（停用的旧地址照常入账）；
+ * 不带 chain 的是 TRON，按原来的 customers.address 找。
  * 返回 { status: 'ignored' | 'duplicate' | 'below_min' | 'credited', ... }
  */
-export async function recordDeposit(db, { txid, logIndex, block, to, amount, time }) {
+export async function recordDeposit(db, { chain = 'tron', txid, logIndex, block, to, amount, time, rawAmount = null }) {
+  if (!['eth', 'bsc', 'tron'].includes(chain)) throw new Error(`recordDeposit: unsupported chain ${chain}`);
+  amount = Number(amount);
   return db.tx(async (t) => {
-    const [c] = await t.query('select c.*, m.fee_in, m.order_mode from customers c join merchants m on m.id = c.merchant_id where c.address = $1', [to]);
+    const evm = chain !== 'tron';
+    const [c] = evm
+      ? await t.query(`select c.*, m.fee_in, m.order_mode from customer_addresses a join customers c on c.merchant_id = a.merchant_id and c.customer_id = a.customer_id
+          join merchants m on m.id = c.merchant_id where a.chain = $1 and lower(a.address) = lower($2)`, [chain, to])
+      : await t.query('select c.*, m.fee_in, m.order_mode from customers c join merchants m on m.id = c.merchant_id where c.address = $1', [to]);
     if (!c) return { status: 'ignored' };
     await lockCustomer(t, c.merchant_id, c.customer_id);
     const credited = amount >= MIN_CREDIT;
     // 手续费最多等于到账金额（最低收费大于到账金额时，不能让余额变成负数、整个扫链停住）
     const fee = credited ? Math.min(calcFee(amount, c.fee_in), amount) : 0;
-    const [d] = await t.query(`insert into deposits (txid, log_index, block, address, merchant_id, customer_id, amount, fee, result, time)
-      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) on conflict (txid, log_index) do nothing returning *`,
-      [txid, logIndex, block, to, c.merchant_id, c.customer_id, amount, fee, credited ? 'credited' : 'below_min', new Date(time)]);
+    const [d] = await t.query(`insert into deposits (chain, txid, log_index, block, address, merchant_id, customer_id, amount, fee, result, time, raw_amount)
+      values ($11, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $12) on conflict (chain, txid, log_index) do nothing returning *`,
+      [txid, logIndex, block, to, c.merchant_id, c.customer_id, amount, fee, credited ? 'credited' : 'below_min', new Date(time), chain, rawAmount === null ? null : String(rawAmount)]);
     if (!d) return { status: 'duplicate' };
-    // 不论是否入账，钱都在这个地址上，归集时要算进去
-    await t.query('update customers set onchain = onchain + $3 where merchant_id = $1 and customer_id = $2', [c.merchant_id, c.customer_id, amount]);
+    // 不论是否入账，钱都在这个地址上，归集时要算进去（TRON 的旧归集和对账用；ETH、BSC 归集前向链上查余额）
+    if (!evm) await t.query('update customers set onchain = onchain + $3 where merchant_id = $1 and customer_id = $2', [c.merchant_id, c.customer_id, amount]);
     if (!credited) {
       await t.query(`insert into anomalies (type, merchant_id, customer_id, address, amount, ref) values ('below_min', $1, $2, $3, $4, $5) on conflict do nothing`,
         [c.merchant_id, c.customer_id, to, `${amount / 1e6} USDT`, `${txid}:${logIndex}`]); // 同一笔交易里可能有几次转账

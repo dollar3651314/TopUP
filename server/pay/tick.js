@@ -1,9 +1,10 @@
 // 定时任务：由 worker 进程（server/worker.js）每 15 秒调用一次。
-// 顺序：① 扫描已确认的 USDT 转账 → ② 订单过期 → ③ 提币的链上确认 → ④ 发送回调 → ⑤ 合并发送提币通知邮件 → 记录运行时间。
+// 顺序：① 扫描已确认的 USDT 转账 → ② 订单过期 → ③ 提币的链上确认 → 归集（确认、到点凑批）→ ④ 发送回调 → ⑤ 合并发送提币通知邮件 → 记录运行时间。
 // 每次整体控制在 25 秒内；没做完的下一次接着做。
 import { recordDeposit, expireOrders, settleWithdrawal, getMeta, setMeta } from './core.js';
 import { deliverDue } from './callbacks.js';
 import { fmtUsdt } from './money.js';
+import { raiseAlert, clearAlert } from '../wallet/sweep.js';
 
 const OVERLAP_MS = 3 * 60_000; // 每次往前多扫 3 分钟，防止边界上的事件漏掉（重复的由唯一约束去掉）
 const INDEX_LAG_MS = 30_000; // 已确认的区块，TronGrid 的事件索引可能还要晚几秒才查得到
@@ -77,7 +78,15 @@ export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetc
   await step('scan', () => scan(db, tron, { onError: notify && ((ids) => notify('到账处理失败', `以下链上转账没有处理成功，已记到"异常到账"，请联系研发：\n${ids.join('\n')}`)) }));
   await step('expired', () => expireOrders(db));
   await step('withdrawals', () => confirmWithdrawals(db, tron, { notify }));
-  if (confirmSweeps) await step('sweeps', () => confirmSweeps());
+  // 归集（确认已发出的批次、到点凑批）：出错只告警（故障一次、恢复一次、长期没恢复每天一次），不影响其他步骤和运行时间
+  if (confirmSweeps) {
+    await step('sweeps', () => confirmSweeps());
+    const err = out.sweeps?.error;
+    try {
+      if (err) await raiseAlert(db, 'sweep_step', notify, '归集出错', `worker 的归集步骤出错（扫链、回调照常，下一轮自动重试）：${err}`);
+      else await clearAlert(db, 'sweep_step', notify, '归集已恢复', 'worker 的归集步骤已恢复正常。');
+    } catch (e) { console.error(`[tick] sweep alert: ${e.message}`); }
+  }
   await step('callbacks', () => deliverDue(db, { getTarget, fetchImpl, resolve }));
   await step('mail', () => notifyWithdrawals(db, notify, adminUrl));
   out.ms = Date.now() - t0;
