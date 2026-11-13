@@ -77,13 +77,16 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package-lock.json') }}
-      - name: 安装测试浏览器
+      # Playwright 1.56 在 Node 26 下解压浏览器会卡住（本地复现：Node 22 正常、Node 26 卡住），浏览器用 Node 22 安装，测试仍在 Node 26 上跑
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: 安装测试浏览器（Node 22）
         timeout-minutes: 15
-        # 系统依赖装一次；浏览器下载偶尔会卡住不动：每次最多等 4 分钟，最多试 3 次
-        run: |
-          cd e2e && npm ci && npx playwright install-deps chromium
-          for i in 1 2 3; do timeout 240 npx playwright install chromium && exit 0; echo "第 $i 次下载浏览器没有完成，重试"; done
-          exit 1
+        run: cd e2e && npm ci && npx playwright install --with-deps chromium
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
       - name: 端到端测试
         env:
           E2E_DATABASE_URL: postgres://postgres:ci@127.0.0.1:5432/postgres
