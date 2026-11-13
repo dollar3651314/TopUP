@@ -202,6 +202,8 @@ test('contract 分配地址：纯计算不上链（节点连不上也能分配�
   assert.equal(b1.providerRef, a1.providerRef);
   assert.notEqual(a2.address, a1.address);
   assert.equal(down.eth.calls.length + down.bsc.calls.length, 0, '分配地址不访问节点');
+  // 第 1 批没有 TRON 合约：contract 提供方不给 TRON 地址
+  await assert.rejects(p.allocateAddress({ merchantId: 'm1', customerId: 'c1', chain: 'tron' }), (e) => e.code === 'chain_not_enabled');
   await db.end?.();
 });
 

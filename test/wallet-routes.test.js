@@ -1,6 +1,8 @@
 // 多链数据结构（chain、customer_addresses、wallet_routes）和"按链整体切换"的规则：
 //   - 路由查找：这个商户这条链 → 这条链 → 全局默认 contract；第一版只开放按链切换
-//   - 地址在创建时记下提供方；切换只影响新分配的地址；"更换地址"时旧地址停用，继续扫链、照常入账 30 天，付款页和 API 只返回新地址
+//   - 地址在创建时记下提供方；切换只影响新分配的地址；"更换地址"时旧地址停用，**一直**扫链、照常入账（不设期限），付款页和 API 只返回新地址
+//   - 第 1 批不分配新的 TRON 地址（第 2 批 TRON 合约上线再开）；已有的 TRON 地址照常入账
+//   - 切换要动态码、原因必填、记审计
 //   - 旧地址里的钱继续由原提供方归集
 //   - 到账按（链、地址）找客户：ETH 和 BSC 上同一个地址分别入账，deposits 记链
 // 要实现的模块：server/wallet/router.js、server/wallet/addresses.js；改 server/pay/schema.js、server/pay/core.js 的 recordDeposit
@@ -12,6 +14,8 @@ const routerMod = () => import('../server/wallet/router.js');
 const addrMod = () => import('../server/wallet/addresses.js');
 const DAY = 86_400_000;
 const T0 = Date.parse('2026-12-01T00:00:00Z');
+/** 动态码：测试里 123456 算对 */
+const CODE = { code: '123456', verifyCode: async (c) => c === '123456' };
 
 /** 假提供方：每次分配给一个新地址，记下调用 */
 function fakeProvider(id, { prefix = id === 'contract' ? '0x' + 'c'.repeat(30) : '0x' + 'f'.repeat(30), schemeVer = 1 } = {}) {
@@ -92,13 +96,15 @@ test('路由：生效时间没到的不算；同一条链多次切换，取已�
   await db.end?.();
 });
 
-test('切换：只能按链整体切换（带商户的拒绝）；原因必填；只能切到已开通的提供方；记审计', async () => {
+test('切换：只能按链整体切换（带商户的拒绝）；动态码、原因必填；只能切到已开通的提供方；记审计', async () => {
   const { setChainProvider, resolveProvider } = await routerMod();
   const db = await setupDb();
   const providers = { contract: fakeProvider('contract'), cobo: { id: 'cobo', enabled: false }, fireblocks: fakeProvider('fireblocks') };
-  const base = { chain: 'eth', provider: 'fireblocks', actor: 'admin@x', reason: '演练切换', providers, now: T0 };
+  const base = { chain: 'eth', provider: 'fireblocks', actor: 'admin@x', reason: '演练切换', providers, now: T0, ...CODE };
   await assert.rejects(setChainProvider(db, { ...base, merchantId: 'm1' }), (e) => e.code === 'merchant_route_not_supported');
   await assert.rejects(setChainProvider(db, { ...base, reason: '  ' }), (e) => e.code === 'reason_required');
+  await assert.rejects(setChainProvider(db, { ...base, code: '000000' }), (e) => e.code === 'bad_code');
+  await assert.rejects(setChainProvider(db, { ...base, code: undefined }), (e) => e.code === 'bad_code');
   await assert.rejects(setChainProvider(db, { ...base, provider: 'cobo' }), (e) => e.code === 'provider_not_enabled');
   await assert.rejects(setChainProvider(db, { ...base, provider: 'bitgo' }), (e) => e.code === 'provider_not_enabled' || e.code === 'invalid_provider');
   await assert.rejects(setChainProvider(db, { ...base, chain: 'sol' }));
@@ -137,7 +143,7 @@ test('按链切换后：老客户的地址不变（仍是原提供方）；新�
   const db = await setupDb({ customers: [['m1', 'old'], ['m1', 'new']] });
   const providers = { contract: fakeProvider('contract'), fireblocks: fakeProvider('fireblocks') };
   const old1 = await addressFor(db, { merchantId: 'm1', customerId: 'old', chain: 'bsc', providers, now: T0 });
-  await setChainProvider(db, { chain: 'bsc', provider: 'fireblocks', actor: 'admin@x', reason: '换托管', providers, now: T0 + 1000 });
+  await setChainProvider(db, { chain: 'bsc', provider: 'fireblocks', actor: 'admin@x', reason: '换托管', providers, now: T0 + 1000, ...CODE });
   const t = T0 + 2000;
   const old2 = await addressFor(db, { merchantId: 'm1', customerId: 'old', chain: 'bsc', providers, now: t });
   assert.equal(old2.address, old1.address, '切换不动老客户已有的地址');
@@ -161,19 +167,19 @@ test('按链切换后：老客户的地址不变（仍是原提供方）；新�
   await db.end?.();
 });
 
-test('停用的旧地址：30 天内继续扫链，过了 30 天不再扫；归集仍按原提供方列出（不论停用多久，钱还在就要归集）', async () => {
-  const { addressFor, watchedAddresses, sweepCandidates, RETIRED_SCAN_DAYS } = await addrMod();
+test('停用的旧地址：一直扫链（不设 30 天期限）；归集仍按原提供方列出（不论停用多久）', async () => {
+  const { addressFor, watchedAddresses, sweepCandidates } = await addrMod();
   const { setChainProvider } = await routerMod();
-  assert.equal(RETIRED_SCAN_DAYS, 30);
   const db = await setupDb({ customers: [['m1', 'c1'], ['m1', 'c2']] });
   const providers = { contract: fakeProvider('contract'), fireblocks: fakeProvider('fireblocks') };
   const a = await addressFor(db, { merchantId: 'm1', customerId: 'c1', chain: 'eth', providers, now: T0 });
   const keep = await addressFor(db, { merchantId: 'm1', customerId: 'c2', chain: 'eth', providers, now: T0 });
-  await setChainProvider(db, { chain: 'eth', provider: 'fireblocks', actor: 'admin@x', reason: '换托管', providers, now: T0 + 1 });
+  await setChainProvider(db, { chain: 'eth', provider: 'fireblocks', actor: 'admin@x', reason: '换托管', providers, now: T0 + 1, ...CODE });
   const b = await addressFor(db, { merchantId: 'm1', customerId: 'c1', chain: 'eth', providers, renew: true, now: T0 + 2 });
   const w = (now) => watchedAddresses(db, { chain: 'eth', provider: 'contract', now });
   assert.deepEqual((await w(T0 + 29 * DAY)).sort(), [a.address, keep.address].sort(), '停用 29 天：还在扫');
-  assert.deepEqual(await w(T0 + 2 + 30 * DAY + 1), [keep.address], '停用超过 30 天：不再扫');
+  assert.deepEqual((await w(T0 + 31 * DAY)).sort(), [a.address, keep.address].sort(), '停用 31 天：还在扫');
+  assert.deepEqual((await w(T0 + 3 * 365 * DAY)).sort(), [a.address, keep.address].sort(), '停用 3 年：还在扫');
   assert.deepEqual(await watchedAddresses(db, { chain: 'eth', provider: 'fireblocks', now: T0 + 3 }), [b.address]);
   assert.deepEqual(await watchedAddresses(db, { chain: 'bsc', provider: 'contract', now: T0 + 3 }), []);
   const cands = await sweepCandidates(db, { chain: 'eth', provider: 'contract' });
@@ -185,13 +191,13 @@ test('停用的旧地址：30 天内继续扫链，过了 30 天不再扫；归�
 
 // ---------- 入账：按（链、地址）找客户 ----------
 
-test('入账：ETH、BSC 的到账按（链、地址）找客户，deposits 记链；ETH 和 BSC 同一个地址分别入账、互不影响；停用 30 天内的旧地址照常入账', async () => {
+test('入账：ETH、BSC 的到账按（链、地址）找客户，deposits 记链；ETH 和 BSC 同一个地址分别入账、互不影响；停用很久的旧地址也照常入账', async () => {
   const { recordDeposit } = await import('../server/pay/core.js');
   const db = await setupDb({ customers: [['m1', 'c1']] });
   const A = '0x' + 'Ab'.repeat(20);
   for (const chain of ['eth', 'bsc']) {
     await db.query(`insert into customer_addresses (merchant_id, customer_id, chain, provider, scheme_ver, salt, address, status, retired_at)
-      values ('m1', 'c1', $1, 'contract', 1, '0x01', $2, $3, $4)`, [chain, A, chain === 'bsc' ? 'retired' : 'active', chain === 'bsc' ? new Date(Date.now() - 5 * DAY) : null]);
+      values ('m1', 'c1', $1, 'contract', 1, '0x01', $2, $3, $4)`, [chain, A, chain === 'bsc' ? 'retired' : 'active', chain === 'bsc' ? new Date(Date.now() - 400 * DAY) : null]);
   }
   const dep = (chain, txid, amount) => ({ chain, txid, logIndex: 0, block: 10, time: Date.now(), from: '0x' + '11'.repeat(20), to: A, amount, rawAmount: String(amount) });
   const r1 = await recordDeposit(db, dep('eth', '0x' + 'e1'.repeat(32), 150_000_000));
@@ -215,5 +221,26 @@ test('入账：TRON 照旧（不带 chain 的到账按 TRON 处理，deposits.ch
   assert.equal(r.status, 'credited');
   const [d] = await db.query('select chain from deposits');
   assert.equal(d.chain, 'tron');
+  await db.end?.();
+});
+
+// ---------- 第 1 批：TRON 不分配新地址 ----------
+
+test('第 1 批：不分配新的 TRON 地址（chain_not_enabled，不调用任何提供方）；已有 TRON 地址的客户照常返回原地址', async () => {
+  const { migrate } = await import('../server/pay/schema.js');
+  const { addressFor } = await addrMod();
+  const db = await setupDb({ customers: [['m1', 'old']] });
+  await migrate(db); // 把升级前的 TRON 客户补进 customer_addresses
+  await db.query(`insert into customers (merchant_id, customer_id, address, hd_index) values ('m1', 'fresh', 'T' || repeat('y', 33), 99)`);
+  await db.query(`delete from customer_addresses where customer_id = 'fresh'`); // 第 1 批新建的客户没有 TRON 地址
+  const providers = { contract: fakeProvider('contract') };
+  const [old] = await db.query(`select address from customers where customer_id = 'old'`);
+  const got = await addressFor(db, { merchantId: 'm1', customerId: 'old', chain: 'tron', providers, now: T0 });
+  assert.equal(got.address, old.address);
+  await assert.rejects(addressFor(db, { merchantId: 'm1', customerId: 'fresh', chain: 'tron', providers, now: T0 }), (e) => e.code === 'chain_not_enabled');
+  await assert.rejects(addressFor(db, { merchantId: 'm1', customerId: 'old', chain: 'tron', providers, renew: true, now: T0 }), (e) => e.code === 'chain_not_enabled');
+  assert.equal(providers.contract.calls.length, 0);
+  // ETH、BSC 照常分配
+  assert.equal((await addressFor(db, { merchantId: 'm1', customerId: 'fresh', chain: 'eth', providers, now: T0 })).provider, 'contract');
   await db.end?.();
 });

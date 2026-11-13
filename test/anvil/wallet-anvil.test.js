@@ -125,7 +125,8 @@ test('anvil 端到端：CREATE2 地址 → 扫链入账 → 凑批 → 确认 �
 
   // 凑批：只有 c1；没确认之前链上什么都不发
   const nonce0 = await rpc('eth_getTransactionCount', [operator, 'latest']);
-  const batch = await proposeSweep(db, { chain: 'eth', providers, notify });
+  const [batch, ...more] = await proposeSweep(db, { chain: 'eth', providers, notify });
+  assert.equal(more.length, 0);
   assert.deepEqual(batch.items.map((i) => i.address), [addr.c1]);
   assert.match(mails.at(-1).subject, /归集待确认/);
   assert.equal(await rpc('eth_getTransactionCount', [operator, 'latest']), nonce0, '确认前没有发交易');
@@ -151,7 +152,7 @@ test('anvil 端到端：CREATE2 地址 → 扫链入账 → 凑批 → 确认 �
   assert.notEqual(await rpc('eth_getCode', [addr.c1, 'latest']), '0x', 'c1 的转发合约已部署');
 
   // BSC：18 位小数的余数随归集一起转走（链上原始数全部进 parent）
-  const b2 = await proposeSweep(db, { chain: 'bsc', providers, notify });
+  const [b2] = await proposeSweep(db, { chain: 'bsc', providers, notify });
   assert.deepEqual(b2.items.map((i) => [i.address, i.amount]), [[addr.c1, 12_345_678n]]);
   const s2 = await approveSweep(db, { id: b2.id, actor: 'admin@x', reason: 'anvil 演练 BSC', providers });
   await waitReceipt(s2.txRefs[0]);
@@ -163,6 +164,6 @@ test('anvil 端到端：CREATE2 地址 → 扫链入账 → 凑批 → 确认 �
   // 归集不写账本、不改商户余额
   assert.equal(await moneySnapshot(db), money);
   // 这一轮没有出错告警
-  assert.equal(mails.filter((m) => /失败|出错|告警/.test(m.subject)).length, 0, JSON.stringify(mails));
+  assert.equal(mails.filter((m) => /失败|出错|告警|部分/.test(m.subject)).length, 0, JSON.stringify(mails));
   await db.end?.();
 });
