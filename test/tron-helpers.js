@@ -47,8 +47,10 @@ export const forwarderOf = (scheme, salt) => tronForwarder({ factory: scheme.fac
 const varint = (x) => { const out = []; let v = BigInt(x); do { let c = Number(v & 0x7fn); v >>= 7n; if (v) c |= 0x80; out.push(c); } while (v); return out; };
 const lenF = (no, bytes) => [...varint((no << 3) | 2), ...varint(bytes.length), ...bytes];
 const intF = (no, v) => [...varint((no << 3) | 0), ...varint(v)];
-function encodeTrigger({ owner, contract, data, feeLimit, callValue = 0, refBlock, refHash }) {
-  const p = [...lenF(1, [0x41, ...addr20(owner)]), ...lenF(2, [0x41, ...addr20(contract)]), ...(callValue ? intF(3, callValue) : []), ...lenF(4, Array.from(hex.decode(data)))];
+/** 交易原文的字段编码（测试里拼"带重复字段 / 多余字段"的原文用） */
+export const proto = { len: lenF, int: intF };
+function encodeTrigger({ owner, contract, data, feeLimit, callValue = 0, refBlock, refHash, ownerPrefix = 0x41, contractPrefix = 0x41, extraParam = [] }) {
+  const p = [...lenF(1, [ownerPrefix, ...addr20(owner)]), ...lenF(2, [contractPrefix, ...addr20(contract)]), ...(callValue ? intF(3, callValue) : []), ...lenF(4, Array.from(hex.decode(data))), ...extraParam];
   const typeUrl = Array.from(Buffer.from('type.googleapis.com/protocol.TriggerSmartContract'));
   const c = [...intF(1, 31), ...lenF(2, [...lenF(1, typeUrl), ...lenF(2, p)])];
   const now = Date.now();
@@ -193,7 +195,8 @@ export function fakeTronNode(state = {}) {
         const sel = String(body.function_selector || '');
         const data = (sel === 'sweep(address,bytes32[])' ? SWEEP_SELECTOR : kHex(sel).slice(0, 8)) + String(body.parameter || '');
         const bid = blockId(s.head);
-        // tamperTrigger：测试用，模拟节点（被劫持或出错）建出一笔和请求不一样的交易；返回要改的字段 { owner, contract, data, feeLimit, callValue }
+        // tamperTrigger：测试用，模拟节点（被劫持或出错）建出一笔和请求不一样的交易；返回要改的字段
+        //   { owner, contract, data, feeLimit, callValue, ownerPrefix, contractPrefix（地址第一个字节，正常 0x41）, extraParam（追加到 TriggerSmartContract 里的原始字段字节）}
         const t = { owner: body.owner_address, contract: body.contract_address, data, feeLimit: Number(body.fee_limit || 0), callValue: Number(body.call_value || 0), ...(s.tamperTrigger ? s.tamperTrigger({ ...body, data }) : {}) };
         const raw = encodeTrigger({ ...t, refBlock: bid.slice(12, 16), refHash: bid.slice(16, 32) });
         const id = hex.encode(sha256(hex.decode(raw)));

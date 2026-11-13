@@ -1,15 +1,20 @@
 // 测试复核补测（第 2 批，TRON 合约钱包）：
-//   一、签名前核对节点建的交易（tx_mismatch）：发起地址、合约、调用数据、带 TRX、fee_limit 任何一项被改 → 不签名、不广播，批次退回待确认
+//   一、签名前核对节点建的交易（tx_mismatch）：发起地址、合约、调用数据、带 TRX、fee_limit 任何一项被改 → 不签名、不广播、不租能量，批次退回待确认；
+//       先让节点建交易并核对通过，再租能量（核对不过不花租能量的钱）；
+//       原文里有重复字段（java-tron 解码时同号字段取最后一个，恶意节点可以在后面塞一个）、未知字段、字段 5 / 6（call_token_value、token_id）、
+//       地址第一个字节不是 0x41 → 一律拒签（tx_mismatch）
 //   二、老地址（legacy_hd / customers.address）和合约地址的未归集分开记：合约地址的到账不进 customers.onchain（老的浏览器签名归集只看它），
 //       老地址照旧进；概览的未归集 = 老地址 + 合约地址，各算一次
 //   三、TRON 合约钱包的 parent 等于第 0 批冷钱包时，概览冷钱包只算一次；按链拆开时 TRON 一行仍有热钱包、冷钱包
 //   四、TronSave：下单超时、平台出错、限流都抛带 code 的错；下单不自动重试；没成交（等不到 100%）抛 not_filled 并带出订单号；
 //       没成交改烧 TRX 后，这一单之后仍可能成交扣费 → 归集结果和告警邮件里都要有这张订单号，并写明可能仍会扣费（方便对账）
-//   五、config/wallets.json 改动邮件：第一次只记录、不发；改了只发一封（同时启动也一封）；没配收件人只记录（之后补配收件人也不补发这次）；
+//   五、config/wallets.json 改动邮件：第一次启动发一封"开始记录"（顺便确认告警邮箱通着），只有环境名、sha256 和公开地址；之后不变不发；
+//       改了只发一封（同时启动也一封）；没配收件人只记录（之后补配收件人也不补发这次）；
 //       邮件里只有公开地址和前后 sha256，没有任何私钥样的 64 位十六进制
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fakeTronNode, tronScheme, testOperator, randomTron, word, quiet } from './tron-helpers.js';
+import { fakeTronNode, tronScheme, testOperator, randomTron, word, quiet, proto, h20 } from './tron-helpers.js';
+import { hex } from '@scure/base';
 import { setupDb } from './wallet-helpers.js';
 import * as core from '../server/pay/core.js';
 import { createTronAdapter } from '../server/wallet/adapters/tron.js';
@@ -31,6 +36,12 @@ import { addressOfPrivateKey } from '../server/pay/signing.js';
 const U = 1_000_000;
 const usd = (n) => BigInt(Math.round(n * 1e6));
 const LIM = { threshold: usd(100), capPerAddress: usd(5000), capPerBatch: usd(20000), maxFeeRatioPct: 0, maxAddresses: 50 };
+
+/** 租能量平台替身：记下调用，总是租到 */
+function renterSpy() {
+  const calls = [];
+  return { calls, async rent(req) { calls.push(req); return { orderId: `R${calls.length}` }; }, async balance() { return 0n; } };
+}
 
 async function setupT({ customers = 2, renter } = {}) {
   const { scheme, usdt } = tronScheme();
@@ -55,7 +66,7 @@ async function fund(t, amounts) {
 
 // ---------- 一、tx_mismatch ----------
 
-test('签名前核对节点建的交易：发起地址、合约、调用数据（盐被换）、带 TRX、fee_limit 任何一项不对 → tx_mismatch，不签名、不广播，批次退回待确认', async () => {
+test('签名前核对节点建的交易：发起地址、合约、调用数据（盐被换）、带 TRX、fee_limit 任何一项不对 → tx_mismatch，不签名、不广播、不租能量（先建交易核对，再租），批次退回待确认', async () => {
   const cases = {
     owner: () => ({ owner: randomTron() }),
     contract: () => ({ contract: randomTron() }),
@@ -66,7 +77,8 @@ test('签名前核对节点建的交易：发起地址、合约、调用数据�
   const origErr = console.error; console.error = quiet.error;
   try {
     for (const [name, tamper] of Object.entries(cases)) {
-      const t = await setupT();
+      const renter = renterSpy();
+      const t = await setupT({ renter });
       await fund(t, [150, 250]);
       const [b] = await proposeSweep(t.db, { chain: 'tron', providers: t.providers, limits: LIM });
       t.node.state.tamperTrigger = tamper;
@@ -75,8 +87,47 @@ test('签名前核对节点建的交易：发起地址、合约、调用数据�
       assert.equal(got.status, 'awaiting_approval', name);
       assert.match(got.error || '', /tx_mismatch|does not match/, name);
       assert.equal(t.node.state.broadcasts.length, 0, `${name}：不广播`);
+      assert.equal(renter.calls.length, 0, `${name}：核对不过不租能量（先建交易、核对，再租）`);
       await t.db.end?.();
     }
+  } finally { console.error = origErr; }
+});
+
+test('签名前按原文逐个字段核对（java-tron 同号字段取最后一个）：重复的 contract_address / call_value / 调用数据、未知字段、字段 5 / 6（call_token_value、token_id）、地址前缀不是 0x41 → tx_mismatch，不签名、不广播、不租能量', async () => {
+  const cases = {
+    dupContract: () => ({ extraParam: proto.len(2, [0x41, ...hex.decode(h20(randomTron()))]) }),
+    dupCallValue: () => ({ extraParam: proto.int(3, 1_000_000) }),
+    dupData: (b) => ({ extraParam: proto.len(4, Array.from(hex.decode(b.data.slice(0, -64) + word('cd'.repeat(32))))) }),
+    unknownField: () => ({ extraParam: proto.int(9, 1) }),
+    callTokenValue: () => ({ extraParam: proto.int(5, 1) }),
+    tokenId: () => ({ extraParam: proto.int(6, 1_000_001) }),
+    ownerPrefix: () => ({ ownerPrefix: 0xa0 }),
+    contractPrefix: () => ({ contractPrefix: 0xa0 }),
+  };
+  const origErr = console.error; console.error = quiet.error;
+  try {
+    for (const [name, tamper] of Object.entries(cases)) {
+      const renter = renterSpy();
+      const t = await setupT({ renter });
+      await fund(t, [150, 250]);
+      const [b] = await proposeSweep(t.db, { chain: 'tron', providers: t.providers, limits: LIM });
+      t.node.state.tamperTrigger = tamper;
+      await assert.rejects(approveSweep(t.db, { id: b.id, actor: 'admin', reason: 'x', providers: t.providers }), (e) => e.code === 'sweep_not_sent', name);
+      const got = await getBatch(t.db, b.id);
+      assert.equal(got.status, 'awaiting_approval', name);
+      assert.match(got.error || '', /tx_mismatch|does not match/, name);
+      assert.equal(t.node.state.broadcasts.length, 0, `${name}：不广播`);
+      assert.equal(renter.calls.length, 0, `${name}：不租能量`);
+      await t.db.end?.();
+    }
+    // 对照：原文正常时照常租、照常发（上面的拒签不是因为别的原因）
+    const renter = renterSpy();
+    const ok = await setupT({ renter });
+    await fund(ok, [150]);
+    const [b] = await proposeSweep(ok.db, { chain: 'tron', providers: ok.providers, limits: LIM });
+    assert.equal((await approveSweep(ok.db, { id: b.id, actor: 'admin', reason: 'x', providers: ok.providers })).status, 'sent');
+    assert.equal(renter.calls.length, 1);
+    await ok.db.end?.();
   } finally { console.error = origErr; }
 });
 
@@ -244,18 +295,27 @@ test('没成交改烧 TRX：归集照常发；结果里记下没成交的订单�
 const RAW_A = JSON.stringify({ staging: { cold: 'TA', tron: { parent: 'TP1' } } });
 const RAW_B = JSON.stringify({ staging: { cold: 'TB', tron: { parent: 'TP2' } } });
 
-test('wallets.json：第一次只记录、不发邮件；没变不发；改了只发一封（web、worker 同时启动也一封）', async () => {
+test('wallets.json：第一次启动发一封"开始记录"（只有环境名、sha256、公开地址）；之后不变不发；改了只发一封（web、worker 同时启动也一封）', async () => {
   const db = await setupDb();
   const mails = [];
   const notify = async (s, t) => mails.push([s, t]);
-  const r0 = await checkWalletsChange(db, { raw: RAW_A, appEnv: 'staging', section: { cold: 'TA' }, notify });
+  const section = { cold: 'TA', tron: { parent: 'TP1' } };
+  const r0 = await checkWalletsChange(db, { raw: RAW_A, appEnv: 'staging', section, notify });
   assert.equal(r0.first, true);
-  assert.equal(mails.length, 0, '第一次只记录');
-  await checkWalletsChange(db, { raw: RAW_A, appEnv: 'staging', section: { cold: 'TA' }, notify });
-  assert.equal(mails.length, 0);
+  assert.equal(mails.length, 1, '第一次发一封');
+  const [s0, t0] = mails[0];
+  assert.match(s0, /开始记录/);
+  assert.match(s0 + t0, /staging/, '写明环境');
+  assert.ok(t0.includes(r0.sha), '写明 sha256');
+  assert.match(t0, /TA/);
+  assert.match(t0, /TP1/, '写明公开地址');
+  const hex64 = (s0 + t0).match(/(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])/g) || [];
+  assert.deepEqual([...new Set(hex64)], [r0.sha], '64 位十六进制只有这份文件的 sha256');
+  for (let i = 0; i < 3; i++) await checkWalletsChange(db, { raw: RAW_A, appEnv: 'staging', section, notify });
+  assert.equal(mails.length, 1, '不变不发');
   const rs = await Promise.all([1, 2, 3].map(() => checkWalletsChange(db, { raw: RAW_B, appEnv: 'staging', section: { cold: 'TB' }, notify })));
   assert.equal(rs.filter((r) => r.changed).length, 1);
-  assert.equal(mails.length, 1, '改了只发一封');
+  assert.equal(mails.length, 2, '改了只发一封');
   await db.end?.();
 });
 
