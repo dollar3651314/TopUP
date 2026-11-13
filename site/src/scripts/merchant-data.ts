@@ -8,10 +8,11 @@ import * as M from './mock';
 export type Amount = number | string;
 export interface Mode { enabled: boolean; low: number; high: number; ttlMin: number; lookbackH: number }
 export interface Me { authed: boolean; email?: string; merchant?: { id: string; name: string; order_mode: Mode; fee_in: { ppm: number; fixed: number; min: number }; fee_out: { ppm: number; fixed: number; min: number }; cashout_wallets: string[] } }
-export interface Dep { id: string; customer_id: string; address: string; txid: string; amount: Amount; fee: Amount; credited: Amount; result: string; order_no: string | null; matched_by: string | null; time: string; confirmations?: number }
-export interface Cust { customer_id: string; name: string; email: string; remark: string; address: string; total: Amount; count: number; fees: Amount; unmatched: Amount; last_payment_at: string | null; created_at: string }
+export interface ChainAddr { chain: 'eth' | 'bsc' | 'tron'; address: string }
+export interface Dep { id: string; customer_id: string; chain?: string; address: string; txid: string; amount: Amount; fee: Amount; credited: Amount; result: string; order_no: string | null; matched_by: string | null; time: string; confirmations?: number }
+export interface Cust { customer_id: string; name: string; email: string; remark: string; address: string | null; addresses?: ChainAddr[]; total: Amount; count: number; fees: Amount; unmatched: Amount; last_payment_at: string | null; created_at: string }
 export interface OrderItem { order_no: string; merchant_order_no: string; customer_id: string; amount: Amount; matched: Amount; status: M.OrderState; created_at: string; expires_at: string }
-export interface OrderFull extends OrderItem { address: string; pay_url: string; deposits: { id: string; txid: string; amount: Amount; matched_by: string; time: string }[] }
+export interface OrderFull extends OrderItem { address: string | null; network?: string; chain?: string | null; addresses?: ChainAddr[]; pay_url: string; deposits: { id: string; txid: string; amount: Amount; matched_by: string; time: string }[] }
 export interface Wd { withdrawal_no: string; kind: 'payout' | 'cashout'; customer_id: string | null; to: string; amount: Amount; fee: Amount; status: string; txid: string | null; reason: string | null; source: 'web' | 'api'; created_at: string }
 export interface Led { id: string; type: M.LedgerType; amount: Amount; available_after: Amount; ref: string; customer_id: string | null; created_at: string }
 export interface Cb { id: string; event: string; ref: string; status: 'pending' | 'ok' | 'failed'; attempts: number; last_code: number | null; next_at: string | null; created_at: string }
@@ -36,13 +37,14 @@ export interface MerchantData {
   logout(): Promise<void>;
   setupBegin(token: string, password: string): Promise<{ qr: string; secret: string }>;
   setupConfirm(token: string, code: string): Promise<void>;
-  overview(): Promise<{ available: Amount; frozen: Amount; today: Amount; today_count: number; today_fees: Amount; open_orders: number; unmatched: Amount; unmatched_count: number; pending_withdrawals: number; recent: Dep[] }>;
+  overview(): Promise<{ today_by_chain?: { chain: string; total: Amount; count: number }[]; chains?: string[]; available: Amount; frozen: Amount; today: Amount; today_count: number; today_fees: Amount; open_orders: number; unmatched: Amount; unmatched_count: number; pending_withdrawals: number; recent: Dep[] }>;
   customers(q: string, onePage?: boolean): Promise<Cust[]>;
   customer(id: string, days: number): Promise<{ customer: Cust; stats: { total: Amount; count: number; fees: Amount; unmatched: Amount }; orders: OrderItem[]; deposits: Dep[]; payouts: { withdrawal_no: string; amount: Amount; status: string; created_at: string }[] }>;
   saveCustomer(b: { customer_id: string; name?: string; email?: string; remark?: string }, create?: boolean): Promise<Cust>;
   orders(status: string, customerId: string): Promise<OrderItem[]>;
   order(id: string): Promise<{ order: OrderFull; unmatched: Dep[] }>;
-  createOrder(b: { customer_id: string; customer_name?: string; customer_email?: string; merchant_order_no: string; amount: string }): Promise<OrderFull>;
+  createOrder(b: { customer_id: string; customer_name?: string; customer_email?: string; merchant_order_no: string; amount: string; chain?: string }): Promise<OrderFull>;
+  customerAddresses(id: string): Promise<{ customer_id: string; addresses: ChainAddr[]; chains: string[] }>;
   match(orderNo: string, depositId: string, on: boolean): Promise<void>;
   deposits(customerId: string, onlyUnmatched: boolean): Promise<Dep[]>;
   ledger(customerId: string): Promise<Led[]>;
@@ -91,6 +93,7 @@ export function realData(): MerchantData {
     orders: (status, customerId) => all('orders', q({ status, customer_id: customerId })),
     order: (id) => call('order', undefined, q({ order_no: id })),
     createOrder: (b) => call('order-create', b),
+    customerAddresses: (id) => call('customer-addresses', undefined, q({ customer_id: id })),
     match: async (orderNo, depositId, on) => { await call(on ? 'match' : 'unmatch', { order_no: orderNo, deposit_id: depositId }); },
     deposits: (customerId, only) => all('deposits', q({ customer_id: customerId, matched: only ? 'false' : '' })),
     ledger: (customerId) => all('ledger', q({ customer_id: customerId })),
@@ -157,6 +160,7 @@ export function protoData(): MerchantData {
       const o = M.orders.find((x) => x.id === id); if (!o) throw new ApiErr('not_found', 404);
       return { order: full(o), unmatched: sortD(mine(M.deposits).filter((d) => d.customer === o.customer && d.credited && !d.orderId)).map(dep) };
     },
+    customerAddresses: async (id) => ({ customer_id: id, addresses: [], chains: [] }),
     createOrder: async (b) => {
       if (!me.mode.enabled) throw new ApiErr('order_mode_disabled', 403);
       const amount = parseUsdt(b.amount); if (!amount) throw new ApiErr('invalid_param', 422, 'amount');

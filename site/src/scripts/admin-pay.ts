@@ -459,6 +459,10 @@ function initFlow() {
 }
 
 // ============ 系统状态 ============
+// 第 1 批新加的"钱包提供方"：原型在第 1 批原型文件里，这个站内原型只放说明
+render.routes = (p) => {
+  p.replaceChildren(toolbar('钱包提供方'), h('p', { class: 'note-box' }, '原型模式没有这一页的模拟数据：以太坊、BSC 都用合约钱包，按链整体切换（动态码、原因必填、审计）。正式页面在测试环境查看。'));
+};
 render.status = (p) => {
   p.replaceChildren(
     toolbar('系统状态'),

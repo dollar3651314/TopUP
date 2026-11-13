@@ -96,7 +96,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
               count(*) filter (where v >= $2)::int over_n, coalesce(sum(v) filter (where v >= $2), 0)::bigint over_total from a`, [chain, String(settings.thresholds[chain])]);
           row.estimate = { address_count: est.n, total_usdt: usdt(est.total), over_threshold: est.over_n, over_threshold_usdt: usdt(est.over_total) };
           const scan = await getMeta(db, `evm_scan_${chain}`, null);
-          row.scan_ok = scan ? now() - Date.parse(scan.at) <= 5 * 60_000 : false;
+          row.scan_ok = scan ? now() - Date.parse(scan.at) <= 5 * 60_000 : null; // null = 还没扫过（刚部署）
         }
         chains.push(row);
       }

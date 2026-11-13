@@ -53,6 +53,7 @@ const WALLET_ENV = IS_STAGING ? 'staging' : !IS_PROTOTYPE && process.env.APP_ENV
         <button type="button" data-tab="p-anomalies">异常到账 <span class="badge" data-pcount="anomalies"></span></button>
         <button type="button" data-tab="p-recon">对账</button>
         <button type="button" data-tab="p-wallet">钱包设置</button>
+        <button type="button" data-tab="p-routes">钱包提供方</button>
         <button type="button" data-tab="p-status">系统状态</button>
         <button type="button" data-logout>退出登录</button>
       </nav>
@@ -79,6 +80,7 @@ const WALLET_ENV = IS_STAGING ? 'staging' : !IS_PROTOTYPE && process.env.APP_ENV
         <section data-panel="p-anomalies" hidden></section>
         <section data-panel="p-recon" hidden></section>
         <section data-panel="p-wallet" hidden></section>
+        <section data-panel="p-routes" hidden></section>
         <section data-panel="p-status" hidden></section>
 
         <section data-panel="detail" hidden>

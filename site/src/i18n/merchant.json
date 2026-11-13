@@ -77,7 +77,10 @@
       "newOrder": "+ New order",
       "balanceNote": "Your balance is the amount recorded for you in the ledger, net of fees. It does not depend on when funds are consolidated on-chain.",
       "unmatched": "Unmatched deposits",
-      "unmatchedSub": "{n} deposits not linked to an order"
+      "unmatchedSub": "{n} deposits not linked to an order",
+      "byChain": "Today · {net}",
+      "byChainSub": "{n} payments",
+      "oneBalance": "Your balance is one number across chains; you choose the chain when withdrawing."
     },
     "dep": {
       "cols": {
@@ -140,7 +143,12 @@
         "customerName": "Customer name",
         "customerEmail": "Customer email",
         "errCustomer": "Enter 1–128 characters: letters, digits, _ - . @",
-        "matchedNow": "Matched automatically to earlier deposits from this customer."
+        "matchedNow": "Matched automatically to earlier deposits from this customer.",
+        "chain": "Payment chain",
+        "chainAny": "Any (recommended)",
+        "chainAnyHint": "The payer picks the network their USDT is on, on the payment page",
+        "chainOnly": "{net} ({std}) only",
+        "ethHint": "Higher network fee for the payer"
       },
       "detail": {
         "title": "Order {id}",
@@ -162,7 +170,9 @@
           "order": "On order creation",
           "manual": "Manual"
         },
-        "how": "How matched"
+        "how": "How matched",
+        "network": "Network",
+        "anyChain": "Payer chooses ({list})"
       },
       "settings": "Matching: complete at {low}%–{high}% of the order amount, above {high}% = overpaid · orders expire after {ttl} min · deposits up to {lookback} h before an order can match it. Set by the platform.",
       "modeOff": "Order mode is off for your account. All deposits are recorded by customer. Contact us to turn on order mode.",
@@ -336,7 +346,21 @@
       "protoReset": "Reset",
       "partialOpen": "Received {got} USDT. Please pay the remaining {left} USDT.",
       "partialExpired": "Payment request expired",
-      "partialExpiredBody": "Received {got} of {amount} USDT before expiry. Please contact the merchant."
+      "partialExpiredBody": "Received {got} of {amount} USDT before expiry. Please contact the merchant.",
+      "chooseTitle": "Step 1: choose the network you will pay on",
+      "chooseWarn": "Choose the network your USDT is on. Funds sent on the wrong network cannot be recovered.",
+      "chooseNote": "The address appears after you choose. You can change it before paying.",
+      "networkOf": "Network: {net} ({std})",
+      "warnOf": "Send USDT on the {net} ({std}) network only, for the amount above. Other networks or tokens cannot be recovered.",
+      "change": "Wrong network? Choose another",
+      "netHint": {
+        "eth": "Higher network fee",
+        "bsc": "BNB Smart Chain",
+        "tron": "Coming soon"
+      },
+      "stepChoose": "Network",
+      "stepPay": "Pay",
+      "paidNote": "If you have already paid, do not pay again; this page updates when it arrives."
     },
     "customers": {
       "title": "Customers",
@@ -363,7 +387,8 @@
         "remark": "Note",
         "submit": "Create",
         "errDup": "This customer already exists.",
-        "created": "Customer created with a permanent address."
+        "created": "Customer created with a permanent address.",
+        "createdChains": "Customer created with a permanent address on each chain."
       },
       "detail": {
         "info": "Details",
@@ -381,8 +406,11 @@
         "deposits": "Deposits",
         "payouts": "Payouts",
         "statement": "Export statement (CSV)",
-        "exported": "Prototype: the customer statement would download here."
-      }
+        "exported": "Prototype: the customer statement would download here.",
+        "addresses": "Receiving addresses",
+        "totalAll": "{amount} USDT ({n} payments, all chains)"
+      },
+      "chainsBody": "Each customer has one permanent address per chain. The Ethereum and BSC addresses are the same string (same contracts on both chains), but tell the payer which network to use."
     },
     "errors": {
       "locked": "Too many wrong attempts. Sign-in is locked for 15 minutes.",
@@ -409,6 +437,23 @@
       "empty": "No customers yet. Type an ID to create one.",
       "existing": "Existing customer: name and email filled in. Edit them on the Customers page.",
       "isNew": "New customer: it will be created with a permanent address when you submit."
+    },
+    "chain": {
+      "names": {
+        "eth": "Ethereum",
+        "bsc": "BSC",
+        "tron": "TRON"
+      },
+      "std": {
+        "eth": "ERC20",
+        "bsc": "BEP20",
+        "tron": "TRC20"
+      },
+      "later": "Release 2",
+      "only": "USDT on {net} ({std}) only · never changes",
+      "copy": "Copy {net} address",
+      "laterNote": "Assigned automatically when release 2 goes live; nothing to do.",
+      "copiedNote": "Copied. Tell the payer to use the {net} ({std}) network only."
     }
   },
   "zh": {
@@ -489,7 +534,10 @@
       "newOrder": "+ 创建订单",
       "balanceNote": "余额是账本上记给你的金额（已扣除手续费），和链上资金什么时候归集无关。",
       "unmatched": "未匹配的到账",
-      "unmatchedSub": "{n} 笔还没匹配到订单"
+      "unmatchedSub": "{n} 笔还没匹配到订单",
+      "byChain": "今日收款 · {net}",
+      "byChainSub": "{n} 笔",
+      "oneBalance": "余额是一个数（各链合计），提币时再选链。"
     },
     "dep": {
       "cols": {
@@ -552,7 +600,12 @@
         "customerName": "客户名称",
         "customerEmail": "客户邮箱",
         "errCustomer": "请输入 1 到 128 位：字母、数字、_ - . @",
-        "matchedNow": "已自动匹配到这个客户之前的到账。"
+        "matchedNow": "已自动匹配到这个客户之前的到账。",
+        "chain": "付款链",
+        "chainAny": "不指定（推荐）",
+        "chainAnyHint": "付款人在付款页自己选他钱包里有 USDT 的网络",
+        "chainOnly": "只收{net}（{std}）",
+        "ethHint": "付款人手续费较高"
       },
       "detail": {
         "title": "订单 {id}",
@@ -574,7 +627,9 @@
           "order": "建单时",
           "manual": "手动"
         },
-        "how": "匹配方式"
+        "how": "匹配方式",
+        "network": "网络",
+        "anyChain": "付款人自己选（{list}）"
       },
       "settings": "匹配规则：累计达到订单金额的 {low}% 到 {high}% 为已完成，超过 {high}% 为超额付款；订单 {ttl} 分钟后过期；订单创建前 {lookback} 小时内的未匹配到账可以匹配。以上由平台设置。",
       "modeOff": "你的账户没有开启订单模式，到账只按客户记录。需要订单功能请联系我们开通。",
@@ -748,7 +803,21 @@
       "protoReset": "重置",
       "partialOpen": "已收到 {got} USDT，还需支付 {left} USDT。",
       "partialExpired": "付款已过期",
-      "partialExpiredBody": "过期前已收到 {got} USDT，订单金额为 {amount} USDT。请联系商户。"
+      "partialExpiredBody": "过期前已收到 {got} USDT，订单金额为 {amount} USDT。请联系商户。",
+      "chooseTitle": "第 1 步：选你要用哪个网络付款",
+      "chooseWarn": "选你钱包里 USDT 所在的网络。转错网络，资金无法找回。",
+      "chooseNote": "选好后显示收款地址。付款前可以改选。",
+      "networkOf": "网络：{net}（{std}）",
+      "warnOf": "只能用 {net}（{std}）网络转 USDT，并按上面的金额转账。用其他网络或转其他币，资金无法找回。",
+      "change": "选错了？换一个网络",
+      "netHint": {
+        "eth": "网络手续费较高",
+        "bsc": "BNB Smart Chain",
+        "tron": "即将开通"
+      },
+      "stepChoose": "选网络",
+      "stepPay": "转账",
+      "paidNote": "已付款的请不要重复付款，到账后这里会自动更新。"
     },
     "customers": {
       "title": "客户",
@@ -775,7 +844,8 @@
         "remark": "备注",
         "submit": "创建",
         "errDup": "这个客户已经存在。",
-        "created": "客户已创建，并分配了永久地址。"
+        "created": "客户已创建，并分配了永久地址。",
+        "createdChains": "客户已创建，并分配了每条链的永久地址。"
       },
       "detail": {
         "info": "客户信息",
@@ -793,8 +863,11 @@
         "deposits": "到账",
         "payouts": "代付",
         "statement": "导出客户对账单（CSV）",
-        "exported": "原型：正式版会在这里下载这个客户的对账单。"
-      }
+        "exported": "原型：正式版会在这里下载这个客户的对账单。",
+        "addresses": "收款地址",
+        "totalAll": "{amount} USDT（{n} 笔，各链合计）"
+      },
+      "chainsBody": "每个客户每条链一个永久地址。以太坊和 BSC 的地址是同一串（同一套合约在两条链上地址相同），但付款时要按付款人用的网络告诉他。"
     },
     "errors": {
       "locked": "连续输错次数过多，已锁定 15 分钟。",
@@ -821,6 +894,23 @@
       "empty": "还没有客户，输入一个编号即可新建。",
       "existing": "已有客户：名称和邮箱已自动带出。需要修改请到“客户”页面。",
       "isNew": "新客户：提交时会自动创建客户，并分配一个永久收款地址。"
+    },
+    "chain": {
+      "names": {
+        "eth": "以太坊",
+        "bsc": "BSC",
+        "tron": "TRON"
+      },
+      "std": {
+        "eth": "ERC20",
+        "bsc": "BEP20",
+        "tron": "TRC20"
+      },
+      "later": "第 2 批",
+      "only": "只收 {net}（{std}）网络的 USDT · 永久不变",
+      "copy": "复制 {net} 地址",
+      "laterNote": "第 2 批上线后自动分配，不用你操作。",
+      "copiedNote": "已复制。告诉付款人只用 {net}（{std}）网络转账。"
     }
   }
 }
