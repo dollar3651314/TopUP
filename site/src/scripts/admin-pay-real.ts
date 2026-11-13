@@ -237,14 +237,14 @@ render.customers = async (p) => {
   q.addEventListener('change', () => { custQ = q.value.trim(); render.customers(p); });
   const { items } = await call('customers', undefined, `&q=${encodeURIComponent(custQ)}&merchant_id=${encodeURIComponent(custM)}`);
   p.replaceChildren(toolbar('客户', sel, q), h('p', { class: 'hint muted' }, '商户的客户由商户自己定义标识，每个客户一个永久地址。这里可以跨商户查找任意客户。'),
-    table(['商户', '客户标识 · 名称', '地址', '累计收款（笔数）', '手续费', '未匹配', '未归集', '最近付款'], items.map((x: any) => [x.merchant, sub(mono(x.customer_id), x.name || ''), mono(shortAddr(x.address), x.address), sub(usd(x.total), `${x.count} 笔`), usd(x.fees), usd(x.unmatched), usd(x.onchain), t(x.last_payment_at)]),
+    table(['商户', '客户标识 · 名称', '地址', '累计收款（笔数）', '手续费', '未匹配', '未归集', '最近付款'], items.map((x: any) => [x.merchant, sub(mono(x.customer_id), x.name || ''), x.address ? mono(shortAddr(x.address), x.address) : h('span', { class: 'muted' }, '—'), sub(usd(x.total), `${x.count} 笔`), usd(x.fees), usd(x.unmatched), usd(x.onchain), t(x.last_payment_at)]),
       '没有找到客户', { onRow: (i) => customerDetail(items[i]) }));
 };
 async function customerDetail(x: any) {
   const r = await call('customer', undefined, `&merchant_id=${encodeURIComponent(x.merchant_id)}&customer_id=${encodeURIComponent(x.customer_id)}`);
   const OS: Record<string, string> = { pending: '等待付款', partial: '部分付款', completed: '已完成', overpaid: '超额付款', expired: '已过期', expired_partial: '部分付款（已过期）' };
   dialog(`${x.merchant} · ${x.customer_id}`, h('div', { class: 'stack' },
-    h('dl', { class: 'kv' }, h('dt', {}, '地址'), h('dd', {}, h('span', { class: 'copy-row' }, mono(r.customer.address), tronscan(r.customer.address))), h('dt', {}, '名称'), h('dd', {}, r.customer.name || '—'), h('dt', {}, '创建时间'), h('dd', {}, t(r.customer.created_at))),
+    h('dl', { class: 'kv' }, h('dt', {}, '地址'), h('dd', {}, r.customer.address ? h('span', { class: 'copy-row' }, mono(r.customer.address), tronscan(r.customer.address)) : h('span', { class: 'muted' }, '没有 TRON 地址（地址在客户发起充值时按链生成）')), h('dt', {}, '名称'), h('dd', {}, r.customer.name || '—'), h('dt', {}, '创建时间'), h('dd', {}, t(r.customer.created_at))),
     h('div', { class: 'stats' }, stat('累计收款', usd(r.customer.total), 'USDT'), stat('笔数', String(r.customer.count)), stat('手续费', usd(r.customer.fees), 'USDT'), stat('未匹配', usd(r.customer.unmatched), 'USDT')),
     h('h3', { class: 'h-sm m0' }, '订单'), table(['订单号', '金额', '已匹配', '状态', '创建'], r.orders.map((o: any) => [mono(o.order_no), usd(o.amount), usd(o.matched), OS[o.status] || o.status, t(o.created_at)]), '暂无'),
     h('h3', { class: 'h-sm m0' }, '到账'), table(['时间', '金额', '结果', '订单', '交易'], r.deposits.map((d: any) => [t(d.time), usd(d.amount), d.result === 'credited' ? '已入账' : '低于 1 USDT', d.order_no ? mono(d.order_no) : '—', mono(d.txid.slice(0, 10) + '…', d.txid)]), '暂无'),

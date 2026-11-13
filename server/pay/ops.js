@@ -16,13 +16,8 @@ const cleanText = (v, max) => String(v ?? '').trim().slice(0, max);
 
 export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', wallet = null }) {
   const enabledChains = wallet?.enabledChains || [];
-  /** 新客户、老客户第一次要地址：给每条已开通的链分配地址（合约钱包是纯计算）；分配失败只记日志，下次再要时重试 */
-  async function ensureAddresses(m, customerId) {
-    for (const chain of enabledChains) {
-      try { await addressFor(db, { merchantId: m.id, customerId, chain, providers: wallet.providers }); }
-      catch (e) { console.error(`[pay] address ${chain}: ${e.code || e.message}`); }
-    }
-  }
+  /** K1：客户发起充值时才按链生成地址（订单指定了链、或付款人在付款页选了链）；同一客户同一条链只生成一次，之后复用 */
+  const addressOn = (m, customerId, chain) => addressFor(db, { merchantId: m.id, customerId, chain, providers: wallet?.providers || {} });
   /** 一批客户每条链现在用的地址（停用的不给）：Map(customer_id → [{ chain, address }]) */
   async function addressesOf(merchantId, ids) {
     const out = new Map(ids.map((id) => [id, []]));
@@ -49,12 +44,15 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
     if (!c) throw new PayError('not_found', 404);
     return c;
   };
-  /** 订单的付款信息：指定了链时 address 是这条链的地址；没有指定时是 TRON 地址（旧字段），addresses 给出每条链的地址 */
+  /**
+   * 订单的付款信息（K1）：指定了链时 address、network 是这条链的；没有指定时 address、network 为 null（付款人在付款页选了链才给），
+   * addresses 是这个客户已经生成过的地址（指定了链时只给这条链）
+   */
   const withPay = async (m, o, chain) => {
-    const addrs = (await addressesOf(m.id, [o.customer_id])).get(o.customer_id);
-    const [c] = await db.query('select address from customers where merchant_id = $1 and customer_id = $2', [m.id, o.customer_id]);
-    const picked = chain ? addrs.find((a) => a.chain === chain)?.address ?? null : c?.address ?? null;
-    return { ...o, address: picked, network: NETWORK[chain || 'tron'], chain: chain || null, addresses: addrs, token: 'USDT', pay_url: payUrl(o.order_no) };
+    let addrs = (await addressesOf(m.id, [o.customer_id])).get(o.customer_id);
+    if (chain) addrs = addrs.filter((a) => a.chain === chain);
+    const picked = chain ? addrs[0]?.address ?? null : null;
+    return { ...o, address: picked, network: chain ? NETWORK[chain] : null, chain: chain || null, addresses: addrs, token: 'USDT', pay_url: payUrl(o.order_no) };
   };
   const orderOwned = async (m, id) => {
     const [o] = await db.query('select id from orders where merchant_id = $1 and (id = $2 or merchant_order_no = $3)', [m.id, id?.orderNo || '', id?.merchantOrderNo || '']);
@@ -80,14 +78,12 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
         if (!sets.length) return row;
         return (await t.query(`update customers set ${sets.join(', ')} where merchant_id = $1 and customer_id = $2 returning *`, vals))[0];
       });
-      await ensureAddresses(m, id);
-      return (await withAddrs(m, [c]))[0];
+      return (await withAddrs(m, [c]))[0]; // K1：建客户不生成地址
     },
     async getCustomer(m, id) { return (await withAddrs(m, [await needCustomer(m, id)]))[0]; },
-    /** 这个客户每条链的地址（商户后台新建客户后弹出） */
+    /** 这个客户已经生成过的每条链的地址（只查，不生成） */
     async customerAddresses(m, id) {
       await needCustomer(m, id);
-      await ensureAddresses(m, id);
       return { customer_id: id, addresses: (await addressesOf(m.id, [id])).get(id), chains: enabledChains };
     },
     async listCustomers(m, { q = '', cursor = null, limit = 50 }) {
@@ -135,12 +131,16 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
       const chain = b.chain === undefined || b.chain === null || b.chain === '' ? null : String(b.chain);
       if (chain && !['eth', 'bsc', 'tron'].includes(chain)) throw new PayError('invalid_param', 422, 'chain');
       if (chain && !enabledChains.includes(chain)) throw new PayError('chain_not_enabled', 409, 'chain');
+      // 指定了链：先建客户（不存在时），再生成这条链的地址，然后建订单（地址生成失败就不建订单）
+      if (chain) {
+        await db.tx((t) => core.ensureCustomer(t, m.id, String(b.customer_id || ''), { name: cleanText(b.customer_name, 200), emailEnc: enc(cleanText(b.customer_email, 320)), emailHash: eh(cleanText(b.customer_email, 320)) }));
+        await addressOn(m, String(b.customer_id), chain);
+      }
       const o = await core.createOrder(db, m, {
         customerId: String(b.customer_id || ''), customerName: cleanText(b.customer_name, 200), customerEmailEnc: enc(cleanText(b.customer_email, 320)), customerEmailHash: eh(cleanText(b.customer_email, 320)),
         merchantOrderNo: String(b.merchant_order_no || ''), amount: parseAmount(b.amount), chain,
       });
       const { address, ...v } = o;
-      await ensureAddresses(m, v.customer_id);
       return withPay(m, v, chain);
     },
     async getOrder(m, { orderNo, merchantOrderNo }) {

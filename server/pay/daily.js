@@ -10,7 +10,7 @@ import { diskUsage, DISK_ALERT } from './disk.js';
 export async function runDaily({ db, tron, wallets, notify, now = new Date(), maxAddresses = 1000, diskPath = null }) {
   const out = {};
   // 地址：有余额的全部查；其余按最近付款时间取一部分，逐日轮换（控制 TronGrid 的用量）
-  const addrs = await db.query(`select merchant_id, customer_id, address, onchain from customers
+  const addrs = await db.query(`select merchant_id, customer_id, address, onchain from customers where address is not null
     order by (onchain > 0) desc, last_at desc nulls last limit $1`, [maxAddresses]);
   let chainAddr = 0, checked = 0, found = 0;
   for (const a of addrs) {

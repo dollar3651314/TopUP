@@ -139,7 +139,7 @@
         "errDup": "This order number already exists.",
         "errAmount": "Enter an amount greater than 0 with at most 6 decimals.",
         "customer": "Customer ID",
-        "customerHint": "Your own ID for this customer (user ID or email). New IDs create a new customer with a permanent address.",
+        "customerHint": "Your own ID for this customer (user ID or email). New IDs create a new customer; its address is generated per chain when it makes a deposit.",
         "customerName": "Customer name",
         "customerEmail": "Customer email",
         "errCustomer": "Enter 1–128 characters: letters, digits, _ - . @",
@@ -172,7 +172,8 @@
         },
         "how": "How matched",
         "network": "Network",
-        "anyChain": "Payer chooses ({list})"
+        "anyChain": "Payer chooses ({list})",
+        "payerPicks": "Given after the payer picks a network on the payment page (the customer's permanent address on that chain)."
       },
       "settings": "Matching: complete at {low}%–{high}% of the order amount, above {high}% = overpaid · orders expire after {ttl} min · deposits up to {lookback} h before an order can match it. Set by the platform.",
       "modeOff": "Order mode is off for your account. All deposits are recorded by customer. Contact us to turn on order mode.",
@@ -388,8 +389,8 @@
         "remark": "Note",
         "submit": "Create",
         "errDup": "This customer already exists.",
-        "created": "Customer created with a permanent address.",
-        "createdChains": "Customer created with a permanent address on each chain."
+        "created": "Customer created. Receiving addresses are generated per chain when the customer makes a deposit.",
+        "createdChains": "Customer created. Addresses already generated are shown below."
       },
       "detail": {
         "info": "Details",
@@ -409,9 +410,10 @@
         "statement": "Export statement (CSV)",
         "exported": "Prototype: the customer statement would download here.",
         "addresses": "Receiving addresses",
+        "onDemand": "No address yet. Addresses are generated per chain when the customer makes a deposit: when an order names a chain, or when the payer picks a network on the payment page. Each chain's address is permanent and reused.",
         "totalAll": "{amount} USDT ({n} payments, all chains)"
       },
-      "chainsBody": "Each customer has one permanent address per chain. The Ethereum and BSC addresses are the same string (same contracts on both chains), but tell the payer which network to use."
+      "chainsBody": "Each customer gets one permanent address per chain, generated when it makes a deposit on that chain. The Ethereum and BSC addresses are the same string (same contracts on both chains), but tell the payer which network to use."
     },
     "errors": {
       "locked": "Too many wrong attempts. Sign-in is locked for 15 minutes.",
@@ -437,7 +439,7 @@
       "none": "No matching customer. Type a new ID to create one.",
       "empty": "No customers yet. Type an ID to create one.",
       "existing": "Existing customer: name and email filled in. Edit them on the Customers page.",
-      "isNew": "New customer: it will be created with a permanent address when you submit."
+      "isNew": "New customer: it will be created when you submit (its address is generated per chain at deposit time)."
     },
     "chain": {
       "names": {
@@ -454,6 +456,7 @@
       "only": "USDT on {net} ({std}) only · never changes",
       "copy": "Copy {net} address",
       "laterNote": "Assigned automatically when release 2 goes live; nothing to do.",
+      "notYet": "Not generated yet: created when the customer makes a deposit on this network.",
       "sameNote": "The Ethereum and BSC addresses are the same string: this customer can receive USDT on both networks. Tell the payer which network to use.",
       "copiedNote": "Copied. Tell the payer to use the {net} ({std}) network only."
     }
@@ -598,7 +601,7 @@
         "errDup": "这个商户订单号已经存在。",
         "errAmount": "请输入大于 0 的金额，最多 6 位小数。",
         "customer": "客户标识",
-        "customerHint": "你给这个客户的标识（用户编号或邮箱）。新的标识会自动创建客户，并分配一个永久地址。",
+        "customerHint": "你给这个客户的标识（用户编号或邮箱）。新的标识会自动创建客户；地址在客户发起充值时按链生成。",
         "customerName": "客户名称",
         "customerEmail": "客户邮箱",
         "errCustomer": "请输入 1 到 128 位：字母、数字、_ - . @",
@@ -631,7 +634,8 @@
         },
         "how": "匹配方式",
         "network": "网络",
-        "anyChain": "付款人自己选（{list}）"
+        "anyChain": "付款人自己选（{list}）",
+        "payerPicks": "付款人在付款页选了网络后才给（这个客户在那条链上的永久地址）。"
       },
       "settings": "匹配规则：累计达到订单金额的 {low}% 到 {high}% 为已完成，超过 {high}% 为超额付款；订单 {ttl} 分钟后过期；订单创建前 {lookback} 小时内的未匹配到账可以匹配。以上由平台设置。",
       "modeOff": "你的账户没有开启订单模式，到账只按客户记录。需要订单功能请联系我们开通。",
@@ -847,8 +851,8 @@
         "remark": "备注",
         "submit": "创建",
         "errDup": "这个客户已经存在。",
-        "created": "客户已创建，并分配了永久地址。",
-        "createdChains": "客户已创建，并分配了每条链的永久地址。"
+        "created": "客户已创建。收款地址在客户发起充值时按链生成。",
+        "createdChains": "客户已创建。下面是已经生成过的地址。"
       },
       "detail": {
         "info": "客户信息",
@@ -868,9 +872,10 @@
         "statement": "导出客户对账单（CSV）",
         "exported": "原型：正式版会在这里下载这个客户的对账单。",
         "addresses": "收款地址",
+        "onDemand": "还没有地址。地址在客户发起充值时按链生成：订单指定了链，或付款人在付款页选了网络，才给这条链分配永久地址，之后一直复用。",
         "totalAll": "{amount} USDT（{n} 笔，各链合计）"
       },
-      "chainsBody": "每个客户每条链一个永久地址。以太坊和 BSC 的地址是同一串（同一套合约在两条链上地址相同），但付款时要按付款人用的网络告诉他。"
+      "chainsBody": "每个客户每条链一个永久地址，在客户发起充值时按链生成。以太坊和 BSC 的地址是同一串（同一套合约在两条链上地址相同），但付款时要按付款人用的网络告诉他。"
     },
     "errors": {
       "locked": "连续输错次数过多，已锁定 15 分钟。",
@@ -896,7 +901,7 @@
       "none": "没有找到匹配的客户。输入一个新的编号可以新建客户。",
       "empty": "还没有客户，输入一个编号即可新建。",
       "existing": "已有客户：名称和邮箱已自动带出。需要修改请到“客户”页面。",
-      "isNew": "新客户：提交时会自动创建客户，并分配一个永久收款地址。"
+      "isNew": "新客户：提交时会自动创建客户（地址在发起充值时按链生成）。"
     },
     "chain": {
       "names": {
@@ -913,6 +918,7 @@
       "only": "只收 {net}（{std}）网络的 USDT · 永久不变",
       "copy": "复制 {net} 地址",
       "laterNote": "第 2 批上线后自动分配，不用你操作。",
+      "notYet": "还没有生成：客户在这条链发起充值时生成。",
       "sameNote": "以太坊和 BSC 的地址是同一串：这个客户两条链都能收 USDT。付款时按付款人用的网络告诉他。",
       "copiedNote": "已复制。告诉付款人只用 {net}（{std}）网络转账。"
     }

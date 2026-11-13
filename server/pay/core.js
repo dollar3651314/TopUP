@@ -4,7 +4,7 @@
 import { randomBytes } from 'node:crypto';
 import { calcFee } from './money.js';
 import { matchOnDeposit, matchOnCreate, manualMatch as ruleManual, unmatch as ruleUnmatch, stateOf } from './matching.js';
-import { deriveAddress, isValidAddress } from './tron.js';
+import { isValidAddress } from './tron.js';
 
 export const MIN_CREDIT = 1_000_000; // 低于 1 USDT 的到账不入账
 export const CUSTOMER_RE = /^[A-Za-z0-9_.@-]{1,128}$/;
@@ -90,19 +90,14 @@ export async function getMerchant(q, id) {
 }
 
 // ---------- 客户 ----------
-/** 取得客户；不存在时创建，并在同一个事务里推导一个新地址（序号加 1） */
+/** 取得客户；不存在时创建（不生成地址） */
 export async function ensureCustomer(t, merchantId, customerId, { name = '', emailEnc = '', emailHash = '' } = {}) {
   if (!CUSTOMER_RE.test(customerId || '')) throw new PayError('invalid_param', 422, 'customer_id');
   const [found] = await t.query('select * from customers where merchant_id = $1 and customer_id = $2', [merchantId, customerId]);
   if (found) return found;
-  const xpub = await getMeta(t, 'xpub');
-  if (!xpub) throw new PayError('wallet_not_initialized', 503);
-  const [n] = await t.query(`insert into pay_meta (key, value) values ('next_index', '1'::jsonb)
-    on conflict (key) do update set value = to_jsonb((pay_meta.value)::text::int + 1), updated_at = now() returning value`);
-  const index = Number(n.value) - 1;
-  const address = deriveAddress(xpub, index);
-  const [c] = await t.query(`insert into customers (merchant_id, customer_id, name, email_enc, email_hash, address, hd_index) values ($1, $2, $3, $4, $5, $6, $7)
-    on conflict (merchant_id, customer_id) do nothing returning *`, [merchantId, customerId, String(name).slice(0, 200), emailEnc, emailHash, address, index]);
+  // K1：建客户不生成任何地址（不再派生 TRON 地址，不需要 TRON 主助记词）；地址在客户发起充值时按链生成（server/wallet/addresses.js）
+  const [c] = await t.query(`insert into customers (merchant_id, customer_id, name, email_enc, email_hash) values ($1, $2, $3, $4, $5)
+    on conflict (merchant_id, customer_id) do nothing returning *`, [merchantId, customerId, String(name).slice(0, 200), emailEnc, emailHash]);
   if (c) return c;
   // 并发时另一个请求先建好了：用那一条（这次推导的序号作废，不影响任何人的资金）
   const [again] = await t.query('select * from customers where merchant_id = $1 and customer_id = $2', [merchantId, customerId]);

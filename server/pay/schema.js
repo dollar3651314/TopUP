@@ -225,6 +225,9 @@ alter table customers add column if not exists seq bigint;
 update customers set seq = nextval('customer_seq') where seq is null;
 alter table customers alter column seq set default nextval('customer_seq');
 create unique index if not exists customers_seq on customers (seq);
+-- K1：地址在客户发起充值时按链生成，新客户不再派生 TRON 地址：address、hd_index 允许为空（唯一约束照旧，空值不冲突）
+alter table customers alter column address drop not null;
+alter table customers alter column hd_index drop not null;
 
 -- 每个客户每条链的收款地址。创建时记下提供方、合约参数版本和盐；更换地址时旧地址停用（一直扫链、照常入账、由原提供方归集）
 create table if not exists customer_addresses (

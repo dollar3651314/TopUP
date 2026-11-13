@@ -46,7 +46,8 @@ const initial = st ? { ...st } : null;
 // 多链：付款人选的网络（按订单记在本页的会话里，刷新不丢；付款前可以改选）
 const pickKey = `topup-pay-net:${id}`;
 let picked: string | null = (() => { try { return sessionStorage.getItem(pickKey); } catch { return null; } })();
-const setPick = (v: string | null) => { picked = v; try { if (v) sessionStorage.setItem(pickKey, v); else sessionStorage.removeItem(pickKey); } catch { /* 存不了也能用 */ } paint(); };
+// K1：选了网络才向服务器要这条链的地址（服务器这时才生成），所以选完立刻查一次
+const setPick = (v: string | null) => { picked = v; try { if (v) sessionStorage.setItem(pickKey, v); else sessionStorage.removeItem(pickKey); } catch { /* 存不了也能用 */ } paint(); if (v && !PROTO) fetchOnce(); };
 const netName = (ch: string) => (cn.names as Record<string, string>)[ch] || ch;
 const netStd = (ch: string) => (cn.std as Record<string, string>)[ch] || '';
 /** 当前用的网络：只有一个可选（或商户指定了链）时直接用它；多个时要付款人先选 */
@@ -85,7 +86,7 @@ function paint() {
   if (!st) { $('[data-pay-notfound]').hidden = unavailable; $('[data-pay-card]').hidden = true; return; }
   const net = currentNet(st);
   const multi = (st.nets?.length || 0) > 1;
-  if (net) st.address = net.address;
+  if (net) st.address = net.address; // 正式模式下刚选完、地址还在路上时是空的
   $('[data-pay-network]').textContent = net ? tpl(c.networkOf, { net: netName(net.chain), std: netStd(net.chain) }) : st.nets ? c.stepChoose : c.network;
   $('[data-pay-network]').hidden = !net && !!st.nets;
   $('[data-pay-warn]').textContent = net ? tpl(c.warnOf, { net: netName(net.chain), std: netStd(net.chain) }) : c.warn;
@@ -178,20 +179,31 @@ root.querySelectorAll<HTMLButtonElement>('[data-sim]').forEach((b) => b.addEvent
 }));
 
 // ---------- 正式模式：查询订单状态 ----------
+// K1：不带 chain 时只拿订单和能选的链（chains）；付款人选了网络后带上 chain，服务器为这条链生成（或复用）地址
+async function fetchOnce() {
+  if (PROTO || !id) return;
+  try {
+    const fixedChain = st?.fixed ? st.nets?.[0]?.chain : null;
+    const want = fixedChain || picked;
+    const r = await fetch(`/api/pay/?o=${encodeURIComponent(id)}${want && !fixedChain ? `&chain=${encodeURIComponent(want)}` : ''}`);
+    unavailable = !r.ok && r.status !== 404 && r.status !== 409 && r.status !== 422;
+    if (r.ok) {
+      const d = await r.json();
+      const chains: string[] = Array.isArray(d.chains) ? d.chains : (d.addresses || []).map((a: Net) => a.chain);
+      const addrs: Net[] = Array.isArray(d.addresses) ? d.addresses : [];
+      const nets = chains.map((ch) => ({ chain: ch, network: (addrs.find((a) => a.chain === ch) || {}).network || ch.toUpperCase(), address: (addrs.find((a) => a.chain === ch) || {}).address || '' }));
+      st = { id: d.order_no, merchant: d.merchant, amount: parseUsdt(d.amount) || 0, received: parseUsdt(d.matched) ?? 0, address: d.address || '', expiresAt: Date.parse(d.expires_at), status: d.status, confirmations: 0, low: d.low, high: d.high,
+        nets: nets.length ? nets : undefined, fixed: !!d.chain };
+      if (picked && !chains.includes(picked)) { picked = null; try { sessionStorage.removeItem(pickKey); } catch { /* 忽略 */ } }
+    } else if (r.status === 404) st = null;
+    else if ((r.status === 409 || r.status === 422) && picked) { picked = null; try { sessionStorage.removeItem(pickKey); } catch { /* 忽略 */ } return fetchOnce(); }
+  } catch { unavailable = true; /* 网络暂时不通：保持当前显示，并提示暂时查不到 */ }
+  paint();
+}
 async function poll() {
   if (PROTO || !id) return;
   if (document.visibilityState === 'visible') {
-    try {
-      const r = await fetch(`/api/pay/?o=${encodeURIComponent(id)}`);
-      unavailable = !r.ok && r.status !== 404;
-      if (r.ok) {
-        const d = await r.json();
-        st = { id: d.order_no, merchant: d.merchant, amount: parseUsdt(d.amount) || 0, received: parseUsdt(d.matched) ?? 0, address: d.address || '', expiresAt: Date.parse(d.expires_at), status: d.status, confirmations: 0, low: d.low, high: d.high,
-          nets: Array.isArray(d.addresses) ? d.addresses : undefined, fixed: !!d.chain };
-      }
-      else if (r.status === 404) st = null;
-    } catch { unavailable = true; /* 网络暂时不通：保持当前显示，并提示暂时查不到 */ }
-    paint();
+    await fetchOnce();
     if (st && !open(st)) return;
   }
   setTimeout(poll, 5000);

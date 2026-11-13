@@ -41,9 +41,9 @@ function addressCards(list: ChainAddr[] | undefined) {
     const a = addrOf(list, ch);
     if (!a && ch !== 'tron' && !enabledChains.includes(ch)) return null;
     return h('div', { class: 'addr-card', 'data-chain': ch }, chainTag(ch),
-      a ? mono(a) : laterTag(),
+      a ? mono(a) : ch === 'tron' ? laterTag() : h('span', { class: 'muted', 'data-not-yet': '' }, '—'),
       a ? copyBtn(() => { say(tpl(c.chain.copiedNote, { net: netName(ch), std: netStd(ch) })); return a; }, tpl(c.chain.copy, { net: netName(ch) }), c.common.copied) : null,
-      h('span', { class: 'hint muted' }, a ? tpl(c.chain.only, { net: netName(ch), std: netStd(ch) }) : c.chain.laterNote));
+      h('span', { class: 'hint muted' }, a ? tpl(c.chain.only, { net: netName(ch), std: netStd(ch) }) : ch === 'tron' ? c.chain.laterNote : c.chain.notYet));
   }));
   return same ? h('div', { class: 'stack-sm' }, same, grid) : grid;
 }
@@ -230,7 +230,7 @@ async function customerDetail(id: string) {
     x.addresses?.length
       ? h('div', { class: 'stack-sm' }, h('dl', { class: 'kv' }, h('dt', {}, c.customers.cols.id), h('dd', {}, mono(x.customer_id))), h('h3', { class: 'h-sm m0' }, cd.addresses), addressCards(x.addresses))
       : h('dl', { class: 'kv' }, h('dt', {}, c.customers.cols.id), h('dd', {}, mono(x.customer_id)),
-        h('dt', {}, cd.address), h('dd', {}, x.address ? h('span', { class: 'copy-row' }, mono(x.address), copyBtn(() => x.address || '', c.common.copy, c.common.copied, 'link-copy')) : '—')),
+        h('dt', {}, cd.address), h('dd', {}, x.address ? h('span', { class: 'copy-row' }, mono(x.address), copyBtn(() => x.address || '', c.common.copy, c.common.copied, 'link-copy')) : h('span', { class: 'muted', 'data-on-demand': '' }, cd.onDemand))),
     h('div', { class: 'fgrid fgrid-3' }, field('mcd-name', c.customers.create.name, name), field('mcd-email', c.customers.create.email, email), field('mcd-remark', c.customers.create.remark, remark)),
     h('div', { class: 'row-actions' }, h('label', { class: 'inline-label' }, cd.range, rangeSel),
       exp ? h('a', { class: 'btn btn-outline btn-sm', href: exp, download: '' }, cd.statement) : h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => say(cd.exported) }, cd.statement)),
@@ -288,12 +288,10 @@ async function orderDetail(id: string) {
         h('dt', {}, c.orders.cols.matched), h('dd', {}, tpl(cd.sum, { sum: usd(o.matched), amount: usd(o.amount), pct: pctNow })),
         h('dt', {}, c.orders.cols.status), h('dd', {}, orderBadge(o.status)),
         h('dt', {}, c.orders.cols.expires), h('dd', {}, t(o.expires_at)),
-        h('dt', {}, cd.network), h('dd', {}, o.chain ? chainTag(o.chain) : o.addresses?.length ? tpl(cd.anyChain, { list: o.addresses.map((a) => netName(a.chain)).join(' / ') }) : (o.network || 'TRON')),
-        h('dt', {}, cd.address), h('dd', {}, o.chain || !o.addresses?.length ? mono(o.address || '—') : h('div', { class: 'stack-sm' },
-          // 没指定链：每条链的地址；客户已有的 TRON 地址（旧字段 address）放最后
-          ...o.addresses.filter((a) => a.chain !== 'tron').map((a) => h('span', {}, chainTag(a.chain), ' ', mono(a.address))),
-          ...(o.address ? [h('span', {}, chainTag('tron'), ' ', mono(o.address))] : [])))),
-      h('p', { class: 'hint muted m0' }, tpl(cd.addressNote, { c: o.customer_id })),
+        // K1：没指定链的订单不给地址，付款人在付款页选了网络才给这条链的地址
+        h('dt', {}, cd.network), h('dd', {}, o.chain ? chainTag(o.chain) : enabledChains.length ? tpl(cd.anyChain, { list: enabledChains.map((ch) => netName(ch)).join(' / ') }) : (o.network || '—')),
+        h('dt', {}, cd.address), h('dd', {}, o.address ? mono(o.address) : h('span', { class: 'muted', 'data-payer-picks': '' }, cd.payerPicks))),
+      o.address ? h('p', { class: 'hint muted m0' }, tpl(cd.addressNote, { c: o.customer_id })) : null,
       h('div', { class: 'f' }, h('span', { class: 'lbl' }, cd.payLink), h('div', { class: 'copy-row' }, mono(o.pay_url), copyBtn(() => o.pay_url, cd.copyLink, c.common.copied)), h('a', { class: 'link-copy', href: url, target: '_blank', rel: 'noopener', 'data-open-pay': '' }, cd.open + ' ↗')),
       h('h3', { class: 'h-sm m0' }, cd.matchedTitle),
       table([dc.time, dc.amount, cd.how, ''], o.deposits.map((d) => [t(d.time), usd(d.amount), (cd.types as Record<string, string>)[d.matched_by] || d.matched_by, act(d, false)]), cd.none),
