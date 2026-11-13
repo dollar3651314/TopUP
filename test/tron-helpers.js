@@ -127,7 +127,9 @@ export function fakeTronNode(state = {}) {
   function constant(body) {
     const sel = String(body.function_selector || '');
     const contract = h20(body.contract_address);
-    if (s.constantError) return { result: { result: false, code: 'CONTRACT_VALIDATE_ERROR', message: Buffer.from(s.constantError).toString('hex') } };
+    // 只读调用出错：constantError = 错误码（所有合约都报）；notContract = [地址…]（这些地址"不是合约"，节点报 CONTRACT_VALIDATE_ERROR）
+    if (s.constantError) return { result: { result: false, code: s.constantError, message: Buffer.from(`${s.constantError}: node error`).toString('hex') } };
+    if ((s.notContract || []).some((a) => h20(a) === contract)) return { result: { result: false, code: 'CONTRACT_VALIDATE_ERROR', message: Buffer.from('Contract validate error : No contract or not a valid smart contract').toString('hex') } };
     const ok = (w, energy = 500) => ({ result: { result: true }, constant_result: [w], energy_used: energy });
     if (sel === 'balanceOf(address)') return ok(word(bal(T(contract), String(body.parameter).slice(-40)).toString(16)));
     const on = s.onchain || (s.scheme ? { parent: s.scheme.parent, factory: s.scheme.factory, implementation: s.scheme.implementation } : {});

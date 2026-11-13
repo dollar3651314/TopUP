@@ -1,8 +1,8 @@
 // 测试先写（第 2 批）：TRON 链上合约参数核对（和第 1 批 ETH / BSC 同一个规则，K2）。
 //   - 启动时和看系统状态时，用只读调用（/wallet/triggerconstantcontract）核对：批量合约.parent() = parent、批量合约.factory() = factory、
 //     工厂.implementationAddress() = implementation（config/wallets.json 的 tron 一节）
-//   - 只有拿到结果、且结果是空的或地址对不上，才判不一致（mismatch）→ 停用 TRON（不分配地址、不凑批、不扫块），发告警邮件一次；
-//     节点连不上、超时、限流（429）、5xx、节点报错（result.result = false）都只算"还没核对上"（unverified），下一轮再核对，不停用
+//   - 只有拿到结果、且结果是空的或地址对不上，才判不一致（mismatch）；节点报"不是合约"（CONTRACT_VALIDATE_ERROR）等同空结果，也判不一致→ 停用 TRON（不分配地址、不凑批、不扫块），发告警邮件一次；
+//     节点连不上、超时、限流（429）、5xx、其他节点报错（result.result = false 且不是 CONTRACT_VALIDATE_ERROR）都只算"还没核对上"（unverified），下一轮再核对，不停用
 //   - 配置：环境变量 SWEEP_OPERATOR_KEY_TRON（TRON 归集发起账户，只在服务器 .env）、TRON_NODE_URL（可选，默认按 TRON_NETWORK 用 TronGrid）、
 //     TRON_CONFIRMATIONS（默认 19）；config/wallets.json 的 production、staging 各有 tron 一节（空着的不开通，填写走 PR，由管理员合并）
 // 要实现的模块：server/wallet/verify-onchain.js（verifyChain 认得 TRON 适配器）、server/wallet/index.js、server/config.js、config/wallets.json、.env.example
@@ -37,12 +37,26 @@ test('TRON 链上核对：一致 ok；parent / factory / implementation 哪一�
   assert.deepEqual(r.fields, ['parent']);
 });
 
-test('TRON 链上核对：节点连不上、429 限流、500、节点报错（result.result = false）、超时 → unverified，不判不一致', async () => {
+test('TRON 链上核对：节点连不上、429 限流、500、其他节点报错（result.result = false，不是 CONTRACT_VALIDATE_ERROR）→ unverified，不判不一致', async () => {
   const { verifyChain } = await import('../server/wallet/verify-onchain.js');
-  for (const bad of [{ down: true }, { httpStatus: 429 }, { httpStatus: 500 }, { constantError: 'SERVER_BUSY' }]) {
+  for (const bad of [{ down: true }, { httpStatus: 429 }, { httpStatus: 500 }, { constantError: 'SERVER_BUSY' }, { constantError: 'OTHER_ERROR' }]) {
     const t = await adapterFor(bad);
     assert.equal((await verifyChain(t.adapter, t.scheme)).result, 'unverified', JSON.stringify(bad));
   }
+});
+
+test('TRON 链上核对：节点报"不是合约"（CONTRACT_VALIDATE_ERROR）等同空结果 → 不一致（mismatch）：批量合约不是合约 → parent、factory；工厂不是合约 → implementation', async () => {
+  const { verifyChain } = await import('../server/wallet/verify-onchain.js');
+  const b = await adapterFor();
+  b.node.state.notContract = [b.scheme.batcher];
+  const rb = await verifyChain(b.adapter, b.scheme);
+  assert.equal(rb.result, 'mismatch');
+  assert.deepEqual([...rb.fields].sort(), ['factory', 'parent']);
+  const f = await adapterFor();
+  f.node.state.notContract = [f.scheme.factory];
+  const rf = await verifyChain(f.adapter, f.scheme);
+  assert.equal(rf.result, 'mismatch');
+  assert.deepEqual(rf.fields, ['implementation']);
 });
 
 /** 真的钱包层（和服务器启动时同一条路径），TRON 节点是本机起的替身 HTTP 服务 */

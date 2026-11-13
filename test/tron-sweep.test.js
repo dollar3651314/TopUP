@@ -13,6 +13,7 @@
 //   租能量（Q9 A）：
 //   - 一批只给发起账户租一次（不按地址各租一单）；租到 → 照常发；租不到（平台出错、超时、余额不够）→ 回退烧 TRX，
 //     fee_limit 按"预估能量 × 能量单价"给够；发起账户 TRX 连烧都不够 → 不发（退回待确认），告诉管理员
+//   - 租不到、回退烧 TRX 时发告警邮件（同类一天最多一封）；租到了不发
 //   - 租能量平台预存余额建议 ≤ 1,000 TRX（K5 泄露的最大损失）：超过就告警（故障一次、恢复一次）；查不到余额不告警、不报错
 // 要实现的模块：server/wallet/providers/contract.js（TRON 的 executeSweep、sweepOutcome、estimateFee）、server/wallet/sweep.js（TRON 进 SWEEP_CHAINS、每批 20 个）、
 //   server/wallet/energy.js（checkRentalBalance、RENTAL_PREPAID_MAX_TRX）
@@ -323,6 +324,43 @@ test('租不到能量（平台出错、超时、余额不够）→ 回退烧 TRX
     assert.ok(BigInt(t.node.state.broadcasts[0].feeLimit) >= BigInt(est.native), `fee_limit ${t.node.state.broadcasts[0].feeLimit} 要够烧 ${est.native}`);
     await t.db.end?.();
   }
+});
+
+test('租不到能量回退烧 TRX：发告警邮件（写明 TRON、能量、原因），同类一天最多一封；过了 24 小时再租不到再发一封；租到了不发', async () => {
+  const { proposeSweep, approveSweep } = await sweepMod();
+  const T0 = Date.parse('2026-12-01T04:00:00Z');
+  const H = 3_600_000;
+  const mails = [];
+  const notify = async (s, x) => mails.push([s, x]);
+  const renter = renterStub({ fail: 'tronsave_unavailable' });
+  const t = await setupT({ customers: 3, renter });
+  const one = async (i, now) => {
+    await fund(t, [i === 0 ? 150 : null, i === 1 ? 150 : null, i === 2 ? 150 : null]);
+    const bs = await proposeSweep(t.db, { chain: 'tron', providers: t.providers, limits: LIM, now });
+    const b = bs.find((x) => x.items.some((it) => it.address === t.addrs[i]));
+    const r = await approveSweep(t.db, { id: b.id, actor: 'admin', reason: '例行归集', providers: t.providers, notify, now });
+    assert.equal(r.status, 'sent', '租不到也照常发');
+    await t.db.query(`update wallet_sweep_batches set status = 'confirmed' where id = $1`, [b.id]); // 让下一次凑批不被这一批挡住
+  };
+  await one(0, T0);
+  const energyMails = () => mails.filter(([s, x]) => /能量/.test(s + x));
+  assert.equal(energyMails().length, 1, `第一次租不到发一封：${mails.map((m) => m[0])}`);
+  assert.match(energyMails()[0][0] + energyMails()[0][1], /TRON/);
+  assert.match(energyMails()[0][1], /烧|TRX/);
+  assert.match(energyMails()[0][1], /tronsave_unavailable/, '写明租不到的原因');
+  await one(1, T0 + 2 * H);
+  assert.equal(energyMails().length, 1, '同一天第二次租不到不再发');
+  await one(2, T0 + 25 * H);
+  assert.equal(energyMails().length, 2, '过了 24 小时再发一封');
+  await t.db.end?.();
+  // 租到了：不发
+  const ok = await setupT({ customers: 1, renter: renterStub() });
+  await fund(ok, [150]);
+  const okMails = [];
+  const [b] = await proposeSweep(ok.db, { chain: 'tron', providers: ok.providers, limits: LIM, now: T0 });
+  await approveSweep(ok.db, { id: b.id, actor: 'admin', reason: '例行归集', providers: ok.providers, notify: async (s, x) => okMails.push(s + x), now: T0 });
+  assert.equal(okMails.filter((m) => /能量/.test(m)).length, 0);
+  await ok.db.end?.();
 });
 
 test('没配租能量平台：直接烧 TRX；发起账户 TRX 连烧都不够 → 不发（签名前就停，批次退回待确认、错误写明 TRX 不够）', async () => {
