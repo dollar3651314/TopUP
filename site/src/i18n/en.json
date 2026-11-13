@@ -1,0 +1,30 @@
+{
+  "brand": {
+    "name": "TopUP"
+  },
+  "nav": {
+    "home": "Home",
+    "merchantLogin": "Merchant login",
+    "docs": "Developer docs",
+    "switchLabel": "中文",
+    "switchAria": "切换到中文"
+  },
+  "footer": {
+    "notMainland": "TopUP services are not offered to residents or entities in Mainland China."
+  },
+  "pages": {
+    "home": {
+      "title": "TopUP",
+      "description": "TopUP: stablecoin collections and payouts for merchants.",
+      "heading": "TopUP",
+      "body": "Stablecoin collections and payouts for merchants. Sign in to your merchant console, or read the developer docs to integrate the API."
+    },
+    "notFound": {
+      "title": "Page not found - TopUP",
+      "description": "The page you are looking for does not exist.",
+      "heading": "Page not found",
+      "body": "The page you are looking for may have moved.",
+      "back": "Back to home"
+    }
+  }
+}

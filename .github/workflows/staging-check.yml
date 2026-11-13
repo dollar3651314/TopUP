@@ -1,0 +1,24 @@
+# 测试环境（staging）的自动检查：staging 分支每次更新后，等测试服务器部署这个提交，再执行 e2e/smoke-staging.sh。
+# 测试环境的地址放在仓库的 Actions Secrets（STAGING_URL），不写在仓库里、日志里自动遮盖；没有配置时跳过。
+name: staging-check
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: staging-check
+  cancel-in-progress: true
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STAGING_URL: ${{ secrets.STAGING_URL }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: 测试环境检查
+        run: |
+          if [ -z "$STAGING_URL" ]; then echo "::warning::仓库密钥 STAGING_URL 还没有配置，跳过"; exit 0; fi
+          bash e2e/smoke-staging.sh "$STAGING_URL" "${GITHUB_SHA::7}"

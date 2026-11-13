@@ -1,0 +1,76 @@
+---
+// 商户后台（中英双语）。页面结构在这里，数据和交互在 scripts/merchant.ts。
+import AppLayout from '../../layouts/AppLayout.astro';
+import copy from '../../i18n/merchant.json';
+import { langStaticPaths, type Lang } from '../../lib/i18n';
+import { IS_PROTOTYPE } from '../../lib/env';
+export const getStaticPaths = langStaticPaths;
+const { lang } = Astro.props as { lang: Lang };
+const c = copy[lang];
+const other: Lang = lang === 'en' ? 'zh' : 'en';
+const base = (l: Lang) => (l === 'en' ? '/' : '/zh/');
+const tabs = ['overview', 'customers', 'orders', 'transactions', 'withdraw', 'api', 'callbacks'] as const;
+---
+<AppLayout lang={lang} title={c.meta.title} badge={c.header.badge} switchHref={`${base(other)}merchant/`} switchLabel={c.header.switch} switchAria={c.header.switchAria}>
+  <div id="m-root" data-prototype={IS_PROTOTYPE ? '1' : undefined} data-lang={lang} data-base={base(lang)}>
+    <!-- 首次设置密码（开户通过后，邮件里的链接 ?setup=令牌） -->
+    <section class="container" data-view="setup" hidden>
+      <form class="card login-card form-card" data-setup novalidate>
+        <h2>{c.setup.title}</h2>
+        <p class="m0 muted">{c.setup.body}</p>
+        <div class="stack" data-setup-step="1">
+          <div class="f"><label for="ms-pw">{c.setup.password}</label><input id="ms-pw" type="password" autocomplete="new-password" minlength="12" required /></div>
+          <div class="f"><label for="ms-pw2">{c.setup.password2}</label><input id="ms-pw2" type="password" autocomplete="new-password" minlength="12" required /></div>
+        </div>
+        <div class="stack" data-setup-step="2" hidden>
+          <p class="m0">{c.setup.qr}</p>
+          <img data-setup-qr alt="QR" width="200" height="200" class="sig-img" />
+          <p class="hint muted m0"><code data-setup-secret></code></p>
+          <div class="f"><label for="ms-otp">{c.setup.code}</label><input id="ms-otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required /></div>
+        </div>
+        <p class="alert" data-setup-err hidden></p>
+        <button class="btn btn-primary" type="submit">{c.setup.submit}</button>
+      </form>
+    </section>
+
+    <section class="container" data-view="login" hidden>
+      <form class="card login-card form-card" data-login novalidate>
+        <h2>{c.login.title}</h2>
+        <div class="f"><label for="ml-em">{c.login.email}</label><input id="ml-em" type="email" autocomplete="username" required /></div>
+        <div class="f"><label for="ml-pw">{c.login.password}</label><input id="ml-pw" type="password" autocomplete="current-password" required /></div>
+        <div class="f"><label for="ml-otp">{c.login.code}</label><input id="ml-otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required /></div>
+        <p class="alert" data-login-err hidden></p>
+        <button class="btn btn-primary" type="submit">{c.login.submit}</button>
+        <p class="hint muted m0">{c.login.hint}<br />{c.login.firstTime}</p>
+      </form>
+    </section>
+
+    <div class="admin-shell" data-view="app" hidden>
+      <nav class="admin-nav" aria-label={c.header.badge}>
+        {tabs.map((t) => <button type="button" data-mtab={t}>{c.nav[t]} {t === 'withdraw' && <span class="badge" data-mcount="withdraw"></span>}</button>)}
+        <a class="nav-link" href={`${base(lang)}docs/`}>{c.nav.docs} ↗</a>
+        <button type="button" data-mlogout>{c.nav.logout}</button>
+      </nav>
+      <div class="admin-content">
+        <p class="m0 merchant-name" data-merchant-name></p>
+        {tabs.map((t) => <section data-mpanel={t} hidden></section>)}
+      </div>
+    </div>
+
+    <dialog class="card" data-mdialog>
+      <form method="dialog" class="form-card" data-mdialog-form novalidate>
+        <h2 data-mdialog-title></h2>
+        <div data-mdialog-body class="stack"></div>
+        <div class="step-actions">
+          <button class="btn btn-outline" value="cancel" type="submit" formnovalidate>{c.common.cancel}</button>
+          <span class="spacer"></span>
+          <button class="btn btn-primary" value="ok" type="submit" data-mdialog-ok>{c.common.confirm}</button>
+        </div>
+      </form>
+    </dialog>
+    <div class="notice" data-mtoast role="status" hidden></div>
+  </div>
+</AppLayout>
+<script>
+  import '../../scripts/merchant.ts';
+</script>

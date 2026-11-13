@@ -1,0 +1,17 @@
+---
+import type { Lang } from '../lib/i18n';
+interface Props { lang: Lang }
+const { lang } = Astro.props;
+const text = lang === 'en'
+  ? 'High-fidelity prototype for review only. Form submissions are simulated and no data is sent.'
+  : '高保真原型，仅供评审。表单提交为模拟结果，不会发送任何数据。';
+---
+<div class="proto-banner" role="note" data-prototype-banner>
+  <strong>PROTOTYPE</strong> · {text}
+</div>
+<style>
+  .proto-banner {
+    background: repeating-linear-gradient(45deg, #f5b83d, #f5b83d 12px, #f7c65c 12px, #f7c65c 24px);
+    color: #0b1f3a; text-align: center; font-size: 0.875rem; padding: 6px 16px; font-weight: 500;
+  }
+</style>

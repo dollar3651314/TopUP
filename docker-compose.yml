@@ -1,0 +1,57 @@
+# 本地开发和测试服务器用：Postgres 16、Redis 7、web、worker。
+# 数据库口令不给默认值：先 export POSTGRES_PASSWORD=<自己定的口令>（不要提交到仓库）。
+# 只起数据库和 Redis（本地跑 npm test / 端到端测试用）：docker compose up -d postgres redis
+# 整套：cp .env.example .env，填好后 docker compose --profile app up -d --build
+# 生产部署（Nginx、HTTPS、备份、回滚）在部署方案里另写，不直接用这个文件。
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: topup
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?需要设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: topup
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U topup"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  web:
+    build: { context: ., args: { APP_ENV: "${APP_ENV:-staging}" } }
+    profiles: [app]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://topup:${POSTGRES_PASSWORD:?需要设置 POSTGRES_PASSWORD}@postgres:5432/topup
+      REDIS_URL: redis://redis:6379/0
+      BLOB_DIR: /data/blobs
+    ports: ["127.0.0.1:8080:8080"]
+    volumes: [blobs:/data/blobs]
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+    restart: unless-stopped
+  worker:
+    build: { context: ., args: { APP_ENV: "${APP_ENV:-staging}" } }
+    profiles: [app]
+    command: ["node", "server/worker.js"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://topup:${POSTGRES_PASSWORD:?需要设置 POSTGRES_PASSWORD}@postgres:5432/topup
+      REDIS_URL: redis://redis:6379/0
+      BLOB_DIR: /data/blobs
+    volumes: [blobs:/data/blobs]
+    depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
+    restart: unless-stopped
+volumes:
+  pgdata:
+  redisdata:
+  blobs:

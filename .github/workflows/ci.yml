@@ -1,0 +1,134 @@
+# 每个 PR 的自动检查：不通过的 PR 不能合并到 staging（测试环境）和 main（生产）。
+# 不需要任何密钥：数据库和 Redis 用 GitHub 提供的容器，链上用 TronGrid 替身，邮件用本地模拟 SMTP。
+# 分支保护只把汇总 job "ci-ok" 设为"必须通过"。
+# 系统固定 ubuntu-24.04：ubuntu-latest 已是 26.04，锁定的 Playwright 1.56 不支持在 26.04 上安装浏览器；
+# 固定系统版本不改测试依赖，比升级 Playwright 稳（升级要连带复核全部端到端用例）。
+name: ci
+on:
+  pull_request:
+    branches: [staging, main]
+  push:
+    branches: [staging, main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  # 单元测试：内嵌 Postgres 跑一遍，真实 Postgres 16 + Redis 7 再跑一遍；项目索引检查
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: 项目索引检查
+        run: node scripts/check-project-index.mjs
+      - name: 单元测试（内嵌 Postgres）
+        run: npm test
+      - name: 单元测试（真实 Postgres 16 + Redis 7，和服务器同一个驱动）
+        env:
+          TEST_DATABASE_URL: postgres://postgres:ci@127.0.0.1:5432/postgres
+          TEST_REDIS_URL: redis://127.0.0.1:6379/0
+        run: npm test
+
+  # 端到端测试：构建页面，在本地整套环境（和服务器同一份代码）上跑全部用例；收付款和 worker 用真实 Postgres
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            site/package-lock.json
+            e2e/package-lock.json
+      - run: npm ci
+      - name: 构建页面（先检查中英文案结构）
+        run: cd site && npm ci && npm run build
+      - name: 浏览器缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package-lock.json') }}
+      # Playwright 1.56 在 Node 26 下解压浏览器会卡住（本地复现：Node 22 正常、Node 26 卡住），浏览器用 Node 22 安装，测试仍在 Node 26 上跑
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: 安装测试浏览器（Node 22）
+        timeout-minutes: 15
+        run: cd e2e && npm ci && npx playwright install --with-deps chromium
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+      - name: 端到端测试
+        env:
+          E2E_DATABASE_URL: postgres://postgres:ci@127.0.0.1:5432/postgres
+        run: cd e2e && npx playwright test
+      - name: 失败时保存截图和日志
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-results
+          path: |
+            e2e/test-results/
+            e2e/.tmp/*.log
+          retention-days: 7
+
+  # 智能合约：现在是占位（contracts/ 里还没有合约）；加入 foundry.toml 后自动执行 forge test
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: 检查有没有合约
+        id: has
+        run: |
+          if [ -f contracts/foundry.toml ]; then echo "yes=1" >> "$GITHUB_OUTPUT"; else echo "::notice::contracts/ 里还没有合约，跳过"; fi
+      - uses: foundry-rs/foundry-toolchain@v1
+        if: steps.has.outputs.yes == '1'
+      - name: forge test
+        if: steps.has.outputs.yes == '1'
+        run: cd contracts && forge test -vvv
+
+  # 汇总：任何一个检查失败或被取消就失败；合约 job 在没有合约时自己跳过步骤，结果是成功
+  ci-ok:
+    needs: [unit, e2e, contracts]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: 汇总结果
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "有检查失败或被取消"; exit 1
+          fi

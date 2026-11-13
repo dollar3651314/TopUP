@@ -1,0 +1,60 @@
+---
+// 付款页面：/pay/<订单号>/（server/http-rules.json 把它改写到本页面）。付款方不需要登录，中英双语。
+import AppLayout from '../../layouts/AppLayout.astro';
+import copy from '../../i18n/merchant.json';
+import { langStaticPaths, type Lang } from '../../lib/i18n';
+import { IS_PROTOTYPE } from '../../lib/env';
+export const getStaticPaths = langStaticPaths;
+const { lang } = Astro.props as { lang: Lang };
+const c = copy[lang].pay;
+const other: Lang = lang === 'en' ? 'zh' : 'en';
+const base = (l: Lang) => (l === 'en' ? '/' : '/zh/');
+---
+<AppLayout lang={lang} title={copy[lang].meta.payTitle} badge={c.powered} switchHref={`${base(other)}pay/`} switchLabel={copy[lang].header.switch} switchAria={copy[lang].header.switchAria}>
+  <div class="container pay-wrap" id="pay-root" data-prototype={IS_PROTOTYPE ? '1' : undefined} data-lang={lang} data-base={base(lang)}>
+    <p class="alert" data-pay-notfound hidden>{c.notFound}</p>
+    <div class="card pay-card" data-pay-card hidden>
+      <p class="muted m0" data-pay-merchant></p>
+      <div class="pay-amount"><span data-pay-amount></span> <small>USDT</small></div>
+      <span class="pill">{c.network}</span>
+
+      <div data-pay-live>
+        <img class="pay-qr" data-pay-qr alt="QR" width="200" height="200" />
+        <div class="pay-addr mono" data-pay-address></div>
+        <div class="pay-copy">
+          <button type="button" class="btn btn-outline" data-copy="address">{c.copyAddr}</button>
+          <button type="button" class="btn btn-outline" data-copy="amount">{c.copyAmt}</button>
+        </div>
+        <p class="warn-box">{c.warn}</p>
+        <p class="m0 pay-timer">{c.remaining} <b data-pay-timer>--:--</b></p>
+      </div>
+
+      <div class="pay-result" data-pay-result hidden>
+        <div class="pay-icon" data-pay-icon aria-hidden="true"></div>
+        <h1 class="h-sm" data-pay-result-title></h1>
+        <p class="m0" data-pay-result-body></p>
+      </div>
+
+      <p class="pay-confirming" data-pay-confirming role="status" hidden></p>
+      <ol class="pay-steps" aria-label="Status">
+        <li data-pay-step="waiting">{c.steps.waiting}</li>
+        <li data-pay-step="confirming">{c.steps.confirming}</li>
+        <li data-pay-step="completed">{c.steps.completed}</li>
+      </ol>
+      <p class="hint muted m0">{c.orderNo} <span class="mono" data-pay-order></span></p>
+    </div>
+
+    {IS_PROTOTYPE && (
+      <div class="proto-controls" data-pay-proto>
+        <span>{c.proto}</span>
+        <button type="button" class="btn btn-outline btn-sm" data-sim="pay">{c.protoPay}</button>
+        <button type="button" class="btn btn-outline btn-sm" data-sim="partial">{c.protoPartial}</button>
+        <button type="button" class="btn btn-outline btn-sm" data-sim="expire">{c.protoExpire}</button>
+        <button type="button" class="btn btn-outline btn-sm" data-sim="reset">{c.protoReset}</button>
+      </div>
+    )}
+  </div>
+</AppLayout>
+<script>
+  import '../../scripts/pay.ts';
+</script>
