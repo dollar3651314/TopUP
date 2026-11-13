@@ -1,5 +1,8 @@
 # 每个 PR 的自动检查：不通过的 PR 不能合并到 staging（测试环境）和 main（生产）。
 # 不需要任何密钥：数据库和 Redis 用 GitHub 提供的容器，链上用 TronGrid 替身，邮件用本地模拟 SMTP。
+# 分支保护只把汇总 job "ci-ok" 设为"必须通过"。
+# 系统固定 ubuntu-24.04：ubuntu-latest 已是 26.04，锁定的 Playwright 1.56 不支持在 26.04 上安装浏览器；
+# 固定系统版本不改测试依赖，比升级 Playwright 稳（升级要连带复核全部端到端用例）。
 name: ci
 on:
   pull_request:
@@ -15,7 +18,7 @@ concurrency:
 jobs:
   # 单元测试：内嵌 Postgres 跑一遍，真实 Postgres 16 + Redis 7 再跑一遍；项目索引检查
   unit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
       postgres:
@@ -47,7 +50,7 @@ jobs:
 
   # 端到端测试：构建页面，在本地整套环境（和服务器同一份代码）上跑全部用例；收付款和 worker 用真实 Postgres
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       postgres:
@@ -87,7 +90,7 @@ jobs:
 
   # 智能合约：现在是占位（contracts/ 里还没有合约）；加入 foundry.toml 后自动执行 forge test
   contracts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -102,3 +105,17 @@ jobs:
       - name: forge test
         if: steps.has.outputs.yes == '1'
         run: cd contracts && forge test -vvv
+
+  # 汇总：任何一个检查失败或被取消就失败；合约 job 在没有合约时自己跳过步骤，结果是成功
+  ci-ok:
+    needs: [unit, e2e, contracts]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: 汇总结果
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "有检查失败或被取消"; exit 1
+          fi
