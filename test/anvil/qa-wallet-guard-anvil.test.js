@@ -140,6 +140,13 @@ test('anvil：链上参数和配置不一致 → 真的钱包层停用这条链�
   assert.doesNotMatch(JSON.stringify(eth), /0x[0-9a-fA-F]{40}/, '以太坊卡片不带地址的值');
   assert.equal(mails.length, 1, '再核对一次不重复发告警');
 
+  // 停用之后：就算配置和链上又一致了（这里把内存里的配置改成链上的 parent），也不再核对、不发"核对一致"恢复邮件、仍停用（到重新部署、重启为止）
+  layer.chainsConfigured.eth.scheme.parent = c.parent;
+  await layer.verifyOnchain({ db, notify });
+  assert.equal(layer.onchain.eth.result, 'mismatch');
+  assert.deepEqual(layer.enabledChains, ['bsc']);
+  assert.equal(mails.length, 1, '不发恢复邮件');
+
   // factory 不一致：另部署一个工厂（同一个实现），配置写成它 → 字段 factory
   const factory2 = await deploy(c.deployer, 'ForwarderFactoryV4.sol', 'ForwarderFactoryV4', c.impl);
   const adapter = createEvmAdapter({ chain: 'eth', rpcUrl: RPC, usdt: c.usdt, decimals: 18, confirmations: 1 });

@@ -191,3 +191,146 @@ test('系统状态"发起账户手续费"：够 3 批典型归集不标 low；�
   assert.equal(bsc.low, false);
   await db.end?.();
 });
+
+// ---------- 四、最后一轮小修（链上核对不误停、停用后不发恢复邮件、放回按链上余额校正、批次状态写回） ----------
+import { verifyChain, verifyLayer } from '../server/wallet/verify-onchain.js';
+import { selector } from '../server/wallet/evm-tx.js';
+import { evmUnswept } from '../server/wallet/addresses.js';
+
+const w32 = (a) => '0x' + a.toLowerCase().replace(/^0x/, '').padStart(64, '0');
+const sel0 = (sig) => '0x' + selector(sig);
+/** 链上核对用的替身节点：mode = ok | http429 | rpc429 | empty | wrong */
+function verifyNode(mode) {
+  const node = fakeEvm({ head: 1000 });
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body);
+    const one = (x) => {
+      if (x.method !== 'eth_call') return null;
+      if (mode === 'rpc429') return { jsonrpc: '2.0', id: x.id, error: { code: -32005, message: 'rate limit exceeded' } };
+      if (mode === 'empty') return { jsonrpc: '2.0', id: x.id, result: '0x' };
+      const d = x.params[0].data;
+      const pick = d === sel0('parent()') ? SCHEME.parent : d === sel0('factory()') ? SCHEME.factory : d === sel0('implementationAddress()') ? SCHEME.implementation : null;
+      if (!pick) return null;
+      return { jsonrpc: '2.0', id: x.id, result: w32(mode === 'wrong' && d === sel0('parent()') ? '0x' + '77'.repeat(20) : pick) };
+    };
+    if (mode === 'http429') return new Response('Too Many Requests', { status: 429 });
+    if (!Array.isArray(body) && one(body)) return Response.json(one(body));
+    return node.fetchImpl(url, init);
+  };
+  return createEvmAdapter({ chain: 'eth', rpcUrl: node.rpcUrl, fetchImpl, usdt: USDT, decimals: 6, confirmations: 12 });
+}
+
+test('链上核对：节点限流（HTTP 429、JSON-RPC 限流错误）→ unverified，不停用；拿到空结果或地址不对 → mismatch', async () => {
+  assert.deepEqual(await verifyChain(verifyNode('ok'), SCHEME), { result: 'ok' }, '前提：替身节点返回一致时 ok');
+  assert.deepEqual(await verifyChain(verifyNode('http429'), SCHEME), { result: 'unverified' });
+  assert.deepEqual(await verifyChain(verifyNode('rpc429'), SCHEME), { result: 'unverified' });
+  assert.equal((await verifyChain(verifyNode('empty'), SCHEME)).result, 'mismatch', '空结果（地址上没有合约）');
+  assert.deepEqual(await verifyChain(verifyNode('wrong'), SCHEME), { result: 'mismatch', fields: ['parent'] });
+});
+
+test('链上核对：限流时（unverified）这条链不停用、不发邮件；已因不一致停用的链之后节点返回一致也不再核对、不发"核对一致"恢复邮件、仍停用', async () => {
+  const db = await setupDb({ customers: [['m1', 'c1']] });
+  const mails = [];
+  const notify = async (s) => { mails.push(s); };
+  const enabledChains = ['eth'];
+  const errors = {};
+  const cfg = { eth: { adapter: verifyNode('rpc429'), scheme: SCHEME } };
+  const layer = { enabledChains, errors, chainsConfigured: cfg, onchain: {},
+    disableChain(chain, why) { const i = enabledChains.indexOf(chain); if (i >= 0) enabledChains.splice(i, 1); errors[chain] = why; } };
+  await verifyLayer(layer, { db, notify, now: T0 });
+  assert.equal(layer.onchain.eth.result, 'unverified');
+  assert.deepEqual(enabledChains, ['eth'], '限流不停用');
+  assert.equal(mails.length, 0);
+  cfg.eth.adapter = verifyNode('wrong');
+  await verifyLayer(layer, { db, notify, now: T0 + MIN });
+  assert.deepEqual(enabledChains, []);
+  assert.equal(mails.length, 1, '不一致告警一封');
+  cfg.eth.adapter = verifyNode('ok'); // 节点这时返回一致（例如之前是节点出错）
+  await verifyLayer(layer, { db, notify, now: T0 + 25 * 3600_000 });
+  assert.equal(layer.onchain.eth.result, 'mismatch', '停用后不再核对，状态保持不一致');
+  assert.deepEqual(enabledChains, [], '仍停用（到重新部署、重启为止）');
+  assert.equal(mails.length, 1, '不发"核对一致"恢复邮件');
+  await db.end?.();
+});
+
+/** 合约提供方 + 替身节点；executeSweep 可以挡住（gate）或换掉，模拟发送拖很久 */
+async function sweepRig(usdt = 500) {
+  const db = await setupDb({ customers: [['m1', 'c1']] });
+  const node = fakeEvm({ head: 1000 });
+  const adapter = createEvmAdapter({ chain: 'eth', rpcUrl: node.rpcUrl, fetchImpl: node.fetchImpl, usdt: USDT, decimals: 6, confirmations: 12 });
+  const real = await createContractProvider({ db, chains: { eth: { adapter, scheme: SCHEME, usdt: USDT } }, operatorKey: '0x' + randomBytes(32).toString('hex') });
+  const hook = { exec: null };
+  const contract = new Proxy(real, { get: (t, k) => (k === 'executeSweep' && hook.exec ? hook.exec : t[k]) });
+  const providers = { contract };
+  const { address } = await addressFor(db, { merchantId: 'm1', customerId: 'c1', chain: 'eth', providers, now: T0 });
+  node.state.balances[address.toLowerCase()] = BigInt(usdt) * BigInt(U);
+  return { db, node, providers, hook, real, address };
+}
+/** 发送卡住时 confirmSweeps 把"发送中"超过 15 分钟的批次标失败；然后发送才返回 */
+async function interruptedThen(outcome) {
+  const rig = await sweepRig();
+  const { db, providers, hook } = rig;
+  const [b] = await proposeSweep(db, { chain: 'eth', providers, notify: async () => {}, now: Date.now() });
+  let release;
+  const gate = new Promise((ok) => { release = ok; });
+  hook.exec = async (args) => { await gate; return outcome(args, rig); };
+  const p = approveSweep(db, { id: b.id, actor: 'admin@x', reason: 'r', providers }).then((x) => ({ ok: x }), (e) => ({ err: e }));
+  for (let i = 0; i < 100 && (await getBatch(db, b.id)).status !== 'sending'; i++) await new Promise((ok) => setTimeout(ok, 20));
+  assert.equal((await getBatch(db, b.id)).status, 'sending', '前提：已确认、正在发送');
+  await confirmSweeps(db, { providers, now: Date.now() + 16 * MIN });
+  const mid = await getBatch(db, b.id);
+  assert.equal(mid.status, 'failed', '前提：发送中超过 15 分钟被标失败');
+  assert.equal(mid.error, 'interrupted_while_sending');
+  release();
+  return { ...rig, id: b.id, result: await p };
+}
+
+test('批次状态写回带"仍是发送中"条件：已被标"发送中断"的批次，发送后来成功了也不改回已发送，记下交易号、error = sent_after_interrupted，地址仍是放回', async () => {
+  const { db, id, result } = await interruptedThen((args, rig) => rig.real.executeSweep(args));
+  assert.ok(result.ok, '发送本身成功返回');
+  const b = await getBatch(db, id);
+  assert.equal(b.status, 'failed', '不改回"已发送"');
+  assert.equal(b.error, 'sent_after_interrupted');
+  assert.equal(b.txRefs.length, 1, '交易号记下来，便于人工核对');
+  assert.deepEqual(b.items.map((i) => [i.status, i.reason]), [['released', 'interrupted']]);
+  await db.end?.();
+});
+
+test('批次状态写回带"仍是发送中"条件：已被标"发送中断"的批次，之后签名前出错不改回"待确认"，节点拒绝也不重复改状态', async () => {
+  const prep = await interruptedThen(() => { throw Object.assign(new Error('node down'), { stage: 'prepare' }); });
+  assert.equal(prep.result.err?.code, 'sweep_not_sent');
+  let b = await getBatch(prep.db, prep.id);
+  assert.equal(b.status, 'failed', '不退回待确认');
+  assert.equal(b.error, 'interrupted_while_sending');
+  await prep.db.end?.();
+  const rej = await interruptedThen(() => { throw Object.assign(new Error('rejected'), { stage: 'broadcast' }); });
+  assert.equal(rej.result.err?.code, 'sweep_send_failed');
+  b = await getBatch(rej.db, rej.id);
+  assert.equal(b.status, 'failed');
+  assert.equal(b.error, 'interrupted_while_sending', '保留"发送中断"的原因');
+  assert.deepEqual(b.items.map((i) => i.reason), ['interrupted']);
+  await rej.db.end?.();
+});
+
+test('凑批时按链上余额校正"放回"：发送失败放回的地址链上已经没钱（交易后来上链），凑批后"待归集"不再多算，也不再凑进新批次；链上还有钱的照常凑', async () => {
+  const { db, node, providers, hook, address } = await sweepRig();
+  await db.query(`insert into deposits (txid, log_index, block, time, address, amount, merchant_id, customer_id, result, chain) values ('qa-t1', 0, 1, now(), $1, $2, 'm1', 'c1', 'credited', 'eth')`, [address, 500 * U]);
+  const [b] = await proposeSweep(db, { chain: 'eth', providers, notify: async () => {}, now: T0 });
+  hook.exec = async () => { throw Object.assign(new Error('rejected'), { stage: 'broadcast' }); };
+  await approveSweep(db, { id: b.id, actor: 'admin@x', reason: 'r', providers, now: T0 + MIN }).catch(() => {});
+  assert.equal((await getBatch(db, b.id)).items[0].status, 'released', '前提：地址放回');
+  // 链上还有 500：照常凑，估算不变
+  const again = await proposeSweep(db, { chain: 'eth', providers, notify: async () => {}, now: T0 + 2 * MIN });
+  assert.equal(again.length, 1);
+  assert.equal((await evmUnswept(db)).eth.total, BigInt(500 * U));
+  await db.query(`update wallet_sweep_batches set status = 'cancelled' where id = $1`, [again[0].id]);
+  await db.query(`update wallet_sweep_items set status = 'released', reason = 'cancelled' where batch_id = $1`, [again[0].id]);
+  // 交易后来上链了：链上余额变 0 → 凑批时校正，不再凑批、待归集 0
+  node.state.balances[address.toLowerCase()] = 0n;
+  const none = await proposeSweep(db, { chain: 'eth', providers, notify: async () => {}, now: T0 + 3 * MIN });
+  assert.deepEqual(none, []);
+  assert.equal((await evmUnswept(db)).eth.total, 0n, '待归集不再多算');
+  const rows = await db.query(`select reason, status from wallet_sweep_items where chain = 'eth' order by id`);
+  assert.deepEqual(rows.map((r) => [r.status, r.reason]), [['swept', 'reconciled_onchain'], ['released', 'cancelled']], '只改发送失败放回的那条，取消的不动');
+  await db.end?.();
+});

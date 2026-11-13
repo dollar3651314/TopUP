@@ -521,4 +521,21 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await admin.unroute(isWallet('overview-chain'), { behavior: 'wait' });
   });
 
+  test('TC-W16 付款页接口按 IP 限流（整套服务）：同一个 IP 一下子查很多次，每秒前 20 次照常、超过的返回 429 rate_limited；过了这一秒又能查', async () => {
+    // 本地不在反向代理后面：服务端用连接的来源地址当 IP（不信请求头），这里所有请求都来自 127.0.0.1。
+    // "别的 IP 不受影响"在单元测试里测（wallet-rework.test.js）
+    const url = `${B}/api/pay/?o=${st.orderAny || 'ORD-20261201-00000000'}`;
+    await new Promise((ok) => setTimeout(ok, 1100)); // 从新的一秒开始，不受前面用例的请求影响
+    const rs = await Promise.all(Array.from({ length: 60 }, () => fetch(url)));
+    const codes = rs.map((r) => r.status);
+    expect(codes.filter((c) => c === 429).length, codes.join(',')).toBeGreaterThan(0);
+    expect(codes.filter((c) => c !== 429).length, codes.join(',')).toBeGreaterThanOrEqual(20); // 每秒前 20 次照常返回
+    const limited = rs.find((r) => r.status === 429)!;
+    expect((await limited.json()).error.code).toBe('rate_limited');
+    await Promise.all(rs.filter((r) => r !== limited).map((r) => r.arrayBuffer()));
+    // 过了这一秒，同一个 IP 又能查（后面的用例不受影响）
+    await new Promise((ok) => setTimeout(ok, 1100));
+    expect((await fetch(url)).status).not.toBe(429);
+  });
+
 });
