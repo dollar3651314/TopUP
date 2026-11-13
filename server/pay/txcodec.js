@@ -48,41 +48,85 @@ export function fields(b) {
   }
   return out;
 }
-const one = (fs, no) => fs.find((f) => f.no === no)?.value;
-const num = (v) => (v === undefined ? 0 : Number(v));
+/**
+ * 严格读一层字段：只许出现 allowed 里的字段号（{ 字段号: 线型 }），线型要对得上，每个字段号最多一次（repeated 里列出的除外）。
+ * 返回 Map(字段号 → 值)；repeated 字段的值是数组。不符合就抛出。
+ * 为什么：protobuf 同一个字段号可以出现多次，java-tron 取最后一个，"取第一个"的解码会让页面核对一组、链上执行另一组；
+ * java-tron 遇到线型不对的字段当作未知字段跳过（值留默认），所以线型不对、白名单外的字段也一律不认。
+ */
+export function strictFields(bytes, allowed, where, repeated = []) {
+  const m = new Map();
+  for (const f of fields(bytes)) {
+    if (!(f.no in allowed)) throw new Error(`${where}: unexpected field ${f.no}`);
+    if (allowed[f.no] !== f.wire) throw new Error(`${where}: field ${f.no} has wire type ${f.wire}`);
+    if (repeated.includes(f.no)) { if (!m.has(f.no)) m.set(f.no, []); m.get(f.no).push(f.value); continue; }
+    if (m.has(f.no)) throw new Error(`${where}: duplicate field ${f.no}`);
+    m.set(f.no, f.value);
+  }
+  return m;
+}
+// 整数字段：超出安全整数范围的一律不认（java-tron 按 int64 / int32 截断，和这里读出的值可能不同）
+const num = (v, where = 'field') => {
+  if (v === undefined) return 0;
+  if (v > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error(`${where}: integer out of range`);
+  return Number(v);
+};
+// 地址字段：必须 21 字节、0x41 开头
+const addrOf = (v, where) => {
+  if (v === undefined) return null;
+  if (v.length !== 21 || v[0] !== 0x41) throw new Error(`${where}: address must be 21 bytes starting with 0x41`);
+  return toAddress(v);
+};
+const L = 2, V = 0; // 线型：长度前缀、整数
+// 交易原文：1 ref_block_bytes、4 ref_block_hash、8 expiration、11 contract（可多个）、14 timestamp、18 fee_limit；别的（memo、auths、scripts…）不认
+const RAW_FIELDS = { 1: L, 4: L, 8: V, 11: L, 14: V, 18: V };
+// Contract：1 type、2 parameter（Any）、5 Permission_id（真实交易里会出现，见 fixtures）
+const CONTRACT_FIELDS = { 1: V, 2: L, 5: V };
+const ANY_FIELDS = { 1: L, 2: L };
+// 每种交易的参数白名单
+const PARAM_FIELDS = {
+  1: { 1: L, 2: L, 3: V }, // TransferContract：owner、to、amount
+  31: { 1: L, 2: L, 3: V, 4: L, 5: V, 6: V }, // TriggerSmartContract：owner、contract、call_value、data、call_token_value、token_id
+  57: { 1: L, 2: V, 3: V, 4: L, 5: V, 6: V }, // DelegateResourceContract：owner、resource、balance、receiver、lock、lock_period
+  58: { 1: L, 2: V, 3: V, 4: L }, // UnDelegateResourceContract：owner、resource、balance、receiver
+};
 
 // ---------- 解码 ----------
 /**
- * 解码交易原文（raw_data_hex）。返回：
+ * 解码交易原文（raw_data_hex），每一层按白名单严格读（strictFields），不符合就抛出。返回：
  * { txId, expiration, timestamp, feeLimit, contracts: [{ type, owner, to, amount, contract?, resource? }] }
  * USDT 转账时 to、amount 是从合约调用数据里解出来的收款地址和金额；contract 是被调用的合约地址。
  */
 export function decodeRaw(rawHex) {
   const b = hex.decode(rawHex);
-  const f = fields(b);
-  const contracts = f.filter((x) => x.no === 11).map((c) => {
-    const cf = fields(c.value);
-    const typeNo = num(one(cf, 1));
-    const any = fields(one(cf, 2) || new Uint8Array());
-    const p = fields(one(any, 2) || new Uint8Array());
+  const f = strictFields(b, RAW_FIELDS, 'raw_data', [11]);
+  const contracts = (f.get(11) || []).map((cv) => {
+    const cf = strictFields(cv, CONTRACT_FIELDS, 'contract');
+    const typeNo = num(cf.get(1), 'contract.type');
     const type = TYPES[typeNo] || `Unknown(${typeNo})`;
-    const permissionId = num(one(cf, 5)); // 多签权限：本项目从不使用，签名页面见到就拦下
-    const addr = (no) => { const v = one(p, no); return v ? toAddress(v) : null; };
-    if (typeNo === 1) return { type, permissionId, owner: addr(1), to: addr(2), amount: num(one(p, 3)) };
+    const permissionId = num(cf.get(5), 'contract.Permission_id'); // 多签权限：本项目从不使用，签名页面见到就拦下
+    if (!PARAM_FIELDS[typeNo]) return { type, permissionId };
+    const any = strictFields(cf.get(2) || new Uint8Array(), ANY_FIELDS, 'parameter');
+    if (new TextDecoder().decode(any.get(1) || new Uint8Array()) !== `type.googleapis.com/protocol.${type}`) throw new Error('parameter: type_url does not match contract type');
+    const p = strictFields(any.get(2) || new Uint8Array(), PARAM_FIELDS[typeNo], type);
+    const addr = (no) => addrOf(p.get(no), `${type}.${no}`);
+    const int = (no) => num(p.get(no), `${type}.${no}`);
+    if (typeNo === 1) return { type, permissionId, owner: addr(1), to: addr(2), amount: int(3) };
     if (typeNo === 31) {
-      const data = one(p, 4) || new Uint8Array();
+      const data = p.get(4) || new Uint8Array();
       const dh = hex.encode(data);
       let to = null, amount = null, method = dh.slice(0, 8);
-      if (method === TRANSFER_SELECTOR && dh.length === 8 + 128) {
+      // transfer(address,uint256)：地址那一格前 12 字节必须是 0；金额超出安全整数的不认
+      if (method === TRANSFER_SELECTOR && dh.length === 8 + 128 && /^0{24}$/.test(dh.slice(8, 8 + 24))) {
         to = toAddress(hex.decode('41' + dh.slice(8 + 24, 8 + 64)));
-        amount = Number(BigInt('0x' + dh.slice(8 + 64)));
+        amount = num(BigInt('0x' + dh.slice(8 + 64)), 'transfer amount');
       }
-      return { type, permissionId, owner: addr(1), contract: addr(2), callValue: num(one(p, 3)), method, to, amount };
+      return { type, permissionId, owner: addr(1), contract: addr(2), callValue: int(3), callTokenValue: int(5), tokenId: int(6), method, to, amount };
     }
-    if (typeNo === 57 || typeNo === 58) return { type, permissionId, owner: addr(1), resource: num(one(p, 2)) === 1 ? 'ENERGY' : 'BANDWIDTH', amount: num(one(p, 3)), to: addr(4), lock: num(one(p, 5)) === 1 };
-    return { type, permissionId };
+    // lock 是 bool：java-tron 非 0 即 true
+    return { type, permissionId, owner: addr(1), resource: int(2) === 1 ? 'ENERGY' : 'BANDWIDTH', amount: int(3), to: addr(4), lock: int(5) !== 0, lockPeriod: int(6) };
   });
-  return { txId: txIdOf(rawHex), expiration: num(one(f, 8)), timestamp: num(one(f, 14)), feeLimit: num(one(f, 18)), contracts };
+  return { txId: txIdOf(rawHex), expiration: num(f.get(8), 'expiration'), timestamp: num(f.get(14), 'timestamp'), feeLimit: num(f.get(18), 'fee_limit'), contracts };
 }
 export const txIdOf = (rawHex) => hex.encode(sha256(hex.decode(rawHex)));
 

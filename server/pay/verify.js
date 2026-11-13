@@ -1,6 +1,8 @@
 // 签名页面的核对规则：浏览器自己解码每一笔待签名的交易原文，按规则逐项核对，
 // 不符合的交易不给签名。服务器和测试也用这份规则，但只有浏览器里的这一次核对才算数：
 // 就算服务器被攻破、改了交易，页面也会拦下。
+// 解码（decodeRaw）每一层按白名单严格读：重复字段、白名单外字段、线型不对、地址不是 21 字节 0x41 开头都算"无法解码"，
+// 所以页面核对的值就是 java-tron 执行的值（java-tron 对重复字段取最后一个，不能让页面核对前一个）。
 import { decodeRaw } from './txcodec.js';
 
 const TRX = 1_000_000;
@@ -17,7 +19,7 @@ export const LIMITS = { activateMax: 2 * TRX, feeTrxMax: 30 * TRX, feeLimitMax: 
  */
 export function checkStep(step, expect, rules, now = Date.now()) {
   let d;
-  try { d = decodeRaw(step.rawHex); } catch { return { ok: false, error: '交易原文无法解码' }; }
+  try { d = decodeRaw(step.rawHex); } catch (e) { return { ok: false, error: `交易原文无法解码（${e?.message || e}）` }; }
   const fail = (error) => ({ ok: false, error, decoded: d });
   if (step.txID && step.txID !== d.txId) return fail('交易哈希和原文不一致');
   if (d.contracts.length !== 1) return fail('一笔交易里有多个操作');
@@ -26,7 +28,7 @@ export function checkStep(step, expect, rules, now = Date.now()) {
   if (d.expiration < now || d.expiration > now + LIMITS.maxExpiryMs) return fail('交易过期时间不正常');
   switch (step.kind) {
     case 'withdraw':
-      if (c.type !== 'TriggerSmartContract' || c.method !== 'a9059cbb' || c.callValue) return fail('不是 USDT 转账');
+      if (c.type !== 'TriggerSmartContract' || c.method !== 'a9059cbb' || c.callValue || c.callTokenValue || c.tokenId) return fail('不是 USDT 转账');
       if (c.contract !== rules.usdt) return fail('合约不是 USDT');
       if (c.owner !== rules.hot) return fail(`付款地址不是热钱包：${c.owner}`);
       if (c.to !== expect.to) return fail(`收款地址不一致：交易里是 ${c.to}`);
@@ -34,7 +36,7 @@ export function checkStep(step, expect, rules, now = Date.now()) {
       if (d.feeLimit > LIMITS.feeLimitMax) return fail('手续费上限过高');
       break;
     case 'sweep_usdt':
-      if (c.type !== 'TriggerSmartContract' || c.method !== 'a9059cbb' || c.callValue) return fail('不是 USDT 转账');
+      if (c.type !== 'TriggerSmartContract' || c.method !== 'a9059cbb' || c.callValue || c.callTokenValue || c.tokenId) return fail('不是 USDT 转账');
       if (c.contract !== rules.usdt) return fail('合约不是 USDT');
       if (c.owner !== expect.from) return fail('付款地址和助记词推导出的地址不一致');
       if (c.to !== rules.hot && !(rules.cold && c.to === rules.cold)) return fail(`收款地址不是热钱包或冷钱包：${c.to}`);
