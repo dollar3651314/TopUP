@@ -7,6 +7,7 @@ import { PayError, CUSTOMER_RE } from './core.js';
 import { parseAmount, iso, page, emailHash } from './common.js';
 import { checkCallbackUrl } from './callbacks.js';
 import { addressFor } from '../wallet/addresses.js';
+import * as payout from './payout.js';
 
 export const NETWORK = { eth: 'ETH', bsc: 'BSC', tron: 'TRON' };
 const CHAIN_ORDER = ['eth', 'bsc', 'tron'];
@@ -14,7 +15,7 @@ const CHAIN_ORDER = ['eth', 'bsc', 'tron'];
 const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,255}$/;
 const cleanText = (v, max) => String(v ?? '').trim().slice(0, max);
 
-export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', wallet = null }) {
+export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', wallet = null, notify = null, now = () => Date.now() }) {
   const enabledChains = wallet?.enabledChains || [];
   /** K1：客户发起充值时才按链生成地址（订单指定了链、或付款人在付款页选了链）；同一客户同一条链只生成一次，之后复用 */
   const addressOn = (m, customerId, chain) => addressFor(db, { merchantId: m.id, customerId, chain, providers: wallet?.providers || {} });
@@ -201,7 +202,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
 
     // ---------- 提币 ----------
     async withdraw(m, b, source) {
-      return core.requestWithdrawal(db, m, { kind: String(b.kind || ''), to: String(b.to || '').trim(), amount: parseAmount(b.amount), customerId: b.customer_id ? String(b.customer_id) : null, source, merchantRef: b.merchant_ref ? cleanText(b.merchant_ref, 64) : null });
+      return core.requestWithdrawal(db, m, { kind: String(b.kind || ''), chain: b.chain === undefined || b.chain === null || b.chain === '' ? 'tron' : String(b.chain), to: String(b.to || '').trim(), amount: parseAmount(b.amount), customerId: b.customer_id ? String(b.customer_id) : null, source, merchantRef: b.merchant_ref ? cleanText(b.merchant_ref, 64) : null });
     },
     async getWithdrawal(m, id) {
       const [w] = await db.query('select id from withdrawals where id = $1 and merchant_id = $2', [String(id || ''), m.id]);
@@ -217,6 +218,28 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
       return { items: await Promise.all(p.items.map((w) => core.withdrawalView(db, w.id))), next_cursor: p.next_cursor };
     },
     cancelWithdrawal: (m, id) => core.cancelWithdrawal(db, m.id, String(id || '')),
+
+    // ---------- 批量打款（第 3 批）：商户上传表格、开放 API ----------
+    /** 逐行检查（不冻结）：rows 是 parsePayoutSheet 的结果；enough = 没问题的行合计 ≤ 可用余额（余额一个数） */
+    payoutCheck(m, rows, at = now()) {
+      if (rows.length > payout.MAX_ITEMS_PER_REQUEST) throw new PayError('too_many_items', 422, 'csv');
+      const checked = payout.checkPayoutRows(rows, m);
+      const good = checked.filter((r) => r.ok);
+      const need = good.reduce((s, r) => s + r.amount + r.fee, 0);
+      return {
+        rows: checked.map((r) => ({ line: r.line, chain: r.chain, to: r.to, amount: r.amount, amount_text: String(rows[r.index].amount ?? ''), fee: r.fee, ok: r.ok, errors: r.errors, warnings: r.warnings })),
+        totals: payout.totalsByChain(good), ok_count: good.length, bad_count: checked.length - good.length, need, available: Number(m.available), enough: good.length > 0 && need <= Number(m.available), service: payout.serviceWindow(at),
+      };
+    },
+    payoutSubmit: (m, rows, source, onlyValid, at = now()) => payout.submitPayoutBatch(db, m, { rows, source, onlyValid, now: at, notify: notify ? (x) => notify(`新的批量打款待审核：${x.batch_no}`, `${x.merchant} 提交了 ${x.count} 笔批量打款：\n${x.text}\n\n请到运营后台"打款审核"处理。${x.service.open ? '' : '现在不在处理时段（东八区 8:00–23:00），商户页面写的是第二天 8:00 后处理。'}`) : null }),
+    payoutBatches: (m) => payout.listPayoutBatches(db, m.id),
+    async payoutBatch(m, batchNo) {
+      const v = await payout.payoutBatchView(db, String(batchNo || ''), m.id);
+      if (!v) throw new PayError('not_found', 404);
+      const { merchant_id, ...rest } = v;
+      return { ...rest, items: v.items.map((w) => ({ withdrawal_no: w.withdrawal_no, chain: w.chain, to: w.to, amount: w.amount, fee: w.fee, status: w.status, txid: w.txid, reason: w.reason, customer_id: w.customer_id, merchant_ref: w.merchant_ref })) };
+    },
+    payoutCancel: (m, batchNo) => payout.cancelPayoutBatch(db, m.id, String(batchNo || '')),
 
     // ---------- API 密钥 ----------
     /** 生成新的 API Secret（旧的立即失效）；API Key 第一次生成后不变。Secret 只在这里返回一次 */

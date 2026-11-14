@@ -9,6 +9,7 @@ import { money, errorResponse, limitOf } from './common.js';
 
 const MAX_SKEW_S = 300;
 const MAX_BODY = 32 * 1024;
+const MAX_BODY_BATCH = 256 * 1024; // 批量打款最多 500 笔，请求体会超过 32 KB
 
 /** 商户签名时用的路径：/api/v1/<路径>?<查询>。线上经过改写后路径在 p 参数里，这里还原成商户请求时的样子 */
 export function canonicalPath(url) {
@@ -117,6 +118,15 @@ export function createApiV1({ db, keys, ops, getIp = () => '', now = () => Date.
     'POST withdrawals': (m, q, b, request) => { needIp(m, request); return ops.withdraw(m, b, 'api'); },
     'GET withdrawals': (m, q) => ops.getWithdrawal(m, q.get('withdrawal_no')),
     'POST withdrawals/cancel': (m, q, b) => ops.cancelWithdrawal(m, b.withdrawal_no),
+    // 批量打款（第 3 批）：一次最多 500 笔；有一行不对整个请求 422 invalid_rows（error.rows 列出 index 和原因），不做"只收没问题的"
+    'POST payouts/batch': async (m, q, b, request) => {
+      needIp(m, request);
+      if (!Array.isArray(b.items) || !b.items.length) throw new PayError('invalid_param', 422, 'items');
+      if (b.items.length > 500) throw new PayError('too_many_items', 422, 'items');
+      const r = await ops.payoutSubmit(m, b.items.map((x, i) => ({ ...(x && typeof x === 'object' ? x : {}), line: i + 1 })), 'api', false, now());
+      return { ...(await ops.payoutBatch(m, r.batch_no)), service: r.service };
+    },
+    'GET payouts/batch': (m, q) => ops.payoutBatch(m, q.get('batch_no')),
   };
 
   const handle = async function handle(request) {
@@ -125,7 +135,7 @@ export function createApiV1({ db, keys, ops, getIp = () => '', now = () => Date.
       const route = routes[`${request.method} ${path}`];
       if (!route) return json(404, { error: { code: 'not_found', message: 'Unknown endpoint' } });
       const raw = request.method === 'POST' ? await request.text() : '';
-      if (raw.length > MAX_BODY) return json(413, { error: { code: 'too_large', message: 'Request body too large' } });
+      if (raw.length > (path === 'payouts/batch' ? MAX_BODY_BATCH : MAX_BODY)) return json(413, { error: { code: 'too_large', message: 'Request body too large' } });
       const m = await auth(request, raw);
       let body = {};
       if (request.method === 'POST') { try { body = JSON.parse(raw || '{}'); } catch { throw new PayError('invalid_param', 400, 'body'); } }

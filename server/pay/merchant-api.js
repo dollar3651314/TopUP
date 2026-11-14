@@ -11,8 +11,10 @@ import { PayError } from './core.js';
 import { money, errorResponse, iso, amt } from './common.js';
 import { resend } from './callbacks.js';
 import * as core from './core.js';
+import { parsePayoutSheet } from './payout.js';
 
 export const M_COOKIE = 'topup_merchant';
+const BIG_BODY = new Set(['payout-batch-check', 'payout-batch-submit']);
 const SESSION_MS = 8 * 60 * 60 * 1000;
 const SETUP_MS = 7 * 24 * 60 * 60 * 1000;
 const LOCK_MAX = 5, LOCK_MS = 15 * 60 * 1000;
@@ -144,6 +146,15 @@ export function createMerchantApi({ db, keys, ops, send, now = () => Date.now() 
     },
     withdrawals: (m, b, s, q) => ops.listWithdrawals(m, { cursor: q.get('cursor'), limit: 50 }),
     'withdraw-cancel': (m, b) => ops.cancelWithdrawal(m, b.withdrawal_no),
+    // 批量打款（第 3 批）：上传表格 → 逐行检查 → 按链汇总 + 动态码提交；批次记录、明细、取消还没审核的
+    'payout-batch-check': (m, b) => ops.payoutCheck(m, parsePayoutSheet(b.csv).rows, now()),
+    async 'payout-batch-submit'(m, b, s) {
+      if (!(await checkCode(s.user, b.code))) throw new PayError('bad_code', 400);
+      return ops.payoutSubmit(m, parsePayoutSheet(b.csv).rows, 'web', b.only_valid === true, now());
+    },
+    'payout-batches': async (m) => ({ items: await ops.payoutBatches(m) }),
+    'payout-batch': (m, b, s, q) => ops.payoutBatch(m, q.get('batch_no')),
+    'payout-batch-cancel': (m, b) => ops.payoutCancel(m, b.batch_no),
     api: (m) => ({ api_key: m.api_key, has_secret: !!m.api_secret_enc, callback_url: m.callback_url, ip_whitelist: m.ip_whitelist, order_mode: m.order_mode }),
     async 'api-regen'(m, b, s) {
       if (!(await checkCode(s.user, b.code))) throw new PayError('bad_code', 400);
@@ -181,7 +192,8 @@ export function createMerchantApi({ db, keys, ops, send, now = () => Date.now() 
       const a = url.searchParams.get('a') || '';
       const isPost = request.method === 'POST';
       if (isPost && request.headers.get('x-topup-csrf') !== '1') return json(403, { error: { code: 'csrf', message: 'Missing CSRF header' } });
-      const b = isPost ? await readJson(request, 32 * 1024) : {};
+      // 批量打款的表格最多 500 行，请求体放宽到 256 KB；其余接口照旧 32 KB
+      const b = isPost ? await readJson(request, BIG_BODY.has(a) ? 256 * 1024 : 32 * 1024) : {};
       let out;
       if (open[a]) out = await open[a](request, b);
       else {

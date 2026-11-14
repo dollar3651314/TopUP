@@ -49,7 +49,7 @@ const MESSAGES = {
   address_not_registered: 'Address is not a registered cash-out wallet', invalid_state: 'Not allowed in the current state', request_in_progress: 'A request with this Idempotency-Key is still in progress', cannot_match: 'Deposit cannot be matched to this order', not_matched: 'Deposit is not matched to this order',
 };
 export function errorResponse(e) {
-  if (e instanceof PayError) return json(e.status, { error: { code: e.code, message: MESSAGES[e.code] || e.code, ...(e.field ? { field: e.field } : {}) } });
+  if (e instanceof PayError) return json(e.status, { error: { code: e.code, message: MESSAGES[e.code] || e.code, ...(e.field ? { field: e.field } : {}), ...(e.rows ? { rows: e.rows } : {}) } });
   if (e?.status && e.message) return json(e.status, { error: { code: e.message, message: MESSAGES[e.message] || e.message } });
   console.error(`[pay] ${e?.stack || e}`);
   return json(500, { error: { code: 'internal_error', message: 'Internal error' } });

@@ -5,11 +5,41 @@ import { randomBytes } from 'node:crypto';
 import { calcFee } from './money.js';
 import { matchOnDeposit, matchOnCreate, manualMatch as ruleManual, unmatch as ruleUnmatch, stateOf } from './matching.js';
 import { isValidAddress } from './tron.js';
+import { isChecksumAddress, checksumAddress } from '../wallet/evm-payout-codec.js';
 
 export const MIN_CREDIT = 1_000_000; // 低于 1 USDT 的到账不入账
 export const CUSTOMER_RE = /^[A-Za-z0-9_.@-]{1,128}$/;
 export const ORDER_NO_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const OPEN = ['pending', 'partial'];
+export const PAYOUT_CHAINS = ['eth', 'bsc', 'tron'];
+
+/** 按链校验收款地址：ETH / BSC 是 0x 地址（大小写混合的必须校验和正确，返回 EIP-55 写法），TRON 是 Base58；不对返回 null */
+export function chainAddress(chain, to) {
+  const s = typeof to === 'string' ? to.trim() : '';
+  if (chain === 'tron') return isValidAddress(s) ? s : null;
+  if (chain === 'eth' || chain === 'bsc') return isChecksumAddress(s) ? checksumAddress(s) : null;
+  return null;
+}
+/** 商户登记的提现地址：元素是 { chain, address }；老数据里的字符串当作 TRON。返回规范化后的数组，有不对的抛出 invalid_address */
+export function normalizeCashoutWallets(list, field = 'cashout_wallets') {
+  if (!Array.isArray(list)) throw new PayError('invalid_param', 422, field);
+  return list.map((w) => {
+    const chain = typeof w === 'string' ? 'tron' : w?.chain;
+    if (!PAYOUT_CHAINS.includes(chain)) throw new PayError('invalid_param', 422, field);
+    const address = chainAddress(chain, typeof w === 'string' ? w : w.address);
+    if (!address) throw new PayError('invalid_address', 422, field);
+    return { chain, address };
+  });
+}
+/** 这个地址是不是商户在这条链上登记过的提现地址（同一串 0x 登记在以太坊不算登记在 BSC） */
+export function isRegisteredCashout(merchant, chain, address) {
+  return (merchant.cashout_wallets || []).some((w) => {
+    const c = typeof w === 'string' ? 'tron' : w?.chain;
+    const a = typeof w === 'string' ? w : w?.address;
+    if (c !== chain || typeof a !== 'string') return false;
+    return chain === 'tron' ? a === address : a.toLowerCase() === address.toLowerCase();
+  });
+}
 
 export class PayError extends Error {
   constructor(code, status = 422, field) { super(code); this.code = code; this.status = status; this.field = field; }
@@ -46,7 +76,7 @@ export async function enqueueCallback(q, merchantId, type, data) {
 }
 
 /** 改余额并追加账本：dAvail、dFrozen 是可用和冻结的变化量；余额不够时数据库约束会拒绝 */
-async function post(q, merchantId, type, dAvail, dFrozen, ref, customerId = null) {
+export async function post(q, merchantId, type, dAvail, dFrozen, ref, customerId = null) {
   let b;
   try {
     [b] = await q.query('update balances set available = available + $2, frozen = frozen + $3 where merchant_id = $1 returning available, frozen', [merchantId, dAvail, dFrozen]);
@@ -76,7 +106,7 @@ export function checkFee(f, field) {
 }
 export async function createMerchant(db, { id = newId.merchant(), name, kybRef = null, feeIn, feeOut, mode = DEFAULT_MODE, cashoutWallets = [] }) {
   if (!name) throw new PayError('invalid_param', 422, 'name');
-  for (const w of cashoutWallets) if (!isValidAddress(w)) throw new PayError('invalid_address', 422, 'cashout_wallets');
+  cashoutWallets = normalizeCashoutWallets(cashoutWallets);
   return db.tx(async (t) => {
     await t.query(`insert into merchants (id, name, kyb_ref, fee_in, fee_out, order_mode, cashout_wallets) values ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb)`,
       [id, name, kybRef, JSON.stringify(checkFee(feeIn, 'fee_in')), JSON.stringify(checkFee(feeOut, 'fee_out')), JSON.stringify(checkMode(mode)), JSON.stringify(cashoutWallets)]);
@@ -277,10 +307,13 @@ export async function recordDeposit(db, { chain = 'tron', txid, logIndex, block,
 }
 
 // ---------- 提币 ----------
-export async function requestWithdrawal(db, merchant, { kind, to, amount, customerId = null, source, merchantRef = null }) {
+export async function requestWithdrawal(db, merchant, { kind, chain = 'tron', to, amount, customerId = null, source, merchantRef = null }) {
   if (!['payout', 'cashout'].includes(kind)) throw new PayError('invalid_param', 422, 'kind');
-  if (!isValidAddress(to)) throw new PayError('invalid_address', 422, 'to');
-  if (kind === 'cashout' && !merchant.cashout_wallets.includes(to)) throw new PayError('address_not_registered', 422, 'to');
+  if (!PAYOUT_CHAINS.includes(chain)) throw new PayError('invalid_param', 422, 'chain');
+  const addr = chainAddress(chain, to);
+  if (!addr) throw new PayError('invalid_address', 422, 'to');
+  to = addr;
+  if (kind === 'cashout' && !isRegisteredCashout(merchant, chain, to)) throw new PayError('address_not_registered', 422, 'to');
   if (!Number.isInteger(amount) || amount <= 0) throw new PayError('invalid_param', 422, 'amount');
   if (customerId !== null && !CUSTOMER_RE.test(customerId)) throw new PayError('invalid_param', 422, 'customer_id');
   const fee = calcFee(amount, merchant.fee_out);
@@ -288,25 +321,26 @@ export async function requestWithdrawal(db, merchant, { kind, to, amount, custom
     if (customerId && kind === 'payout') await ensureCustomer(t, merchant.id, customerId);
     const id = newId.withdrawal();
     await post(t, merchant.id, 'freeze', -(amount + fee), amount + fee, id, customerId);
-    await t.query(`insert into withdrawals (id, merchant_id, kind, customer_id, to_address, amount, fee, source, status, merchant_ref) values ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)`,
-      [id, merchant.id, kind, kind === 'payout' ? customerId : null, to, amount, fee, source, merchantRef]);
+    await t.query(`insert into withdrawals (id, merchant_id, kind, customer_id, to_address, amount, fee, source, status, merchant_ref, chain) values ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $10)`,
+      [id, merchant.id, kind, kind === 'payout' ? customerId : null, to, amount, fee, source, merchantRef, chain]);
     await wdCallback(t, id);
     return withdrawalView(t, id);
   });
 }
-const WD_PUBLIC = { pending: 'pending', signing: 'approved', broadcast: 'broadcast', completed: 'completed', rejected: 'rejected', cancelled: 'cancelled', failed: 'failed' };
+// approved：审核通过、等凑批签名；signing：已凑进一批、等签名（对外都是 approved）
+export const WD_PUBLIC = { pending: 'pending', approved: 'approved', signing: 'approved', broadcast: 'broadcast', completed: 'completed', rejected: 'rejected', cancelled: 'cancelled', failed: 'failed' };
 export async function withdrawalView(q, id) {
   const [w] = await q.query('select * from withdrawals where id = $1', [id]);
   if (!w) return null;
-  return { withdrawal_no: w.id, kind: w.kind, customer_id: w.customer_id, to: w.to_address, amount: w.amount, fee: w.fee, status: WD_PUBLIC[w.status], txid: w.txid, reason: w.reason, merchant_ref: w.merchant_ref, source: w.source, created_at: iso(w.created_at) };
+  return { withdrawal_no: w.id, kind: w.kind, chain: w.chain || 'tron', batch_no: w.batch_ref || null, customer_id: w.customer_id, to: w.to_address, amount: w.amount, fee: w.fee, status: WD_PUBLIC[w.status], txid: w.txid, reason: w.reason, merchant_ref: w.merchant_ref, source: w.source, created_at: iso(w.created_at) };
 }
-async function wdCallback(t, id) {
+export async function wdCallback(t, id) {
   const v = await withdrawalView(t, id);
   const [w] = await t.query('select merchant_id from withdrawals where id = $1', [id]);
   await enqueueCallback(t, w.merchant_id, 'withdrawal.updated', v);
 }
 /** 状态流转。from 是允许的原状态 */
-async function moveWithdrawal(t, id, from, to, extra = {}) {
+export async function moveWithdrawal(t, id, from, to, extra = {}) {
   const [w] = await t.query(`update withdrawals set status = $3, reason = coalesce($4, reason), txid = coalesce($5, txid), batch_id = coalesce($6, batch_id), updated_at = now()
     where id = $1 and status = any($2::text[]) returning *`, [id, from, to, extra.reason ?? null, extra.txid ?? null, extra.batchId ?? null]);
   if (!w) throw new PayError('invalid_state', 409);

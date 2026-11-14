@@ -4,7 +4,7 @@
 // 每个请求都有超时（默认 10 秒）；出错直接抛出，不返回空结果、不推进游标，由 worker 下一轮重试。
 import { toUnits } from '../units.js';
 import { toChecksumAddress, isEvmAddress } from '../create2.js';
-import { encodeBalanceOf, keccakHex } from '../evm-tx.js';
+import { encodeBalanceOf, encodeAllowance, keccakHex } from '../evm-tx.js';
 
 export const TRANSFER_TOPIC = keccakHex(Buffer.from('Transfer(address,address,uint256)'));
 const TOPIC_GROUP = 100; // 地址多时分组查，每组 100 个
@@ -124,6 +124,8 @@ export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decim
     head, transfers, receipt, txStatus,
     /** USDT 余额（原始数，bigint） */
     async tokenBalanceRaw(address, token = usdt) { return BigInt(await rpc.call('eth_call', [{ to: token, data: encodeBalanceOf(address) }, 'latest'])); },
+    /** USDT 授权额度 allowance(owner, spender)（原始数，bigint）：批量打款读热钱包给 BatchPayout 的额度 */
+    async allowanceRaw(owner, spender, token = usdt) { return BigInt(await rpc.call('eth_call', [{ to: token, data: encodeAllowance(owner, spender) }, 'latest'])); },
     async nativeBalance(address) { return BigInt(await rpc.call('eth_getBalance', [address, 'latest'])); },
     async isContract(address) { const c = await rpc.call('eth_getCode', [address, 'latest']); return typeof c === 'string' && c !== '0x' && c !== '0x0'; },
     async chainId() { return BigInt(await rpc.call('eth_chainId')); },

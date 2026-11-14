@@ -322,6 +322,44 @@ create table if not exists pay_audit (
   detail jsonb not null default '{}',
   at timestamptz not null default now()
 );
+
+-- 第 3 批批量打款：提币按链（老数据是 TRON）；审核通过（approved）后按链凑批签名；商户上传的一张表 / 一次 API 是一个批次（batch_ref）
+alter table withdrawals add column if not exists chain text not null default 'tron';
+alter table withdrawals drop constraint if exists withdrawals_chain_check;
+alter table withdrawals add constraint withdrawals_chain_check check (chain in ('eth', 'bsc', 'tron'));
+alter table withdrawals add column if not exists batch_ref text;
+alter table withdrawals add column if not exists approved_at timestamptz;
+alter table withdrawals add column if not exists approved_by text;
+create index if not exists withdrawals_batch_ref on withdrawals (batch_ref) where batch_ref is not null;
+create index if not exists withdrawals_approved on withdrawals (chain, status, approved_at);
+-- 商户的批量打款（一张表或一次 API）
+create table if not exists payout_batches (
+  batch_no text primary key,
+  merchant_id text not null references merchants(id),
+  source text not null check (source in ('web', 'api')),
+  item_count int not null,
+  total bigint not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists payout_batches_merchant on payout_batches (merchant_id, created_at);
+-- 打款交易批次（按链凑批）：ETH / BSC 一批一笔 BatchPayout.pay 交易；TRON 一批 N 笔转账（逐笔记账）
+create table if not exists payout_tx_batches (
+  id text primary key,
+  chain text not null check (chain in ('eth', 'bsc', 'tron')),
+  status text not null check (status in ('planned', 'broadcast', 'confirmed', 'partial', 'failed', 'expired')),
+  item_ids jsonb not null,
+  total bigint not null,
+  batch_hex text,
+  raw_hex text,
+  expect jsonb,
+  tx_hash text,
+  energy jsonb,
+  error text,
+  created_by text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists payout_tx_batches_status on payout_tx_batches (chain, status, created_at);
 `;
 
 /**
