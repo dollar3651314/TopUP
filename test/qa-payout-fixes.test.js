@@ -2,6 +2,7 @@
 // 1. 没签名的批次可以作废（单回到已审核）；作废后再交这一批的签名 409；已经交了签名的批次不能作废（409）。
 // 2. 交易原文快过期（出原文后 29 分钟起）再交签名：409 plan_expired，不广播。
 // 3. 广播超时（结果不明）：交易过期前（SIGN_TTL 30 分钟 + 5 分钟余量）一直是已广播、不退回；过期后链上仍查不到才回到已审核，冻结不动。
+//    过期按链上区块时间判断（tron.solidBlock().time 过了原文里的过期时间 60 秒以上、txInfo 仍查不到）；服务器时钟走快了、链上时间还没过期时不退回。
 // 4. 已审核、还没凑进批次的单可以驳回：原因必填；退冻结、发回调；已凑进批次的不能驳回（409）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,6 +99,9 @@ test('TRON 打款：广播超时（结果不明）时，交易过期前一直不
   assert.equal((await t.call('sign-submit', { batch_id: p.batch_id, signatures: p.sigs })).status, 200);
   t.tron.broadcastHex = orig;
   const frozen = (await t.money()).f;
+  // 过期按链上区块时间判断：替身节点的链上时间跟着测试时钟走（替身默认用真实时间，测试时钟往前拨时链上时间不动）
+  const solid = t.tron.solidBlock.bind(t.tron);
+  t.tron.solidBlock = async () => ({ ...(await solid()), time: t.now() + 60_000 });
   const tick = () => runTick({ db: t.db, tron: t.tron, getTarget: async () => null, now: t.now });
   assert.equal((await t.row(id)).status, 'broadcast', '广播出错先按已广播等着');
   t.advance(30 * MIN);
@@ -108,6 +112,34 @@ test('TRON 打款：广播超时（结果不明）时，交易过期前一直不
   await tick();
   const r = await t.row(id);
   assert.equal(r.status, 'approved', '过期后链上仍查不到：回到已审核');
+  assert.equal((await t.money()).f, frozen, '冻结不动');
+});
+
+test('TRON 打款：服务器时钟走快了（已过期）但链上区块时间还没过交易原文的过期时间 → 不退回；链上时间过了过期时间 60 秒以上、链上仍查不到才回到已审核', async () => {
+  const t = await setup();
+  const id = await t.newPayout();
+  await t.approve(id);
+  const p = await t.plan(id);
+  const orig = t.tron.broadcastHex.bind(t.tron);
+  t.tron.broadcastHex = async () => { throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }); }; // 结果不明
+  assert.equal((await t.call('sign-submit', { batch_id: p.batch_id, signatures: p.sigs })).status, 200);
+  t.tron.broadcastHex = orig;
+  const frozen = (await t.money()).f;
+  // 链上时间单独控制：先停在出原文的时候（离过期还有约 30 分钟）
+  const solid = t.tron.solidBlock.bind(t.tron);
+  let chainTime = t.now();
+  t.tron.solidBlock = async () => ({ ...(await solid()), time: chainTime });
+  const tick = () => runTick({ db: t.db, tron: t.tron, getTarget: async () => null, now: t.now });
+  assert.equal((await t.row(id)).status, 'broadcast', '前提：广播出错先按已广播等着');
+  // 服务器时钟快了 40 分钟（按服务器时间早就过期了），链上时间还没到过期时间：交易随时可能上链，不能退回
+  t.advance(40 * MIN);
+  await tick();
+  assert.equal((await t.row(id)).status, 'broadcast', '服务器时钟过了期、链上时间还没过：不能退回已审核（原交易还可能上链，再签就付两次）');
+  assert.equal((await t.call('withdraw-plan', { ids: [id] })).status, 409, '链上时间还没过期时不能再凑批');
+  // 链上时间也过了过期时间 60 秒以上、链上仍查不到 → 回到已审核，冻结不动
+  chainTime = t.now() + 60_000;
+  await tick();
+  assert.equal((await t.row(id)).status, 'approved', '链上时间过了过期时间、链上仍查不到：回到已审核');
   assert.equal((await t.money()).f, frozen, '冻结不动');
 });
 

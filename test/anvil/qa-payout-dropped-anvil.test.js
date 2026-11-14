@@ -5,6 +5,7 @@
 // 全过程收款人链上只收到 100、账本只按这笔扣一次 100、冻结清零、最后是已完成。
 // 另两条（修复轮补测）：nonce N 已被别的交易用掉、A 没有回执 → 整批回到已审核，重凑后只付一次；
 // 一批里有一个收款人转不了（试算回滚 TransferFailed(i)）→ 只挂起那一笔、其余照常凑批付出，挂起的不再进批，驳回后退冻结。
+// 安全复核修复轮：nonce N 已用掉、A 没有回执，要隔至少 5 分钟两轮都这样才退回；节点落后（第一轮没有回执、第二轮查到回执）不退回、只付一次。
 // 怎么跑：和 test/anvil/payout-anvil.test.js 相同（CI contracts 一节，一个文件一个文件跑）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -138,7 +139,7 @@ test('以太坊打款：广播后节点查不到（30 分钟）但 nonce 还没�
 });
 
 /** 公共准备：部署 BatchPayout 和测试 USDT、给热钱包钱和授权额度、商户余额 */
-async function prepare() {
+async function prepare({ confirmations = 0, wrap = (a) => a } = {}) {
   const { createEvmAdapter } = await import('../../server/wallet/adapters/evm.js');
   const { createPayoutService } = await import('../../server/wallet/payout.js');
   const core = await import('../../server/pay/core.js');
@@ -157,7 +158,7 @@ async function prepare() {
   await db.query('update balances set available = available + $1', [10_000 * U]);
   const clock = { skew: 0 };
   const svc = createPayoutService({ db, verifyCode: async () => true, now: () => Date.now() + clock.skew,
-    chains: { eth: { adapter: createEvmAdapter({ chain: 'eth', rpcUrl: RPC, usdt, decimals: 6, confirmations: 0 }), chainId, token: usdt, contract: payout, hot, decimals: 6 } } });
+    chains: { eth: { adapter: wrap(createEvmAdapter({ chain: 'eth', rpcUrl: RPC, usdt, decimals: 6, confirmations })), chainId, token: usdt, contract: payout, hot, decimals: 6 } } });
   for (const s of (await svc.allowancePlan('eth', { amount: 5_000 * U, reason: 'qa', code: '000000' })).steps) {
     const o = await svc.allowanceSubmit('eth', { rawHex: s.rawHex, sigHex: sign(s.rawHex, hotKey) });
     await waitReceipt(o.tx_hash);
@@ -190,9 +191,13 @@ test('以太坊打款：A 被挤出交易池后热钱包的 nonce N 被别的交
     await rpc('evm_mine', []);
     await rpc('evm_setAutomine', [true]);
     assert.ok(BigInt(await rpc('eth_getTransactionCount', [t.hot, 'latest'])) > BigInt(A.nonce), '前提：nonce N 已被用掉');
+    // 第一轮（31 分钟）看到"nonce 已用掉、没有回执"先不退回（节点可能落后）；隔至少 5 分钟的第二轮还是这样才退回
     t.clock.skew = 31 * 60_000;
     await t.svc.confirm();
-    assert.equal((await t.statusOf(wid)).status, 'approved', 'nonce N 已被别的交易用掉、A 没有回执：整批回到已审核');
+    assert.equal((await t.statusOf(wid)).status, 'broadcast', '只看到一轮"nonce 已用掉、没有回执"就退回了：要隔至少 5 分钟、两轮都这样才退回');
+    t.clock.skew = 37 * 60_000;
+    await t.svc.confirm();
+    assert.equal((await t.statusOf(wid)).status, 'approved', 'nonce N 已被别的交易用掉、A 没有回执（隔 6 分钟两轮都这样）：整批回到已审核');
     t.clock.skew = 0;
     const B = (await t.svc.plan('eth')).batches;
     assert.equal(B.length, 1, '可以重新凑批');
@@ -202,6 +207,46 @@ test('以太坊打款：A 被挤出交易池后热钱包的 nonce N 被别的交
     assert.equal(await balanceOf(t.usdt, payee), 100n * BigInt(U), '收款人只收到一次 100');
     assert.equal((await t.statusOf(wid)).status, 'completed');
     assert.equal(await rpc('eth_getTransactionReceipt', [sentA.tx_hash]), null, 'A 不会再上链');
+  } finally {
+    await rpc('evm_setAutomine', [true]);
+  }
+});
+
+test('以太坊打款：节点落后（回执、交易状态的请求落到还没看到 A 那个区块的后端）——第一轮"没有回执"、第二轮查到回执 → 不退回，收款人只收一次', { skip, timeout: 180_000 }, async () => {
+  // 安全复核的 PoC：A 其实已经上链（之后又出了 13 个块），但第一轮查回执、交易状态的请求落到落后的后端，看到的是"还在等、没有回执"，
+  // 而查 nonce 的请求落到正常后端（nonce N 已用掉）。只凭这一轮就退回已审核，再凑批就付两次
+  const lag = { on: false };
+  try {
+    const t = await prepare({ confirmations: 12, wrap: (a) => ({ ...a,
+      txStatus: async (h) => (lag.on ? 'pending' : a.txStatus(h)),
+      receipt: async (h) => (lag.on ? null : a.receipt(h)) }) });
+    const payee = t.newPayee();
+    const wid = await t.pay(payee, 100);
+    await rpc('evm_setAutomine', [false]);
+    const A = (await t.svc.plan('eth')).batches[0];
+    const sentA = await t.svc.submit(A.id, { sigHex: sign(A.rawHex, t.hotKey) });
+    for (let i = 0; i < 14; i++) await rpc('evm_mine', []); // A 打包，之后又出 13 个块
+    await rpc('evm_setAutomine', [true]);
+    assert.equal((await waitReceipt(sentA.tx_hash)).status, '0x1', '前提：A 已上链');
+    assert.equal(await balanceOf(t.usdt, payee), 100n * BigInt(U));
+    assert.ok(BigInt(await rpc('eth_getTransactionCount', [t.hot, 'latest'])) > BigInt(A.nonce), '前提：nonce N 已用掉');
+    // 第一轮（31 分钟）：落后的后端说"没有回执"
+    t.clock.skew = 31 * 60_000; lag.on = true;
+    await t.svc.confirm();
+    assert.equal((await t.statusOf(wid)).status, 'broadcast', '只看到一轮"没有回执"就退回了（节点可能落后，A 其实已上链）');
+    // 第二轮（37 分钟）：这次查到了回执 → 按已上链处理
+    t.clock.skew = 37 * 60_000; lag.on = false;
+    await t.svc.confirm();
+    assert.notEqual((await t.statusOf(wid)).status, 'approved', '第二轮查到了回执，这一批不能退回已审核');
+    // 之后再凑批、签名、确认都不该再付
+    t.clock.skew = 0;
+    const p = await t.svc.plan('eth');
+    for (const b of p.batches) { const s2 = await t.svc.submit(b.id, { sigHex: sign(b.rawHex, t.hotKey) }); await waitReceipt(s2.tx_hash); }
+    await t.svc.confirm();
+    assert.equal(await balanceOf(t.usdt, payee), 100n * BigInt(U), '一笔 100 USDT 的打款，收款人链上收到的必须正好是 100（付了两次）');
+    assert.equal((await t.statusOf(wid)).status, 'completed');
+    const led = await t.db.query(`select amount::bigint a from ledger where ref = $1 and type = 'withdraw'`, [wid]);
+    assert.equal(led.length, 1, `账本按这笔扣款应该正好一次，实际 ${led.length} 次`);
   } finally {
     await rpc('evm_setAutomine', [true]);
   }
