@@ -2,7 +2,7 @@
 // 1. 没签名的批次可以作废（单回到已审核）；作废后再交这一批的签名 409；已经交了签名的批次不能作废（409）。
 // 2. 交易原文快过期（出原文后 29 分钟起）再交签名：409 plan_expired，不广播。
 // 3. 广播超时（结果不明）：交易过期前（SIGN_TTL 30 分钟 + 5 分钟余量）一直是已广播、不退回；过期后链上仍查不到才回到已审核，冻结不动。
-//    过期按链上区块时间判断（tron.solidBlock().time 过了原文里的过期时间 60 秒以上、txInfo 仍查不到）；服务器时钟走快了、链上时间还没过期时不退回。
+//    过期按链上区块时间判断（tron.solidBlock().time 过了原文里的过期时间 5 分钟以上、txInfo 仍查不到，隔至少 5 分钟两轮都这样，第一轮记 gone_suspect_at）；服务器时钟走快了、链上时间还没过期时不退回。
 // 4. 已审核、还没凑进批次的单可以驳回：原因必填；退冻结、发回调；已凑进批次的不能驳回（409）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -108,14 +108,21 @@ test('TRON 打款：广播超时（结果不明）时，交易过期前一直不
   await tick();
   assert.equal((await t.row(id)).status, 'broadcast', '交易过期前（30 分钟 + 5 分钟余量内）不退回');
   assert.equal((await t.call('withdraw-plan', { ids: [id] })).status, 409, '过期前不能再凑批');
+  // 过期 5 分钟以上（链上时间）、链上仍查不到：第一轮只记下嫌疑，不退回
   t.advance(6 * MIN);
   await tick();
+  const r1 = (await t.db.query('select status, gone_suspect_at from withdrawals where id = $1', [id]))[0];
+  assert.equal(r1.status, 'broadcast', '第一轮看到"过期、查不到"不退回（要隔 5 分钟再查一轮）');
+  assert.ok(r1.gone_suspect_at, '第一轮记下 gone_suspect_at');
+  // 隔 5 分钟以上的第二轮仍查不到：回到已审核
+  t.advance(5 * MIN + 1000);
+  await tick();
   const r = await t.row(id);
-  assert.equal(r.status, 'approved', '过期后链上仍查不到：回到已审核');
+  assert.equal(r.status, 'approved', '过期后链上仍查不到（两轮）：回到已审核');
   assert.equal((await t.money()).f, frozen, '冻结不动');
 });
 
-test('TRON 打款：服务器时钟走快了（已过期）但链上区块时间还没过交易原文的过期时间 → 不退回；链上时间过了过期时间 60 秒以上、链上仍查不到才回到已审核', async () => {
+test('TRON 打款：服务器时钟走快了（已过期）但链上区块时间还没过交易原文的过期时间 → 不退回；链上时间过了过期时间 5 分钟以上、隔 5 分钟两轮都查不到才回到已审核', async () => {
   const t = await setup();
   const id = await t.newPayout();
   await t.approve(id);
@@ -136,10 +143,14 @@ test('TRON 打款：服务器时钟走快了（已过期）但链上区块时间
   await tick();
   assert.equal((await t.row(id)).status, 'broadcast', '服务器时钟过了期、链上时间还没过：不能退回已审核（原交易还可能上链，再签就付两次）');
   assert.equal((await t.call('withdraw-plan', { ids: [id] })).status, 409, '链上时间还没过期时不能再凑批');
-  // 链上时间也过了过期时间 60 秒以上、链上仍查不到 → 回到已审核，冻结不动
-  chainTime = t.now() + 60_000;
+  // 链上时间也过了过期时间 5 分钟以上、链上仍查不到：第一轮只记嫌疑，不退回
+  t.tron.solidBlock = async () => ({ ...(await solid()), time: t.now() + 60_000 }); // 链上时间追上来，之后跟着测试时钟走
   await tick();
-  assert.equal((await t.row(id)).status, 'approved', '链上时间过了过期时间、链上仍查不到：回到已审核');
+  assert.equal((await t.row(id)).status, 'broadcast', '第一轮不退回');
+  // 隔 5 分钟以上（服务器时钟、链上时间都往后走）的第二轮仍查不到 → 回到已审核，冻结不动
+  t.advance(6 * MIN);
+  await tick();
+  assert.equal((await t.row(id)).status, 'approved', '链上时间过了过期时间、两轮都查不到：回到已审核');
   assert.equal((await t.money()).f, frozen, '冻结不动');
 });
 

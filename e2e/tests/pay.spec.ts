@@ -408,4 +408,44 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
     const walk = (d: string): string[] => readdirSync(d).flatMap((f) => { const p = join(d, f); return statSync(p).isDirectory() ? walk(p) : [p]; });
     for (const f of walk(DATA_PAY)) expect(readFileSync(f).includes(Buffer.from(HOT_KEY))).toBe(false);
   });
+
+  test('TC-P11 TRON 打款签名窗口：交签名返回 duplicate_txid（一批里两笔交易号相同）时，提示"作废这一批、重新凑批"，不是"稍后重试"', async () => {
+    // 商户再提一笔 TRON 代付 → 逐笔审核 → TRON 卡片"核对并签名"；交签名的接口用替身返回 409 duplicate_txid
+    await merchant.click('[data-mtab="withdraw"]');
+    await merchant.locator('input[name="wd-kind"][value="payout"]').check();
+    await merchant.selectOption('#mw-chain', 'tron');
+    await merchant.fill('#mw-pay-to', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'); await merchant.fill('#mw-amt', '5'); await merchant.fill('#mw-cust', 'buyer_dup');
+    await merchant.fill('#mw-code', await code(merchantSecret));
+    await merchant.click('.wd-form button[type="submit"]');
+    await expect(merchant.locator('[data-mpanel="withdraw"] tbody tr').first()).toContainText('buyer_dup'); // 商户页这时可能是英文，按客户编号认这一笔
+    const [w] = await (await admin.request.post(`${B}/__fake/sql/`, { data: { sql: `select id from withdrawals where customer_id = 'buyer_dup' order by created_at desc limit 1` } })).json();
+    const hot = JSON.parse(readFileSync(new URL('../../config/wallets.json', import.meta.url), 'utf8')).local.hot;
+    await fake(admin, 'tron/account', { address: hot, account: { activated: true, trx: 100 * U, trc20: { TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf: 1000 * U } } });
+    await admin.click('[data-tab="p-withdrawals"]');
+    await admin.locator('[data-panel="p-withdrawals"] [data-payout-row]').first().click();
+    await expect(admin.locator('[data-pdialog]')).toContainText('5.00 USDT');
+    await adminOk(admin);
+    await expect(admin.locator('[data-pdialog]')).not.toBeVisible();
+    const dup = /\/api\/wallet\/\?a=sign-submit/;
+    let hit = 0;
+    await admin.route(dup, (route) => { hit++; return route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { code: 'duplicate_txid', message: 'duplicate_txid' } }) }); });
+    await admin.click('[data-panel="p-withdrawals"] [data-payout-sign="tron"]');
+    await expect(admin.locator('[data-pdialog]')).toContainText('✓ 一致');
+    await admin.fill('#ps-code', await code(adminSecret));
+    await admin.fill('#ps-hot', HOT_KEY);
+    await adminOk(admin);
+    await expect.poll(() => hit, { message: '前提：页面交了签名（拿到替身的 duplicate_txid）' }).toBe(1);
+    const msg = admin.locator('[data-toast]');
+    await expect(msg).toContainText('作废');
+    await expect(msg).toContainText('重');
+    await expect(msg).not.toContainText('稍后');
+    await expect(msg).not.toContainText('duplicate_txid');
+    await admin.unroute(dup);
+    await expect(admin.locator('#ps-hot')).toHaveValue(''); // 出错也清空私钥
+    // 收尾：作废这一批、驳回这一笔（退冻结），不影响后面的用例
+    const post = (a: string, body: unknown) => admin.evaluate(async ([a, body]) => (await fetch(`/api/wallet/?a=${a}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-topup-csrf': '1' }, body: JSON.stringify(body) })).status, [a, body] as const);
+    const [pb] = await (await admin.request.post(`${B}/__fake/sql/`, { data: { sql: `select batch_id from withdrawals where id = '${w.id}'` } })).json();
+    if (pb.batch_id) expect(await post('payout-void', { id: pb.batch_id })).toBe(200);
+    expect(await post('payout-reject-approved', { id: w.id, reason: '测试收尾' })).toBe(200);
+  });
 });
