@@ -391,12 +391,19 @@ export async function backfillEmailHash(db, { decrypt, hash }) {
   return n;
 }
 
+/** 建表脚本用的数据库锁（事务级 advisory lock 的编号，任意固定值） */
+export const MIGRATE_LOCK = 7_406_521_001;
+
 /** 执行建表脚本，并记录版本号 */
 export async function migrate(db) {
-  // PGlite 的 query 只接受单条语句，exec 可以执行整段；postgres.js 的 unsafe 可以直接执行多条语句
-  if (db.exec) await db.exec(SCHEMA); else await db.query(SCHEMA);
-  await db.query(`insert into pay_meta (key, value) values ('schema_version', $1::jsonb)
+  const record = (q) => q.query(`insert into pay_meta (key, value) values ('schema_version', $1::jsonb)
     on conflict (key) do update set value = excluded.value, updated_at = now()`, [JSON.stringify(SCHEMA_VERSION)]);
+  // PGlite（本地、单元测试）只有一个进程：exec 执行整段。
+  // 真实 Postgres：web 和 worker 同时启动、同时建表时，两边的 "create table if not exists" 会撞（23505 pg_type_typname_nsp_index），
+  // 失败的一边初始化失败（web 会一直返回 503）。所以在一个事务里先拿锁再建表，后来的等前一个建完；postgres.js 的 unsafe 可以直接执行多条语句
+  if (db.exec) { await db.exec(SCHEMA); await record(db); } else if (db.tx) {
+    await db.tx(async (t) => { await t.query('select pg_advisory_xact_lock($1)', [MIGRATE_LOCK]); await t.query(SCHEMA); await record(t); });
+  } else { await db.query(SCHEMA); await record(db); }
   await repairDoubleEncoded(db);
 }
 

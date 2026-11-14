@@ -1,0 +1,98 @@
+# 服务器上的 Docker Compose（测试环境；生产换服务器后沿用）。由 deploy/kit/topup.sh 调用，不要手动 docker compose up。
+# 变量来自两个文件（都在服务器的部署目录，权限 600，不进仓库）：
+#   deploy.env：部署用的设置（域名、内部口令、备份），topup.sh install 生成
+#   .env：应用的设置（邮件、节点、发起账户私钥等），web、worker 读取；密钥用 sudo topup set-key 填
+#   state/image.env：当前运行的版本（IMAGE_TAG = 提交号），由 topup.sh 写
+# 内存上限按"总账"算（deploy/README.md 第 3 节）：每个容器 mem_limit = memswap_limit，不用交换分区，超了就被杀掉重启。
+name: topup
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "20m", max-file: "3" }
+
+x-app: &app
+  image: ${TOPUP_IMAGE:?}:${IMAGE_TAG:?}
+  env_file: ["${TOPUP_DIR:?}/.env"]
+  # 这几项由部署决定，覆盖 .env 里同名的值（.env 写错了也不影响）
+  environment:
+    APP_ENV: ${TOPUP_ENV:?}
+    PUBLIC_URL: https://${DOMAIN:?}
+    DATABASE_URL: postgres://topup:${POSTGRES_PASSWORD:?}@postgres:5432/topup
+    REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379/0
+    BLOB_DIR: /data/blobs
+    # 在 Nginx 后面：访客 IP 取 Nginx 写入的 X-Real-IP（Nginx 用 $remote_addr 覆盖，访客自己带的不算）
+    TRUST_PROXY: "1"
+    HOST: 0.0.0.0
+    PORT: "8080"
+    NODE_OPTIONS: --max-old-space-size=160
+  volumes: ["${TOPUP_DIR:?}/data/blobs:/data/blobs"]
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+  restart: unless-stopped
+  mem_limit: 288m
+  memswap_limit: 288m
+  logging: *logging
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: topup
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: topup
+    # 小内存设置：共享缓冲 64 MB、最多 30 个连接
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "work_mem=4MB", "-c", "maintenance_work_mem=32MB",
+      "-c", "effective_cache_size=192MB", "-c", "max_connections=30"]
+    volumes: ["${TOPUP_DIR:?}/data/postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U topup -d topup"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: 320m
+    memswap_limit: 320m
+    shm_size: 64m
+    logging: *logging
+
+  redis:
+    image: redis:7
+    # 开户资料和管理员会话在 Redis 里：写满时报错，不淘汰数据（noeviction）；AOF 持久化
+    command: ["sh", "-c", "exec redis-server --appendonly yes --maxmemory 64mb --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+    volumes: ["${TOPUP_DIR:?}/data/redis:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: 96m
+    memswap_limit: 96m
+    logging: *logging
+
+  web:
+    <<: *app
+    # 只给本机的部署脚本看健康检查；对外只经过 Nginx
+    ports: ["127.0.0.1:18080:8080"]
+
+  worker:
+    <<: *app
+    command: ["node", "server/worker.js"]
+
+  nginx:
+    image: nginx:1.27-alpine
+    environment:
+      DOMAIN: ${DOMAIN:?}
+      CERT_NAME: ${CERT_NAME:-topup}
+    volumes:
+      - "${TOPUP_DIR:?}/deploy/nginx:/etc/nginx/templates:ro"
+      - "${LE_DIR:-/etc/letsencrypt}:/etc/letsencrypt:ro"
+      - "${WEBROOT_DIR:-/var/www/certbot}:/var/www/certbot:ro"
+    ports: ["80:80", "443:443"]
+    restart: unless-stopped
+    mem_limit: 48m
+    memswap_limit: 48m
+    logging: *logging

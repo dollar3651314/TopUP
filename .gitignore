@@ -14,3 +14,4 @@ contracts/cache-tron-forge/
 contracts/out-payout/
 contracts/cache-payout/
 contracts/lcov-payout.info
+testnet-deploy/

@@ -23,6 +23,7 @@
       "package.json",
       "Dockerfile",
       "docker-compose.yml",
+      "deploy/**",
       ".dockerignore",
       ".env.example",
       "项目索引.config.json",
