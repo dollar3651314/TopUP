@@ -53,7 +53,8 @@ function sources() {
   add(join(CONTRACTS, 'lib', 'openzeppelin-contracts', 'contracts'), '@openzeppelin/contracts/');
   s['tron-nile/NileProbe.sol'] = { content: readFileSync(join(CONTRACTS, 'script', 'tron-nile', 'NileProbe.sol'), 'utf8') };
   // TRON 派生版：按仓库里的相对路径放（SweepBatcherTron 用 ../SweepBatcher.sol 引用以太坊版里的接口）
-  for (const f of ['src/SweepBatcher.sol', 'src/tron/ForwarderTron.sol', 'src/tron/ForwarderFactoryTron.sol', 'src/tron/SweepBatcherTron.sol', 'test-tron/TronMocks.sol']) {
+  // 测试网部署（scripts/testnet/deploy.mjs）另编测试 USDT（script/testnet/TestUSDT.sol）
+  for (const f of ['src/SweepBatcher.sol', 'src/tron/ForwarderTron.sol', 'src/tron/ForwarderFactoryTron.sol', 'src/tron/SweepBatcherTron.sol', 'test-tron/TronMocks.sol', 'script/testnet/TestUSDT.sol']) {
     s[f] = { content: readFileSync(join(CONTRACTS, ...f.split('/')), 'utf8') };
   }
   return s;
@@ -68,6 +69,7 @@ const WANT = {
   ForwarderFactoryTron: 'src/tron/ForwarderFactoryTron.sol',
   SweepBatcherTron: 'src/tron/SweepBatcherTron.sol',
   TronUsdtMock: 'test-tron/TronMocks.sol',
+  TestUSDT: 'script/testnet/TestUSDT.sol',
 };
 
 /** 编译，返回 { compiler, artifacts: { 名字: { abi, bytecode, bytecodeSha256 } } } */

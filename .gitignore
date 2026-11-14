@@ -11,3 +11,4 @@ contracts/cache/
 contracts/out-tron/
 contracts/out-tron-forge/
 contracts/cache-tron-forge/
+testnet-deploy/
