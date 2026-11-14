@@ -16,7 +16,7 @@ const TRON_TYPICAL_BATCH_ENERGY = 1_300_000; // 一批 20 个地址的典型能�
 const usdt = (u) => fmtUsdt(Number(u)).replace(/,/g, '');
 /** 原生币最小单位 → 小数字符串：ETH、BNB 18 位（wei），TRX 6 位（sun） */
 const NATIVE_DECIMALS = { eth: 18, bsc: 18, tron: 6 };
-const native = (wei, chain = 'eth') => {
+export const native = (wei, chain = 'eth') => {
   if (wei === null || wei === undefined || wei === '') return null;
   const w = BigInt(wei), d = NATIVE_DECIMALS[chain] ?? 18, u = 10n ** BigInt(d);
   const int = w / u, frac = (w % u).toString().padStart(d, '0').slice(0, 6).replace(/0+$/, '');

@@ -555,11 +555,15 @@ render['payout-batch'] = async (p) => {
       pb.done ? h('div', { class: 'info-box', 'data-mb-done': '' }, tpl(cp.submitted, { n: pb.done.n, no: pb.done.no }), pb.done.late ? h('b', { class: 'block' }, ` ${cp.late}`) : null) : null);
   } else if (pb.step === 2 && pb.check) {
     const k = pb.check;
-    const warn = k.rows.filter((r) => r.ok && r.warnings.length).length;
+    // 超过平台单笔上限的行：格式没问题、会提交，但会被驳回，所以不算"没问题"，单独数
+    const isOver = (r: PbRow) => r.ok && r.warnings.includes('over_per_item_limit');
+    const over = k.rows.filter(isOver);
+    const warn = k.rows.filter((r) => r.ok && r.warnings.length && !isOver(r)).length;
+    const limit = k.per_item_limit ? fmtUsdt(parseUsdt(k.per_item_limit) ?? 0) : '';
     const msg = (r: PbRow) => {
       if (r.ok && !r.warnings.length) return h('span', { class: 'ok' }, `✓ ${cp.ok}`);
       const parts = r.errors.map((e) => e === 'invalid_amount' && /\.\d{7,}/.test(r.amount_text) ? cp.err.decimals : tpl((cp.err as Record<string, string>)[e] || e, { net: netName(r.chain) }));
-      return h('span', { class: `${r.ok ? 'warn' : 'bad'} cell-wrap` }, ...(r.ok ? r.warnings.map((w) => `! ${tpl((cp.err as Record<string, string>)[w] || w, { limit: k.per_item_limit ?? '' })}`) : parts.map((x) => `× ${x}`)));
+      return h('span', { class: `${r.ok ? 'warn' : 'bad'} cell-wrap` }, ...(r.ok ? r.warnings.map((w) => `! ${tpl((cp.err as Record<string, string>)[w] || w, { limit })}`) : parts.map((x) => `× ${x}`)));
     };
     const only = h('input', { type: 'checkbox', id: 'mb-only-valid', checked: pb.onlyValid }) as HTMLInputElement;
     only.addEventListener('change', () => { pb.onlyValid = only.checked; note.hidden = true; });
@@ -569,13 +573,13 @@ render['payout-batch'] = async (p) => {
       pb.step = 3; render['payout-batch'](p);
     } }, cp.next);
     body = h('div', { class: 'card stack', 'data-mb-step': '2' },
-      h('p', { class: 'm0' }, h('b', {}, tpl(cp.summary, { n: k.rows.length, ok: k.ok_count, bad: k.bad_count, warn })), ' ', h('span', { class: 'muted' }, cp.summaryNote)),
+      h('p', { class: 'm0' }, h('b', {}, over.length ? tpl(cp.summaryOver, { n: k.rows.length, ok: k.ok_count - over.length, over: over.length, bad: k.bad_count, warn }) : tpl(cp.summary, { n: k.rows.length, ok: k.ok_count, bad: k.bad_count, warn })), ' ', h('span', { class: 'muted' }, cp.summaryNote)),
       // 超过平台单笔上限的行：表格上方再写一句（手机上表格要横着滑，这一句不用滑就能看到）
-      (() => { const over = k.rows.filter((r) => r.ok && r.warnings.includes('over_per_item_limit')); return over.length ? h('p', { class: 'warn-box m0', 'data-mb-over': '' }, tpl(cp.err.over_rows, { lines: over.map((r) => r.line + 1).join(lang === 'en' ? ', ' : '、'), limit: k.per_item_limit ?? '' })) : null; })(),
-      table([cp.cols.line, cp.cols.chain, cp.cols.to, cp.cols.amount, cp.cols.check], k.rows.map((r) => [tpl(cp.lineNo, { n: r.line + 1 }), CHAINS.includes(r.chain as any) ? netName(r.chain) : r.chain || '—', mono(shortAddr(r.to || '—'), r.to), r.amount_text, msg(r)]), c.common.none,
+      over.length ? h('p', { class: 'warn-box m0', 'data-mb-over': '' }, tpl(cp.err.over_rows, { lines: over.map((r) => r.line + 1).join(lang === 'en' ? ', ' : '、'), limit })) : null,
+      table([cp.cols.line, cp.cols.chain, cp.cols.to, cp.cols.amount, cp.cols.check], k.rows.map((r) => [tpl(cp.lineNo, { n: r.line + 1 }), CHAINS.includes(r.chain as any) ? netName(r.chain) : r.chain || '—', mono(shortAddr(r.to || '—'), r.to), r.errors.includes('invalid_amount') ? r.amount_text : usd(r.amount), msg(r)]), c.common.none,
         { rowAttrs: (i) => ({ 'data-row-line': String(k.rows[i].line), class: !k.rows[i].ok ? 'row-bad' : k.rows[i].warnings.length ? 'row-warn' : '' }), page: { size: 100, more: (n) => tpl(c.common.more, { n }) } }),
       h('p', { class: 'hint muted m0' }, cp.lineNote),
-      k.bad_count ? h('label', { class: 'check-row' }, only, tpl(cp.onlyValid, { n: k.ok_count })) : null, note,
+      k.bad_count ? h('label', { class: 'check-row' }, only, over.length ? tpl(cp.onlyValidOver, { n: k.ok_count, over: over.length }) : tpl(cp.onlyValid, { n: k.ok_count })) : null, note,
       h('div', { class: 'row-actions spread' }, resetBtn, next));
   } else {
     const k = pb.check!;

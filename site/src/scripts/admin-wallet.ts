@@ -52,7 +52,7 @@ const ITEM_REASON: Record<string, string> = {
   expired: '待确认超过 24 小时作废', cancelled: '你选了不归集这批', sweep_failed: '合约里这个地址归集失败',
 };
 /** 发起账户手续费币的说明（够几批） */
-const gasText = (o: any) => !o?.configured ? '没配置（不能执行归集）' : o.gas === null ? '暂时查不到（节点没响应）' : `${o.gas} ${o.symbol}${o.batches_left !== null && o.batches_left !== undefined ? `（够约 ${o.batches_left} 批）` : ''}`;
+export const gasText = (o: any) => !o?.configured ? '没配置（不能执行归集）' : o.gas === null ? '暂时查不到（节点没响应）' : `${o.gas} ${o.symbol}${o.batches_left !== null && o.batches_left !== undefined ? `（够约 ${o.batches_left} 批）` : ''}`;
 /** 第 1 批没有币价来源：手续费占比规则暂不检查 */
 export const NO_PRICE_TEXT = '现在没有币价来源，本批暂不按占比检查';
 

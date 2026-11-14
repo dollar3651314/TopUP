@@ -5,7 +5,7 @@ import wallets from '../../../config/wallets.json';
 import { checkPayoutTx, checkApproveTx, decodeUnsignedLegacyTx, decodePayCall, signUnsigned, addressOfKeyBytes } from '../../../server/wallet/evm-payout-codec.js';
 import { fmtUsdt, parseUsdt, shortAddr } from '../lib/money';
 import { copyBtn, field, fieldErr, fmtTime, h, mono, secretInput, status, table } from './ui';
-import { CHAIN_NAME, STD, chainTag, hero, type WalletUi } from './admin-wallet';
+import { CHAIN_NAME, STD, chainTag, gasText, hero, type WalletUi } from './admin-wallet';
 
 const root = document.getElementById('admin-root')!;
 const ENV = (root.dataset.walletEnv || 'local') as 'production' | 'staging' | 'local';
@@ -16,6 +16,12 @@ const CHAIN_ID: Record<string, Record<string, number>> = { production: { eth: 1,
 const MAX_FEE_WEI: Record<string, bigint> = { eth: 2n * 10n ** 17n, bsc: 5n * 10n ** 16n };
 const DECIMALS: Record<string, number> = { eth: 6, bsc: 18 };
 const NATIVE: Record<string, string> = { eth: 'ETH', bsc: 'BNB' };
+/** 区块浏览器：测试环境用测试网（Sepolia、BSC 测试网），生产用主网；本地没有 */
+const EXPLORER: Record<string, Record<string, string>> = { production: { eth: 'https://etherscan.io', bsc: 'https://bscscan.com' }, staging: { eth: 'https://sepolia.etherscan.io', bsc: 'https://testnet.bscscan.com' } };
+const explorerLink = (chain: string, kind: 'address' | 'tx', v: string, text: string) => {
+  const base = EXPLORER[ENV]?.[chain];
+  return base && v ? h('a', { href: `${base}/${kind}/${v}`, target: '_blank', rel: 'noopener noreferrer', 'data-explorer': kind }, `${text} ↗`) : null;
+};
 const t = (iso?: string | null) => (iso ? fmtTime(iso, 'zh') : '—');
 const u = (v: unknown) => parseUsdt(String(v ?? '0')) ?? 0;
 const usd = (v: unknown) => fmtUsdt(u(v));
@@ -103,7 +109,7 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
     h('h2', { class: 'h-sm' }, `等你审（${r.pending_count} 笔）`), h('p', { class: 'hint muted m0' }, '按等了多久排，最早的在最上面；超 30 分钟标橙、超 1 小时标红。'), pend,
     h('h2', { class: 'h-sm' }, '已审核待签名（按链凑批）'), h('div', { class: 'plan-grid' }, ...cards),
     h('p', { class: 'hint muted' }, '签名在你的浏览器里做：页面先把要签的交易解码，逐笔和审核通过的收款人、金额对一遍，对不上就不签；热钱包私钥只在页面内存里用一次，不上服务器。'),
-    h('details', { class: 'card', 'data-approved-list': '', ...(held ? { open: true } : {}) }, h('summary', {}, `已审核待凑批的单（${appr.length} 笔${held ? `，其中 ${held} 笔已挂起` : ''}）· 可以在这里驳回`), approvedT),
+    h('details', { class: 'card', 'data-approved-list': '', ...(held ? { open: true } : {}) }, h('summary', {}, `已审核待凑批的单（${appr.length} 笔${held ? `，其中 ${held} 笔已挂起` : ''}）· 点一行可${held ? '解除挂起或' : ''}驳回`), approvedT),
     h('h2', { class: 'h-sm' }, '签名批次'), recs,
     h('h2', { class: 'h-sm' }, '上限（后台可改：原因 + 动态码 + 审计）'), limits,
   );
@@ -111,10 +117,10 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
 
 function batchState(b: any): HTMLElement {
   const box = h('span', { class: 'cell-2 cell-start' });
-  const ST: Record<string, [string, string]> = { planned: ['submitted', '没签完（等签名）'], broadcast: ['in', b.rebroadcast_at ? '还没上链，已重发' : '链上确认中'], confirmed: ['approved', '已完成'], partial: ['needs_info', '部分成功'], failed: ['bad', b.chain === 'tron' ? '失败' : '整批回滚'], expired: ['expired', '没签名，已作废'] };
+  const ST: Record<string, [string, string]> = { planned: ['submitted', '没签完（等签名）'], broadcast: ['in', b.rebroadcast_at ? '还没上链，已重发' : '链上确认中'], confirmed: ['approved', '已完成'], partial: ['needs_info', '部分成功'], failed: ['bad', b.chain === 'tron' ? '失败' : b.error === 'dropped' ? '没上链' : b.error === 'void_confirmed' ? '已确认作废' : '整批回滚'], expired: ['expired', '没签名，已作废'] };
   const [cls, text] = ST[b.status] || ['submitted', b.status];
   box.append(status(cls, text));
-  if (b.status === 'failed' && b.chain !== 'tron') box.append(h('span', { class: 'hint muted' }, b.error === 'void_confirmed' ? '管理员确认作废：每笔回到已审核，可以重新凑批签名；商户余额没动' : b.error === 'dropped' ? '没上链（nonce 已被别的交易用掉）：每笔回到已审核，可以重新凑批签名；商户余额没动' : '整批回滚：每笔回到已审核，可以重新凑批签名；商户余额没动'));
+  if (b.status === 'failed' && b.chain !== 'tron') box.append(h('span', { class: 'hint muted' }, b.error === 'void_confirmed' ? '管理员核对后确认作废：每笔回到已审核，可以重新凑批签名；商户余额没动' : b.error === 'dropped' ? '热钱包的这个 nonce 已被别的交易用掉，这笔没上链：每笔回到已审核，可以重新凑批签名；商户余额没动' : '交易在链上失败、整批回滚：每笔回到已审核，可以重新凑批签名；商户余额没动'));
   if (b.status === 'partial') box.append(h('span', { class: 'hint muted' }, `${b.ok} 笔成功，失败的 ${b.failed} 笔回到已审核待签名`));
   if (b.status === 'planned') box.append(h('span', { class: 'hint muted' }, '这批的单都锁在里面：点开继续签名，或作废重凑'));
   if (b.status === 'broadcast' && b.stuck_since) box.append(h('span', { class: 'hint muted' }, 'nonce 已被用掉、节点还认得这笔：超过 1 小时没结论会发邮件，核对后可以"确认作废"'));
@@ -148,7 +154,10 @@ function planCard(ui: WalletUi, c: any, legacyTron: TronSign, planned: any[] = [
   // TRON 自动拆批：这一批签几笔、剩几笔留到下一轮
   const split = !evm && c.batch_count && c.left_count > 0;
   const label = !c.approved_count ? '没有要签的' : split ? `核对并签名这一批 ${c.batch_count} 笔` : `核对并签名这 ${c.approved_count} 笔`;
-  const sign = h('button', { type: 'button', class: 'btn btn-primary', 'data-payout-sign': c.chain, disabled, onclick: () => (evm ? signEvm(ui, c.chain) : legacyTron([])) }, label) as HTMLButtonElement;
+  // 点签名后凑不出批、钱或额度不够这类提示写在卡片里（右下角的浮层在 1280 宽会盖住签名按钮）
+  const signMsg = h('div', { 'data-plan-msg': c.chain, 'aria-live': 'polite' }, planMsg[c.chain] ? h('p', { class: 'alert m0' }, planMsg[c.chain]) : null);
+  delete planMsg[c.chain];
+  const sign = h('button', { type: 'button', class: 'btn btn-primary', 'data-payout-sign': c.chain, disabled, onclick: () => (evm ? signEvm(ui, c.chain, signMsg) : legacyTron([])) }, label) as HTMLButtonElement;
   return h('article', { class: 'card stack-sm plan-card', 'data-payout-plan': c.chain },
     h('div', { class: 'batch-head' }, chainTag(c.chain), h('span', { class: 'muted' }, `${c.approved_count} 笔已审核`)),
     h('div', { class: 'batch-amt' }, usd(c.approved_total), h('small', {}, ' USDT')),
@@ -165,7 +174,7 @@ function planCard(ui: WalletUi, c: any, legacyTron: TronSign, planned: any[] = [
     planned.length ? h('div', { class: 'warn-box stack-sm', 'data-plan-unsigned': c.chain }, h('span', {}, `有 ${planned.length} 批凑好了还没签（${planned.reduce((a, b) => a + b.count, 0)} 笔，${fmtUsdt(planned.reduce((a, b) => a + u(b.total), 0))} USDT），这些单锁在批次里。`),
       h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn btn-primary btn-sm', 'data-batch-resume': planned[0].id, onclick: () => resumeBatch(ui, planned[0], legacyTron) }, '继续签名'),
         h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-batch-void': planned[0].id, onclick: () => voidBatch(ui, planned[0]) }, '作废重凑'))) : null,
-    sign);
+    signMsg, sign);
 }
 
 function batchDetail(ui: WalletUi, b: any, legacyTron: TronSign) {
@@ -173,9 +182,14 @@ function batchDetail(ui: WalletUi, b: any, legacyTron: TronSign) {
     const acts = d.voidable ? h('div', { class: 'row-actions' },
       d.resumable ? h('button', { type: 'button', class: 'btn btn-primary btn-sm', 'data-batch-resume': d.id, onclick: () => resumeBatch(ui, d, legacyTron) }, '继续签名') : null,
       h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-batch-void': d.id, onclick: () => voidBatch(ui, d) }, '作废重凑'),
-      d.resumable ? null : h('span', { class: 'hint muted' }, '交易原文快过期了，只能作废重凑')) : d.chain !== 'tron' && d.status === 'broadcast' && (d.stuck_since || d.rebroadcast_at)
+      d.resumable ? null : h('span', { class: 'hint muted' }, '交易原文快过期了，只能作废重凑')) : d.chain !== 'tron' && d.status === 'broadcast' && d.stuck_since
       ? h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-void-confirmed': d.id, onclick: () => voidConfirmed(ui, d) }, '确认作废'),
-        h('span', { class: 'hint muted' }, '只在热钱包这个 nonce 已被别的交易用掉、这笔没有回执时能用')) : null;
+        h('span', { class: 'hint muted' }, '只在热钱包这个 nonce 已被别的交易用掉、这笔没有回执时能用'))
+      // 还没上链、已重发（nonce 还没被用掉）：这笔随时可能上链，不能作废——按钮灰掉并写原因
+      : d.chain !== 'tron' && d.status === 'broadcast' && d.rebroadcast_at
+        ? h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-void-confirmed': d.id, disabled: true, 'aria-describedby': `vc-why-${d.id}` }, '确认作废'),
+          h('span', { class: 'hint muted', id: `vc-why-${d.id}`, 'data-void-why': '' }, '现在不能作废：热钱包的这个 nonce 还没被用掉，这笔随时可能上链，系统在用原来签好的交易重发'))
+        : null;
     ui.dialog(`签名批次 ${b.id}`, h('div', { class: 'stack' }, kv([['链', chainTag(d.chain)], ['状态', batchState(d)], ['交易', d.tx_hash ? mono(d.tx_hash) : '—']]), acts,
       table(['单号', '商户', '收款地址', '金额', '状态'], d.withdrawals.map((w: any) => [mono(w.id), w.merchant, mono(shortAddr(w.to), w.to), usd(w.amount),
         h('span', { class: w.hold ? 'bad' : '' }, `${WST[w.status] || w.status}${w.hold ? `，已挂起：${HOLD[w.hold] || w.hold}` : ''}${w.reason ? ` · ${w.reason}` : ''}`)]), '—')), '关闭', null, false, true);
@@ -191,8 +205,14 @@ async function resumeBatch(ui: WalletUi, b: any, legacyTron: TronSign) {
 function voidConfirmed(ui: WalletUi, b: any) {
   const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' }) as HTMLInputElement;
   const msg = h('div');
+  const hot = EVM_RULES[b.chain]?.hot || '';
+  const hotLink = explorerLink(b.chain, 'address', hot, '在区块浏览器看热钱包的交易');
+  const txLink = explorerLink(b.chain, 'tx', b.tx_hash || '', '在区块浏览器看这笔交易');
   ui.dialog(`确认作废 ${b.id}`, h('div', { class: 'stack' },
-    h('p', { class: 'warn-box m0' }, `先在区块浏览器上核对：热钱包的这个 nonce 上链的是别的交易（例如你签的作废交易），不是 ${b.tx_hash ? shortAddr(b.tx_hash) : '这笔'}。确认后这一批 ${b.count} 笔回到"已审核"，可以重新凑批签名。`),
+    kv([['链', chainTag(b.chain)], ['热钱包', hot ? h('span', { class: 'copy-row' }, mono(hot), copyBtn(() => hot, '复制', '已复制', 'link-copy')) : '（没有配置）'],
+      ['nonce', h('b', { 'data-void-nonce': '' }, b.nonce ?? '—')], ['我们这笔交易', b.tx_hash ? mono(b.tx_hash) : '—']]),
+    hotLink || txLink ? h('div', { class: 'row-actions', 'data-void-links': '' }, hotLink, txLink) : h('p', { class: 'hint muted m0' }, '本地环境没有区块浏览器。'),
+    h('p', { class: 'warn-box m0' }, `先在区块浏览器上核对：热钱包 nonce ${b.nonce ?? '—'} 上链的是别的交易（例如你签的作废交易），不是 ${b.tx_hash ? shortAddr(b.tx_hash) : '这笔'}。确认后这一批 ${b.count} 笔回到"已审核"，可以重新凑批签名。`),
     field('vc-code', '验证器动态码（6 位）', code), msg), '确认作废', async () => {
     if (fieldErr(code, /^\d{6}$/.test(code.value.trim()) ? null : '请输入 6 位动态码')) return false;
     try { await ui.call('payout-void-confirmed', { id: b.id, code: code.value.trim() }); }
@@ -314,10 +334,14 @@ function editLimits(ui: WalletUi, L: any) {
 
 // ---------- 签名四步（以太坊、BSC） ----------
 const SIGN_STEPS = ['核对每一笔', '动态码 + 热钱包私钥', '签名并提交', '链上确认'];
-async function signEvm(ui: WalletUi, chain: string) {
+/** 凑批后要重画页面时，留到新卡片里显示的提示（按链） */
+const planMsg: Record<string, string> = {};
+async function signEvm(ui: WalletUi, chain: string, box?: HTMLElement) {
+  const tell = (m: string) => { if (box) box.replaceChildren(h('p', { class: 'alert m0' }, m)); else ui.say(m); };
+  box?.replaceChildren();
   let plan: any;
-  try { plan = await ui.call('payout-plan', { chain }); } catch (e) { ui.say(errOf(ui, e)); return; }
-  if (!plan.batches.length) { ui.say(plan.held.length ? `这次凑不出批：${HELD[plan.held[0].reason] || plan.held[0].reason}` : '没有要签的'); ui.rerender(); return; }
+  try { plan = await ui.call('payout-plan', { chain }); } catch (e) { tell(errOf(ui, e)); return; }
+  if (!plan.batches.length) { const m = plan.held.length ? `这次凑不出批：${HELD[plan.held[0].reason] || plan.held[0].reason}` : '没有要签的'; if (box) planMsg[chain] = m; else ui.say(m); ui.rerender(); return; }
   signBatch(ui, chain, plan, 0);
 }
 function signBatch(ui: WalletUi, chain: string, plan: any, idx: number) {
@@ -392,7 +416,7 @@ function signBatch(ui: WalletUi, chain: string, plan: any, idx: number) {
         // 链上确认后完成：关掉弹窗（还有下一批时留着让你接着签）
         // 链上确认后：窗口里写"✓ 已提交，N 笔都付出了"，停 3 秒再关（还有下一批时留着让你接着签）
         if (d.status === 'confirmed') { state.textContent = `✓ 已提交，${d.count} 笔都付出了`; state.className = 'ok m0'; ui.say(`${b.id} 已完成：${d.count} 笔都付出了`); ui.rerender(); if (!more) setTimeout(() => { if (body4.isConnected && dlg.open) dlg.close(); }, 3000); return; }
-        if (d.status === 'failed') { state.textContent = d.error === 'dropped' ? '没上链：热钱包的这个 nonce 已被别的交易用掉，每笔回到已审核，商户余额没动，可以重新凑批签名' : '整批回滚：交易在链上失败，每笔回到已审核，商户余额没动，可以重新凑批签名'; state.className = 'alert m0'; ui.rerender(); return; }
+        if (d.status === 'failed') { state.textContent = d.error === 'dropped' ? '没上链：热钱包的这个 nonce 已被别的交易用掉，每笔回到已审核，商户余额没动，可以重新凑批签名' : d.error === 'void_confirmed' ? '已确认作废：每笔回到已审核，商户余额没动，可以重新凑批签名' : '整批回滚：交易在链上失败，每笔回到已审核，商户余额没动，可以重新凑批签名'; state.className = 'alert m0'; ui.rerender(); return; }
         if (d.rebroadcast_at) state.textContent = '30 分钟还没上链：为了不付两次不会退回，系统已用原来签好的交易重发（通常是网络费出低了，等网络费回落）。';
       } catch { /* 稍后再查 */ }
       setTimeout(poll, 3000);
@@ -403,7 +427,10 @@ function signBatch(ui: WalletUi, chain: string, plan: any, idx: number) {
 
 // ============ 钱包设置（P4：每条链一张卡） ============
 export async function renderWalletCards(ui: WalletUi, p: HTMLElement, legacy: { initialized: boolean; xpub_fingerprint?: string; customers: number }) {
-  const r = await ui.call('payout-wallets');
+  // 发起账户的手续费币（够约 N 批）在"系统状态"那份数据里；读不到不影响这一页
+  const [r, ch] = await Promise.all([ui.call('payout-wallets'), ui.call('wallet-chains').catch(() => null)]);
+  const opOf = (chain: string) => (ch?.chains || []).find((x: any) => x.chain === chain)?.operator || null;
+  const SYM: Record<string, string> = { eth: 'ETH', bsc: 'BNB', tron: 'TRX' };
   const addr = (a: string | null, none = '没有配置（config/wallets.json）') => (a ? h('span', { class: 'copy-row' }, mono(a), copyBtn(() => a, '复制', '已复制', 'link-copy')) : h('span', { class: 'muted' }, none));
   const sec = (title: string, note: string, ...kids: (Node | string | null)[]) => h('div', { class: 'wl-sec' }, h('div', {}, h('b', {}, title), ' ', h('span', { class: 'hint muted' }, note)), ...kids);
   const meter = (v: unknown, max: unknown) => h('meter', { class: 'meter-row', min: '0', max: String(u(max) || 1), value: String(u(v)) });
@@ -411,23 +438,53 @@ export async function renderWalletCards(ui: WalletUi, p: HTMLElement, legacy: { 
     const evm = c.chain !== 'tron';
     return h('article', { class: 'card stack-sm wallet-card', 'data-wallet-card': c.chain },
       h('div', { class: 'batch-head' }, h('h2', { class: 'h-sm m0' }, `${CHAIN_NAME[c.chain]}（${STD[c.chain]}）`), c.onchain === 'ok' ? status('approved', '链上核对一致') : c.onchain === 'mismatch' ? status('bad', '链上核对不一致（已停用）') : c.enabled ? status('submitted', '还没核对上') : status('expired', '没开通')),
-      sec('冷钱包', '多签，归集只能进这里（写死在合约里）', addr(c.cold)),
+      sec('冷钱包', '多签，归集只能进这里（写死在合约里）', addr(c.cold),
+        c.cold && c.cold_balance !== undefined ? h('span', { 'data-cold-balance': c.chain }, c.cold_balance === null ? 'USDT 暂时查不到（节点没响应）' : `USDT ${usd(c.cold_balance)}`) : null),
       sec('热钱包', '打款从这里付，只放小额；私钥不上服务器', addr(c.hot), c.hot_balance !== null ? h('span', { class: c.low ? 'bad' : '' }, `USDT ${usd(c.hot_balance)} / 上限 ${usd(c.hot_max)}${c.low ? `（低于 ${usd(c.hot_low)}，请补款）` : ''}`) : null,
         c.hot_balance !== null && u(c.hot_balance) > u(c.hot_max) ? h('p', { class: 'warn-box m0', 'data-hot-over': c.chain }, `热钱包超过上限 ${fmtUsdt(u(c.hot_balance) - u(c.hot_max))} USDT：热钱包只放小额，请把多出来的转回冷钱包。`) : null,
+        c.hot && c.hot_gas !== undefined ? h('span', { class: 'hint muted', 'data-hot-gas': c.chain }, `手续费币 ${c.hot_gas === null ? '暂时查不到' : `${c.hot_gas} ${SYM[c.chain]}`}${evm ? '（签打款、改额度的网络费从这里付）' : '（打款直接烧 TRX）'}`) : null,
         c.hot_balance !== null ? meter(c.hot_balance, c.hot_max) : null),
       evm ? sec('授权额度', '热钱包允许批量打款合约（BatchPayout）动用的上限', h('span', { 'data-allowance': c.chain }, c.allowance === null ? (c.payout_enabled ? '—' : '没开通批量打款') : `${usd(c.allowance)} / ${usd(c.hot_max)}`),
         c.payout_enabled ? h('div', {}, h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-allowance-edit': c.chain, onclick: () => editAllowance(ui, c) }, '改额度')) : null,
         h('span', { class: 'hint muted' }, c.chain === 'eth' ? '以太坊 USDT 改额度要两笔：先归零，再设新值' : '改额度一笔')) : sec('授权额度', '', h('span', { class: 'muted' }, '不用授权：TRON 打款不走合约，是 N 笔普通转账')),
-      sec('发起账户', '只付手续费，钱只能进冷钱包（服务器上）', addr(c.operator, '没有配置')),
+      sec('发起账户', '只付手续费，钱只能进冷钱包（服务器上）', addr(c.operator, '没有配置'),
+        c.operator && opOf(c.chain)?.configured ? h('span', { class: opOf(c.chain).low ? 'bad' : '', 'data-operator-gas': c.chain }, gasText(opOf(c.chain))) : null),
       sec('合约', '', h('span', {}, evm ? `转发合约工厂、批量归集合约（SweepBatcher）：${c.contracts_configured ? '已配置 ✓' : '没配置'}；批量打款合约（BatchPayout）：${c.payout ? '已配置 ✓' : '没配置'}` : `TRON 版工厂、批量归集合约：${c.contracts_configured ? '已配置 ✓' : '没配置（第 2 批合约上线后开通）'}`)),
       evm ? null : sec('租能量', '', h('span', {}, `${c.rental ? 'TronSave 已配置（只用于归集），预存余额和每一单在"系统状态"' : '没配置 TronSave：归集时直接烧 TRX'}；打款不租能量，直接烧 TRX`)),
       evm ? null : h('div', { class: 'wl-sec', 'data-legacy-addresses': '' }, h('b', {}, '旧地址（第 0 批）'),
         h('span', {}, `${c.legacy_addresses} 个旧 TRON 地址，照常入账、照常归集。`, legacy.initialized ? ` 主助记词已初始化（公钥末 8 位 ${legacy.xpub_fingerprint}）。` : '')));
   });
+  // 顶部待处理：没配置 → 核对不一致 → 热钱包低于提醒线 → 发起账户手续费不够 → 授权额度低于 30% → 热钱包超上限；都没有写"现在没事要做"
+  const cs = r.cards as any[];
+  const evmOn = cs.filter((c) => c.chain !== 'tron' && c.payout_enabled);
+  const lowAl = evmOn.find((c) => c.allowance !== null && u(c.allowance) < u(c.hot_max) * 0.3);
+  const lowOp = cs.find((c) => opOf(c.chain)?.low);
+  const lowHot = cs.find((c) => c.low);
+  const overHot = cs.find((c) => c.hot_balance !== null && u(c.hot_balance) > u(c.hot_max));
+  const bad = cs.find((c) => c.onchain === 'mismatch');
+  const top = !cs.some((c) => c.hot || c.cold)
+    ? hero('bad', '钱包还没配置', 'config/wallets.json 里三条链的冷钱包、热钱包都是空的。研发提 PR 填好地址，你在 GitHub 上自己合并、重启服务后这里才有内容。')
+    : bad ? hero('bad', `${CHAIN_NAME[bad.chain]} 链上核对不一致，这条链已停用`, '合约的代码、付款人或所有者和 config/wallets.json 对不上。请研发核对配置后重启。')
+    : lowHot ? hero('bad', `${CHAIN_NAME[lowHot.chain]} 热钱包只剩 ${usd(lowHot.hot_balance)} USDT，低于提醒线 ${usd(lowHot.hot_low)}`, '从这条链的冷钱包给热钱包补款（在你自己的多签钱包里操作，TopUP 不碰冷钱包）；补完这里自动显示新余额。')
+    : lowOp ? hero('warn', `${CHAIN_NAME[lowOp.chain]} 发起账户的 ${opOf(lowOp.chain).symbol} 不够付手续费`, `现在有 ${gasText(opOf(lowOp.chain))}。不够时归集发不出去，钱都还在原地址。`, { label: '去补手续费', onClick: () => ui.go('p-sweep') })
+    : lowAl ? hero('warn', `${CHAIN_NAME[lowAl.chain]} 授权额度只剩 ${usd(lowAl.allowance)} USDT（${Math.round((u(lowAl.allowance) / (u(lowAl.hot_max) || 1)) * 100)}%）`, lowAl.chain === 'eth' ? '以太坊 USDT 改额度要签两笔（先归零、再设新值），两笔之间以太坊打款暂停。' : '改额度签一笔。', { label: `去改${CHAIN_NAME[lowAl.chain]}额度`, onClick: () => editAllowance(ui, lowAl) })
+    : overHot ? hero('warn', `${CHAIN_NAME[overHot.chain]} 热钱包超过上限`, `多了 ${fmtUsdt(u(overHot.hot_balance) - u(overHot.hot_max))} USDT：热钱包只放小额，请把多出来的转回冷钱包。`)
+    : hero('ok', '现在没事要做', '热钱包低于提醒线、授权额度低于 30%、发起账户手续费不够时会在这里提醒。');
+  top.setAttribute('data-wallet-hero', '');
+  // 授权额度汇总：以太坊、BSC 各一行，TRON 不用授权
+  const alRows: (Node | string)[][] = cs.filter((c) => c.chain !== 'tron').map((c) => [chainTag(c.chain), c.hot ? mono(shortAddr(c.hot), c.hot) : '—', c.payout ? mono(shortAddr(c.payout), c.payout) : '—',
+    c.allowance === null ? (c.payout_enabled ? '暂时查不到' : '没开通批量打款') : usd(c.allowance), usd(c.hot_max), c.chain === 'eth' ? '两笔：先归零，再设新值' : '一笔',
+    c.payout_enabled ? h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-allowance-row-edit': c.chain, onclick: (e: Event) => { e.stopPropagation(); editAllowance(ui, c); } }, '改额度') : '']);
+  alRows.push([chainTag('tron'), '—', '—', '不用授权', '—', 'TRON 打款不走合约', '']);
+  const alTable = h('section', { class: 'stack-sm', 'data-allowance-summary': '' }, h('h2', { class: 'h-sm m0' }, '授权额度'),
+    table(['链', '热钱包', '批量打款合约', '现在额度', '上限', '改额度要签', ''], alRows, '—', { rowAttrs: (i) => ({ 'data-allowance-summary-row': i < alRows.length - 1 ? cs.filter((c) => c.chain !== 'tron')[i].chain : 'tron' }) }),
+    h('p', { class: 'hint muted m0' }, '额度是链上的总闸：批量打款合约最多只能动这么多。上限 = 热钱包上限，不用无限额。改额度用热钱包私钥在浏览器里签，和打款一样。'));
   p.replaceChildren(
     h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, '钱包设置'), h('span', { class: 'muted' }, '热钱包、冷钱包按链分开；以太坊、BSC 没有助记词')),
+    top,
     h('p', { class: 'note-box' }, '地址写在代码仓库的 config/wallets.json，这里只能看、不能改。改地址要研发提 PR，由你在 GitHub 上自己合并；文件一改就发邮件给你；服务启动时链上核对冷钱包和工厂，对不上就停用那条链并告警。'),
     h('div', { class: 'wallet-grid' }, ...cards),
+    alTable,
   );
 }
 
