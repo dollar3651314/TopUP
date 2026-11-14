@@ -88,7 +88,7 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
 }
 
 function batchState(b: any): HTMLElement {
-  const box = h('span', { class: 'cell-2' });
+  const box = h('span', { class: 'cell-2 cell-start' });
   const ST: Record<string, [string, string]> = { planned: ['submitted', '等签名'], broadcast: ['in', '链上确认中'], confirmed: ['approved', '已完成'], partial: ['needs_info', '部分成功'], failed: ['bad', b.chain === 'tron' ? '失败' : '整批回滚'], expired: ['expired', '没签名，已作废'] };
   const [cls, text] = ST[b.status] || ['submitted', b.status];
   box.append(status(cls, text));

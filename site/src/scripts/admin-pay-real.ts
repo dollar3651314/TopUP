@@ -213,15 +213,20 @@ function editMerchant(m: any) {
   const fin = feeInputs(m.fee_in, 'em-in', '收款手续费'), fout = feeInputs(m.fee_out, 'em-out', '付款手续费');
   const mode = modeInputs(m.order_mode, 'em-mode');
   const active = h('input', { type: 'checkbox', checked: m.status === 'active' }) as HTMLInputElement;
-  const wallets = h('textarea', { rows: '2', class: 'mono-input' }) as HTMLTextAreaElement; wallets.value = m.cashout_wallets.join('\n');
+  // 提现地址按链登记（P5）：每行"链 地址"，例如 bsc 0x…；只写 T 开头的地址当作 TRON
+  const wallets = h('textarea', { rows: '3', class: 'mono-input', placeholder: 'eth 0x…\nbsc 0x…\ntron T…' }) as HTMLTextAreaElement;
+  wallets.value = m.cashout_wallets.map((w: any) => (typeof w === 'string' ? `tron ${w}` : `${w.chain} ${w.address}`)).join('\n');
   const reEmail = h('input', { type: 'email', value: m.users[0]?.email || '' }) as HTMLInputElement;
   dialog(m.name, h('div', { class: 'stack' }, h('label', { class: 'check-row' }, active, '启用（停用后商户不能登录，API 返回 403，已分配的地址照常监控入账）'),
-    fin.box, fout.box, mode.box, field('em-w', '已登记的提现钱包（每行一个）', wallets),
+    fin.box, fout.box, mode.box, field('em-w', '已登记的提现钱包（每行一个："链 地址"，链是 eth、bsc 或 tron；同一串 0x 地址要两条链都能提就写两行）', wallets),
     h('div', { class: 'inline-form' }, field('em-re', '重新发送设置密码的邮件', reEmail), h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: async () => {
       try { await call('merchant-reinvite', { id: m.id, email: reEmail.value.trim() }); say('已重新发送'); } catch (e) { say(errText(e)); }
     } }, '发送'))), '保存', async () => {
     const i = fin.read(), o = fout.read(), md = mode.read(); if (!i || !o || !md) return false;
-    const ws = wallets.value.split('\n').map((x) => x.trim()).filter(Boolean);
+    const lines = wallets.value.split('\n').map((x) => x.trim()).filter(Boolean);
+    const ws = lines.map((x) => { const [a, b] = x.split(/\s+/); return b ? { chain: a.toLowerCase(), address: b } : /^T/.test(a) ? { chain: 'tron', address: a } : { chain: '', address: a }; });
+    const bad = ws.findIndex((w) => !['eth', 'bsc', 'tron'].includes(w.chain));
+    if (bad >= 0) { fieldErr(wallets, `第 ${bad + 1} 行要写成"链 地址"，链是 eth、bsc 或 tron`); return false; }
     try { await call('merchant-save', { id: m.id, fee_in: i, fee_out: o, order_mode: md, status: active.checked ? 'active' : 'disabled', cashout_wallets: ws }); }
     catch (e) { fieldErr((e as WErr).field === 'cashout_wallets' ? wallets : reEmail, errText(e)); return false; }
     say('已保存。新的费率和订单模式从下一笔开始生效，已有记录不变。'); show('p-merchants');

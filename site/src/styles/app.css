@@ -428,3 +428,4 @@ tr[data-wait="late"] td:first-child { box-shadow: inset 4px 0 0 var(--danger); }
 .wallet-card .mono { word-break: break-all; }
 .meter-row { width: 100%; height: 8px; accent-color: var(--accent); }
 .decoded-table .ok, .decoded-table .bad { white-space: nowrap; }
+.cell-2.cell-start { align-items: flex-start; justify-items: start; }
