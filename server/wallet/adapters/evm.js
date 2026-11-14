@@ -145,6 +145,21 @@ export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decim
     async estimateGas(tx) { return BigInt(await rpc.call('eth_estimateGas', [tx])); },
     async sendRaw(raw) { return rpc.call('eth_sendRawTransaction', [raw]); },
     /** 节点认不认识这笔交易（在交易池里或已上链）；连不上时抛出 */
+    /**
+     * 同一个批量请求里取最新区块号和"已确认"的 nonce（head − 确认数那个区块）：负载均衡时一个批量请求通常由同一台后端回答，
+     * head 用来和 txLookup 的 head 比——查交易的后端比查 nonce 的旧，就不能拿它的"查不到"当结论
+     */
+    async nonceSnapshot(address) {
+      const h = num(await rpc.call('eth_blockNumber'));
+      const at = Math.max(0, h - confirmations);
+      const [h2, n] = await rpc.batch([['eth_blockNumber', []], ['eth_getTransactionCount', [address, hex(at)]]]);
+      return { head: num(h2), nonce: BigInt(n) };
+    },
+    /** 同一个批量请求里取最新区块号、回执、交易（查不到的是 null） */
+    async txLookup(hash) {
+      const [h, receipt, tx] = await rpc.batch([['eth_blockNumber', []], ['eth_getTransactionReceipt', [hash]], ['eth_getTransactionByHash', [hash]]]);
+      return { head: num(h), receipt: receipt || null, tx: tx || null };
+    },
     /** 按交易号查交易（在交易池里或已上链）；查不到 null，连不上抛出 */
     async txByHash(hash) { return rpc.call('eth_getTransactionByHash', [hash]); },
     async txKnown(hash) { return (await rpc.call('eth_getTransactionByHash', [hash])) !== null; },

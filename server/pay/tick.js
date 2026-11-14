@@ -51,7 +51,8 @@ export async function scan(db, tron, { now = Date.now(), budgetMs = 12_000, maxP
 /** TRON 交易原文出给页面时的有效期（server/pay/wallet-api.js 的 SIGN_TTL_MS）；过期后再加 5 分钟余量（等区块固化）链上仍查不到，才算没发出去 */
 export const TRON_TX_TTL_MS = 30 * 60_000;
 const TRON_GONE_MS = TRON_TX_TTL_MS + 5 * 60_000;
-const CHAIN_MARGIN_MS = 60_000; // 链上已固化的最新区块时间比原文过期时间晚这么多，才算一定上不了链
+const CHAIN_MARGIN_MS = 5 * 60_000; // 链上已固化的最新区块时间比原文过期时间晚这么多，才算一定上不了链
+const GONE_RECHECK_MS = 5 * 60_000; // 第一次判"上不了链"后隔这么久再查一轮，仍查不到才退回（和以太坊一样两轮）
 
 /**
  * ③ 已广播的提币：链上确认成功就扣除冻结；失败就按规则退回。
@@ -60,7 +61,7 @@ const CHAIN_MARGIN_MS = 60_000; // 链上已固化的最新区块时间比原文
  */
 export async function confirmWithdrawals(db, tron, { notify, now = Date.now() } = {}) {
   // TRON 的单（以太坊、BSC 的整批由 server/wallet/payout.js 的 confirm 按回执处理）
-  const rows = await db.query(`select id, txid, approved_at, updated_at, tx_expires_at from withdrawals where status = 'broadcast' and txid is not null and chain = 'tron' order by updated_at limit 50`);
+  const rows = await db.query(`select id, txid, approved_at, updated_at, tx_expires_at, gone_suspect_at from withdrawals where status = 'broadcast' and txid is not null and chain = 'tron' order by updated_at limit 50`);
   let done = 0, solid;
   // 链上时间（已固化的最新区块）：判断过期按链上时间，不按服务器时钟（服务器时钟快了会提前退回、付两次）
   const chainTime = async () => { if (solid === undefined) solid = await tron.solidBlock().then((b) => Number(b?.time) || null).catch(() => null); return solid; };
@@ -72,6 +73,9 @@ export async function confirmWithdrawals(db, tron, { notify, now = Date.now() } 
         const ct = await chainTime();
         if (ct === null || ct <= Number(w.tx_expires_at) + CHAIN_MARGIN_MS) continue; // 链上时间读不到、或还没过期：继续等
       } else if (now - new Date(w.updated_at).getTime() <= TRON_GONE_MS) continue; // 升级前交了签名的：没存过期时间，按记成已广播之后 35 分钟
+      // 已过期、链上查不到：第一轮只记下时间，隔 GONE_RECHECK_MS 再查一轮仍查不到才退回（固化节点偶尔落后，一轮的"查不到"不算数）
+      if (!w.gone_suspect_at) { await db.query(`update withdrawals set gone_suspect_at = $2 where id = $1 and status = 'broadcast'`, [w.id, new Date(now)]); continue; }
+      if (now - new Date(w.gone_suspect_at).getTime() < GONE_RECHECK_MS) continue;
       if (w.approved_at) await settlePayoutItem(db, w.id, { success: false, reason: 'expired_not_onchain' });
       else await settleWithdrawal(db, w.id, false);
       if (notify) await notify(`TRON 打款没上链：${w.id}`, w.approved_at ? `TRON 打款 ${w.id} 的交易（${w.txid}）已过期，链上查不到，不会再上链。这一笔回到"已审核"，冻结的金额不动，可以重新签名。` : `提币 ${w.id} 的交易（${w.txid}）已过期，链上查不到，冻结的金额已退回商户余额。`);

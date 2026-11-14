@@ -21,7 +21,7 @@ export function txBatchOut(b) {
     ok: b.status === 'confirmed' ? ids.length : okN, failed: b.status === 'failed' ? ids.length : badN,
     energy: b.chain === 'tron' ? (b.energy || { mode: 'burn' }) : null,
     items: ids.map((id) => ({ id, status: res[id] ? (res[id].ok ? 'completed' : 'approved') : null, reason: res[id]?.reason || null })),
-    rebroadcast_at: iso(b.rebroadcast_at) || null,
+    rebroadcast_at: iso(b.rebroadcast_at) || null, stuck_since: iso(b.stuck_since) || null,
     created_at: iso(b.created_at), updated_at: iso(b.updated_at),
   };
 }
@@ -78,7 +78,7 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
   /** 没签名的批次（planned）：TRON 的还要看签名批次还在不在、交易原文快不快过期 */
   async function tronSignBatch(ptId) {
     const [sb] = await db.query(`select * from sign_batches where kind = 'withdraw' and status = 'planned' and plan->>'payout_batch' = $1 order by created_at desc limit 1`, [ptId]);
-    return sb && now() - new Date(sb.created_at).getTime() < TRON_SIGN_TTL_MS - 60_000 ? sb : null;
+    return sb && now() - new Date(sb.created_at).getTime() < TRON_SIGN_TTL_MS - 5 * 60_000 ? sb : null; // 和 sign-submit 的截止一致
   }
 
   return {
@@ -115,6 +115,11 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
     'payout-plans': () => plans(),
     /** 已审核（还没凑进批次）的驳回：原因必填，退冻结、回调、审计；挂起的（收款地址转不了）用它了结 */
     'payout-reject-approved': (b, actor) => payout.rejectApprovedPayout(db, { id: String(b.id || ''), reason: b.reason, actor }),
+    /**
+     * 确认作废（以太坊 / BSC，动态码）：热钱包这个 nonce 已被用掉、我们这笔没有回执时，整批回到已审核，审计 payout.void_confirmed。
+     * 错误：bad_code 400、not_found 404、invalid_state 409（不是已广播或是 TRON）、nonce_not_used 409、tx_on_chain 409、node_lagging 409、rpc_unreachable 503
+     */
+    'payout-void-confirmed': (b, actor) => svc().voidConfirmed(String(b.id || ''), { code: b.code, actor }),
     /** 解除挂起：挂起的单回到普通的已审核（下一轮照常凑批），审计 payout.unhold */
     'payout-unhold': (b, actor) => payout.unholdPayout(db, { id: String(b.id || ''), actor }),
     /**

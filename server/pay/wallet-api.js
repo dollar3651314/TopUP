@@ -21,6 +21,7 @@ import { createPayoutTxBatch, expirePayoutBatch, getPayoutLimits, planPayoutBatc
 
 const TRX = 1_000_000;
 const SIGN_TTL_MS = 30 * 60 * 1000; // 待签名交易的有效期
+const SIGN_CUTOFF_MS = 5 * 60 * 1000; // 交签名的截止：离原文过期不到 5 分钟就不再收
 const VERIFY_TTL_MS = 5 * 60 * 1000; // 验证码通过后 5 分钟内必须提交签名
 const ENERGY_PER_SWEEP = 65_000; // 转 USDT 到已经有 USDT 的地址，大约需要的能量
 const USDT_FEE_LIMIT = 30 * TRX;
@@ -247,8 +248,8 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     async 'sign-submit'(b, actor) {
       const batch = await loadBatch(b.batch_id, ['planned']);
       need(batch.verified_until && new Date(batch.verified_until).getTime() > now(), 'verify_required', 409);
-      // 交易原文的过期时间是出原文时 + SIGN_TTL：快过期的不再广播（广播了也上不了链），请作废重凑
-      need(now() - new Date(batch.created_at).getTime() < SIGN_TTL_MS - 60_000, 'plan_expired', 409);
+      // 交易原文的过期时间是出原文时 + SIGN_TTL：离过期不到 5 分钟的不再广播（留出时间让链上确认、也让"过期判断"有余量），请作废重凑
+      need(now() - new Date(batch.created_at).getTime() < SIGN_TTL_MS - SIGN_CUTOFF_MS, 'plan_expired', 409);
       const sigs = b.signatures || {};
       const plan = batch.plan;
       const all = batch.kind === 'withdraw' ? plan.steps : plan.items.flatMap((it) => it.steps);

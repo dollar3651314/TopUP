@@ -24,6 +24,7 @@ export const BATCH_PAYOUT_CODE_HASH = '0x44298a4edf4971ca1dfb065391abee29659b97d
 const STALE_MS = 30 * 60_000; // 广播后 30 分钟还没上链：查 nonce，没被用掉就重发，用掉了才算没发出去
 const ALLOWANCE_TTL_MS = 30 * 60_000; // 改额度的两笔要在 30 分钟内签完，期间这条链的打款暂停
 const REVERIFY_MS = 60_000; // 没核对上的链：用到时再核对，最多每分钟一次
+const STUCK_ALERT_MS = 60 * 60_000; // nonce 已用掉、节点却还认得我们这笔超过 1 小时：告警一次，等管理员确认作废
 const DROP_RECHECK_MS = 5 * 60_000; // nonce 用掉、我们的交易查不到：隔 5 分钟再查一轮仍是这样才退回
 const MAX_REPLAN = 5; // 凑批时试算发现某一笔转不了：挂起那一笔重凑，最多几次
 const TRANSFER_FAILED = selectorOf('TransferFailed(uint256)');
@@ -286,6 +287,41 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
   }
 
   /**
+   * 判断一个已广播批次的 nonce 情况（先查 nonce，再查交易；两次都是单个批量请求，带回答它的后端的最新区块号）：
+   * not_used：这个 nonce 还没被用掉；ours_known：用掉了、节点还认得我们这笔（有交易或回执）；
+   * gone：用掉了、我们这笔查不到；lagging：查交易的后端比查 nonce 的旧，这次的"查不到"不算数
+   */
+  async function probe(c, b) {
+    const nonce = BigInt(b.nonce ?? decodeUnsignedLegacyTx(b.raw_hex).nonce);
+    const ns = await c.adapter.nonceSnapshot(c.hot);
+    if (ns.nonce <= nonce) return { state: 'not_used' };
+    const lk = await c.adapter.txLookup(b.tx_hash);
+    if (lk.receipt || lk.tx) return { state: 'ours_known', receipt: lk.receipt, tx: lk.tx };
+    if (lk.head < ns.head) return { state: 'lagging' };
+    return { state: 'gone' };
+  }
+
+  /**
+   * 管理员"确认作废"（动态码，审计 payout.void_confirmed）：只在热钱包这个 nonce 已被用掉、我们这笔没有回执时允许，整批回到已审核。
+   * 用在"nonce 已用掉、节点却还认得这笔"一直没结论的批次（例如某个节点的交易池里还挂着旧交易）
+   */
+  async function voidConfirmed(id, { code, actor = 'admin' } = {}) {
+    if (!verifyCode || !(await verifyCode(String(code || '')))) throw new PayError('bad_code', 400);
+    const [b] = await db.query('select * from payout_tx_batches where id = $1', [String(id || '')]);
+    if (!b) throw new PayError('not_found', 404);
+    if (b.status !== 'broadcast' || b.chain === 'tron' || !chains[b.chain]) throw new PayError('invalid_state', 409);
+    const c = chains[b.chain];
+    let pr;
+    try { pr = await probe(c, b); } catch { throw new PayError('rpc_unreachable', 503); }
+    if (pr.state === 'not_used') throw new PayError('nonce_not_used', 409);
+    if (pr.state === 'lagging') throw new PayError('node_lagging', 409);
+    if (pr.receipt) throw new PayError('tx_on_chain', 409);
+    await settlePayoutBatch(db, b.id, { success: false, error: 'void_confirmed' });
+    await audit(db, actor, 'payout.void_confirmed', b.id, { chain: b.chain, tx_hash: b.tx_hash, nonce: String(b.nonce ?? ''), count: b.item_ids.length });
+    return { ok: true, id: b.id, count: b.item_ids.length };
+  }
+
+  /**
    * worker 每轮：已广播的批次按回执处理。确认 → 整批完成；回滚 → 整批回到已审核（转不了的那一笔挂起）。
    * 30 分钟还没上链：热钱包已确认的 nonce 还没超过这笔的 nonce → 用存的已签名原文重发、继续等（不退回）；
    * nonce 已被别的交易用掉、我们这笔的回执和交易都查不到 → 先记下时间，隔 DROP_RECHECK_MS 再查一轮仍是这样，才整批回到已审核。
@@ -306,18 +342,23 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
       }
       if (s !== 'pending' || now() - new Date(b.updated_at).getTime() <= STALE_MS) { out.pending++; continue; }
       const nonce = BigInt(b.nonce ?? decodeUnsignedLegacyTx(b.raw_hex).nonce);
-      // 先读 nonce，再读我们这笔交易（按顺序，不并发）：负载均衡的节点可能有快有慢，先看到 nonce 用掉、后去查交易，查交易的节点至少不比查 nonce 的旧
-      let used;
-      try { used = await c.adapter.confirmedNonce(c.hot); } catch { out.pending++; continue; }
-      if (used > nonce) {
-        let rc, tx;
-        try { rc = await c.adapter.receipt(b.tx_hash); tx = await c.adapter.txByHash(b.tx_hash); } catch { out.pending++; continue; }
-        // 节点还认识我们这笔（在交易池里，或已上链、确认数还不够）：用掉 nonce 的就是它，继续等
-        if (rc || tx) { if (b.drop_suspect_at) await db.query(`update payout_tx_batches set drop_suspect_at = null where id = $1`, [b.id]); out.pending++; continue; }
-        // nonce 已被用掉、我们这笔查不到：先只记下时间，隔 DROP_RECHECK_MS 再查一轮仍是这样才退回（防止碰上落后的节点误判）
+      let pr;
+      try { pr = await probe(c, b); } catch { out.pending++; continue; }
+      if (pr.state === 'lagging') { out.pending++; continue; } // 查交易的后端比查 nonce 的旧：这一轮不算数
+      if (pr.state === 'ours_known') {
+        // nonce 已被用掉，但节点还认得我们这笔（有交易、没回执）：通常是确认数还不够；超过 1 小时还这样就告警一次（每批一次），由管理员核对后"确认作废"
+        const since = b.stuck_since ? new Date(b.stuck_since).getTime() : now();
+        if (!b.stuck_since || b.drop_suspect_at) await db.query(`update payout_tx_batches set stuck_since = coalesce(stuck_since, $2), drop_suspect_at = null where id = $1`, [b.id, new Date(since)]);
+        if (!pr.receipt && !b.stuck_alerted && now() - since > STUCK_ALERT_MS) {
+          await db.query(`update payout_tx_batches set stuck_alerted = true where id = $1`, [b.id]);
+          if (notify) await notify(`打款一直没有结果：${b.id}`, `${b.chain.toUpperCase()} 打款交易 ${b.tx_hash}：热钱包的这个 nonce（${nonce}）已经被用掉超过 1 小时，但节点还认得这笔交易、没有回执，系统没法自己判断。这一批 ${b.item_ids.length} 笔的冻结金额还没退回。请在区块浏览器上核对：如果这个 nonce 上链的是别的交易（例如作废交易），到运营后台"打款审核"的签名批次里点"确认作废"，这一批回到"已审核"；如果上链的就是这笔，等确认即可。`);
+        }
+        out.pending++; continue;
+      }
+      if (pr.state === 'gone') {
+        // nonce 已被用掉、我们这笔查不到（查交易的后端不比查 nonce 的旧）：先只记下时间，隔 DROP_RECHECK_MS 再查一轮仍是这样才退回
         if (!b.drop_suspect_at) { await db.query(`update payout_tx_batches set drop_suspect_at = $2 where id = $1 and status = 'broadcast'`, [b.id, new Date(now())]); out.pending++; continue; }
         if (now() - new Date(b.drop_suspect_at).getTime() < DROP_RECHECK_MS) { out.pending++; continue; }
-        // 连续两轮：这个 nonce 已经被别的交易用掉（且已确认），我们的交易既没有回执、节点也不认识：永远上不了链
         await settlePayoutBatch(db, b.id, { success: false, error: 'dropped' });
         out.failed++;
         if (notify) await notify(`打款没上链：${b.id}`, `${b.chain.toUpperCase()} 打款交易 ${b.tx_hash} 没上链，热钱包的这个 nonce（${nonce}）已经被别的交易用掉（隔了 ${Math.round(DROP_RECHECK_MS / 60_000)} 分钟查了两次），这笔不会再上链。这一批 ${b.item_ids.length} 笔已回到"已审核"，商户余额没动，可以重新凑批签名。`);
@@ -384,5 +425,5 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
     return { tx_hash: signed.hash, left: p.steps.filter((s) => !s.done).length };
   }
 
-  return { chains: Object.keys(chains), onchain, verify, hotBalance, status, plan, resume, submit, confirm, allowancePlan, allowanceSubmit, config: (chain) => cfgOf(chain) };
+  return { chains: Object.keys(chains), onchain, verify, hotBalance, status, plan, resume, submit, confirm, voidConfirmed, allowancePlan, allowanceSubmit, config: (chain) => cfgOf(chain) };
 }

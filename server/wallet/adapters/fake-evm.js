@@ -157,5 +157,7 @@ export function createFakeEvm({ chain, usdt, decimals, confirmations = 0, parent
     async confirmationsOf(hash) { const t = txs.get(hash); return t ? block - Number(BigInt(t.blockNumber)) + 1 : 0; },
     async txKnown(hash) { return txs.has(hash); },
     async txByHash(hash) { const t = txs.get(hash); return t ? { hash, blockNumber: t.blockNumber } : null; },
+    async nonceSnapshot() { return { head: block, nonce: BigInt(txs.size) }; },
+    async txLookup(hash) { const t = txs.get(hash); return { head: block, receipt: t ? { transactionHash: hash, ...t } : null, tx: t ? { hash, blockNumber: t.blockNumber } : null }; },
   };
 }

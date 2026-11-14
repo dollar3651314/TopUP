@@ -8,6 +8,7 @@ import { parseAmount, iso, page, emailHash } from './common.js';
 import { checkCallbackUrl } from './callbacks.js';
 import { addressFor } from '../wallet/addresses.js';
 import * as payout from './payout.js';
+import { fmtUsdt } from './money.js';
 
 export const NETWORK = { eth: 'ETH', bsc: 'BSC', tron: 'TRON' };
 const CHAIN_ORDER = ['eth', 'bsc', 'tron'];
@@ -231,7 +232,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
       const need = good.reduce((s, r) => s + r.amount + r.fee, 0);
       return {
         rows: checked.map((r) => ({ line: r.line, chain: r.chain, to: r.to, amount: r.amount, amount_text: String(rows[r.index].amount ?? ''), fee: r.fee, ok: r.ok, errors: r.errors, warnings: r.warnings })),
-        totals: payout.totalsByChain(good), ok_count: good.length, bad_count: checked.length - good.length, need, available: Number(m.available), enough: good.length > 0 && need <= Number(m.available), service: payout.serviceWindow(at),
+        totals: payout.totalsByChain(good), per_item_limit: fmtUsdt(perItem).replace(/,/g, ''), ok_count: good.length, bad_count: checked.length - good.length, need, available: Number(m.available), enough: good.length > 0 && need <= Number(m.available), service: payout.serviceWindow(at),
       };
     },
     payoutSubmit: (m, rows, source, onlyValid, at = now()) => payout.submitPayoutBatch(db, m, { rows, source, onlyValid, now: at, notify: notify ? (x) => notify(`新的批量打款待审核：${x.batch_no}`, `${x.merchant} 提交了 ${x.count} 笔批量打款：\n${x.text}\n\n请到运营后台"打款审核"处理。${x.service.open ? '' : '现在不在处理时段（东八区 8:00–23:00），商户页面写的是第二天 8:00 后处理。'}`) : null }),

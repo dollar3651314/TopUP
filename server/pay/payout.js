@@ -349,7 +349,7 @@ async function completeOne(t, id, txid) {
 }
 /** 一笔退回已审核（可以重新凑批）：冻结、账本都不动 */
 async function backToApproved(t, id, reason = null) {
-  await t.query(`update withdrawals set status = 'approved', batch_id = null, txid = null, reason = coalesce($2, reason), updated_at = now() where id = $1 and status in ('signing', 'broadcast')`, [id, reason]);
+  await t.query(`update withdrawals set status = 'approved', batch_id = null, txid = null, tx_expires_at = null, gone_suspect_at = null, reason = coalesce($2, reason), updated_at = now() where id = $1 and status in ('signing', 'broadcast')`, [id, reason]);
 }
 /** ETH / BSC：一批一笔交易。成功每笔 completed；失败整批回到 approved（批次 failed） */
 export async function settlePayoutBatch(db, id, { success, txid = null, error = null }) {
