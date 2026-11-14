@@ -123,15 +123,22 @@ jobs:
       # TRON 派生版合约（src/tron/）的单测：单独一个 profile（test-tron/），不影响上面以太坊版的编译和测试
       - name: forge test（TRON 派生版合约，FOUNDRY_PROFILE=tron）
         run: cd contracts && FOUNDRY_PROFILE=tron forge test -vvv
+      # 批量打款合约 BatchPayout（第 3 批）：单元、模糊（≥ 10,000 次）、不变量在 test-payout/；覆盖率行、函数、分支、语句都要 100%
+      - name: forge test（批量打款合约，FOUNDRY_PROFILE=payout）
+        run: cd contracts && FOUNDRY_PROFILE=payout forge test -vvv
+      - name: 覆盖率 100%（BatchPayout）
+        run: cd contracts && FOUNDRY_PROFILE=payout bash script/check-coverage.sh src/BatchPayout.sol
       - uses: actions/setup-node@v5
         with:
           node-version: 26
           cache: npm
       - run: npm ci
       - name: anvil 本地链端到端（test/anvil/）
+        # 批量打款的端到端还要 test-payout/ 里的测试代币（out-payout/）
         env:
           TOPUP_ANVIL_RPC: http://127.0.0.1:18545
         run: |
+          (cd contracts && FOUNDRY_PROFILE=payout forge build)
           anvil --port 18545 --silent &
           for i in $(seq 1 30); do curl -sf -X POST -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId"}' "$TOPUP_ANVIL_RPC" >/dev/null && break; sleep 1; done
           node --test test/anvil/*.test.js
