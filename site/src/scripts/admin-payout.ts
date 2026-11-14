@@ -448,7 +448,9 @@ export async function renderWalletCards(ui: WalletUi, p: HTMLElement, legacy: { 
         c.payout_enabled ? h('div', {}, h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-allowance-edit': c.chain, onclick: () => editAllowance(ui, c) }, '改额度')) : null,
         h('span', { class: 'hint muted' }, c.chain === 'eth' ? '以太坊 USDT 改额度要两笔：先归零，再设新值' : '改额度一笔')) : sec('授权额度', '', h('span', { class: 'muted' }, '不用授权：TRON 打款不走合约，是 N 笔普通转账')),
       sec('发起账户', '只付手续费，钱只能进冷钱包（服务器上）', addr(c.operator, '没有配置'),
-        c.operator && opOf(c.chain)?.configured ? h('span', { class: opOf(c.chain).low ? 'bad' : '', 'data-operator-gas': c.chain }, gasText(opOf(c.chain))) : null),
+        // 系统状态那份数据整份读不到：发起账户手续费写"暂时查不到"，不整行去掉
+        c.operator && !ch ? h('span', { class: 'muted', 'data-operator-gas': c.chain }, '手续费币暂时查不到（读取失败，稍后刷新）')
+          : c.operator && opOf(c.chain)?.configured ? h('span', { class: opOf(c.chain).low ? 'bad' : '', 'data-operator-gas': c.chain }, gasText(opOf(c.chain))) : null),
       sec('合约', '', h('span', {}, evm ? `转发合约工厂、批量归集合约（SweepBatcher）：${c.contracts_configured ? '已配置 ✓' : '没配置'}；批量打款合约（BatchPayout）：${c.payout ? '已配置 ✓' : '没配置'}` : `TRON 版工厂、批量归集合约：${c.contracts_configured ? '已配置 ✓' : '没配置（第 2 批合约上线后开通）'}`)),
       evm ? null : sec('租能量', '', h('span', {}, `${c.rental ? 'TronSave 已配置（只用于归集），预存余额和每一单在"系统状态"' : '没配置 TronSave：归集时直接烧 TRX'}；打款不租能量，直接烧 TRX`)),
       evm ? null : h('div', { class: 'wl-sec', 'data-legacy-addresses': '' }, h('b', {}, '旧地址（第 0 批）'),
@@ -459,6 +461,7 @@ export async function renderWalletCards(ui: WalletUi, p: HTMLElement, legacy: { 
   const evmOn = cs.filter((c) => c.chain !== 'tron' && c.payout_enabled);
   const lowAl = evmOn.find((c) => c.allowance !== null && u(c.allowance) < u(c.hot_max) * 0.3);
   const lowOp = cs.find((c) => opOf(c.chain)?.low);
+  const opUnread = !ch && cs.some((c) => c.operator); // 发起账户手续费读不到：顶部写明，不悄悄跳过
   const lowHot = cs.find((c) => c.low);
   const overHot = cs.find((c) => c.hot_balance !== null && u(c.hot_balance) > u(c.hot_max));
   const bad = cs.find((c) => c.onchain === 'mismatch');
@@ -466,6 +469,7 @@ export async function renderWalletCards(ui: WalletUi, p: HTMLElement, legacy: { 
     ? hero('bad', '钱包还没配置', 'config/wallets.json 里三条链的冷钱包、热钱包都是空的。研发提 PR 填好地址，你在 GitHub 上自己合并、重启服务后这里才有内容。')
     : bad ? hero('bad', `${CHAIN_NAME[bad.chain]} 链上核对不一致，这条链已停用`, '合约的代码、付款人或所有者和 config/wallets.json 对不上。请研发核对配置后重启。')
     : lowHot ? hero('bad', `${CHAIN_NAME[lowHot.chain]} 热钱包只剩 ${usd(lowHot.hot_balance)} USDT，低于提醒线 ${usd(lowHot.hot_low)}`, '从这条链的冷钱包给热钱包补款（在你自己的多签钱包里操作，TopUP 不碰冷钱包）；补完这里自动显示新余额。')
+    : opUnread ? hero('warn', '发起账户的手续费暂时读不到', '这一页读不到发起账户的手续费币余额，没法判断够不够付归集手续费。稍后刷新这一页，或者到"系统状态"看每条链的发起账户。', { label: '刷新', onClick: () => ui.rerender() })
     : lowOp ? hero('warn', `${CHAIN_NAME[lowOp.chain]} 发起账户的 ${opOf(lowOp.chain).symbol} 不够付手续费`, `现在有 ${gasText(opOf(lowOp.chain))}。不够时归集发不出去，钱都还在原地址。`, { label: '去补手续费', onClick: () => ui.go('p-sweep') })
     : lowAl ? hero('warn', `${CHAIN_NAME[lowAl.chain]} 授权额度只剩 ${usd(lowAl.allowance)} USDT（${Math.round((u(lowAl.allowance) / (u(lowAl.hot_max) || 1)) * 100)}%）`, lowAl.chain === 'eth' ? '以太坊 USDT 改额度要签两笔（先归零、再设新值），两笔之间以太坊打款暂停。' : '改额度签一笔。', { label: `去改${CHAIN_NAME[lowAl.chain]}额度`, onClick: () => editAllowance(ui, lowAl) })
     : overHot ? hero('warn', `${CHAIN_NAME[overHot.chain]} 热钱包超过上限`, `多了 ${fmtUsdt(u(overHot.hot_balance) - u(overHot.hot_max))} USDT：热钱包只放小额，请把多出来的转回冷钱包。`)

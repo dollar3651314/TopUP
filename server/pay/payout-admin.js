@@ -211,8 +211,9 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
       const [legacy] = await db.query('select count(*)::int n from customers where address is not null');
       const tcard = { chain: 'tron', enabled: Boolean(layer?.enabledChains?.includes('tron')), cold: wallets.cold || null, hot: wallets.hot || null, payout: null, payout_enabled: Boolean(wallets.hot),
         contracts_configured: Boolean(layer?.config?.tron?.complete), operator: layer?.providers?.contract?.tronOperator || null, legacy_addresses: legacy.n, hot_balance: null, hot_max: usdt(limits.hotMax), hot_low: usdt(limits.hotLow), allowance: null, rental: Boolean(layer?.tronEnergy) };
-      if (wallets.hot) { try { const acc = await tron.account(wallets.hot); tcard.hot_balance = usdt(acc.trc20[tron.contract] || 0); tcard.low = Number(acc.trc20[tron.contract] || 0) < limits.hotLow; tcard.hot_gas = native(acc.trx || 0, 'tron'); } catch { tcard.error = 'rpc'; } }
-      if (wallets.cold) { try { const acc = await tron.account(wallets.cold); tcard.cold_balance = usdt(acc.trc20[tron.contract] || 0); } catch { tcard.cold_balance = null; } }
+      // 冷钱包 USDT、热钱包 TRX：读不到给 null（字段一直在，页面写"暂时查不到"）
+      if (wallets.hot) { tcard.hot_gas = null; try { const acc = await tron.account(wallets.hot); tcard.hot_balance = usdt(acc.trc20[tron.contract] || 0); tcard.low = Number(acc.trc20[tron.contract] || 0) < limits.hotLow; tcard.hot_gas = native(acc.trx || 0, 'tron'); } catch { tcard.error = 'rpc'; } }
+      if (wallets.cold) { tcard.cold_balance = null; try { const acc = await tron.account(wallets.cold); tcard.cold_balance = usdt(acc.trc20[tron.contract] || 0); } catch { tcard.cold_balance = null; } }
       cards.push(tcard);
       return { cards, limits: limitsOut(limits), xpub: Boolean(await getMeta(db, 'xpub')) };
     },
