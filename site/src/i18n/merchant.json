@@ -518,7 +518,8 @@
         "decimals": "At most 6 decimals",
         "invalid_customer_id": "Customer ID may only use letters, digits and _ . @ -",
         "invalid_merchant_ref": "Reference is at most 64 characters",
-        "duplicate_row": "Same as another row (chain, address and amount): pay twice?"
+        "duplicate_row": "Same as another row (chain, address and amount): pay twice?",
+        "over_per_item_limit": "Over the per-payment limit: this row can only be rejected at review unless the limit is raised"
       },
       "ok": "OK",
       "reupload": "Fix the sheet and upload again",
@@ -1077,7 +1078,8 @@
         "decimals": "小数最多 6 位",
         "invalid_customer_id": "客户标识只能用字母、数字和 _ . @ -",
         "invalid_merchant_ref": "单号最多 64 个字符",
-        "duplicate_row": "和别的行重复（链、地址、金额都相同）：确定要付两次吗？"
+        "duplicate_row": "和别的行重复（链、地址、金额都相同）：确定要付两次吗？",
+        "over_per_item_limit": "超过单笔上限：审核时只能驳回，除非先调高上限"
       },
       "ok": "没问题",
       "reupload": "改好表格重新上传",

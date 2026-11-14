@@ -8,9 +8,9 @@ import { json, readJson } from '../kyb/http.js';
 import * as core from './core.js';
 import { PayError, getMeta, setMeta, audit } from './core.js';
 import { money, errorResponse, iso } from './common.js';
-import { txIdOf, setExpiration, encodeSigned } from './txcodec.js';
+import { txIdOf, setExpiration, encodeSigned, decodeRaw } from './txcodec.js';
 import { signerOf } from './signing.js';
-import { checkXpub, deriveAddress, isValidAddress } from './tron.js';
+import { deriveAddress, isValidAddress } from './tron.js';
 import { inviteMerchantUser } from './merchant-api.js';
 import { diskUsage } from './disk.js';
 import { walletAdminActions } from '../wallet/admin-actions.js';
@@ -30,7 +30,16 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
   const hot = wallets.hot, cold = wallets.cold;
   const need = (cond, code, status = 422, field) => { if (!cond) throw new PayError(code, status, field); };
   const merchantRow = async (id) => { const m = await core.getMerchant(db, id); need(m, 'not_found', 404); return m; };
-  const withExpiry = (tx) => { const rawHex = setExpiration(tx.raw_data_hex, now() + SIGN_TTL_MS); return { rawHex, txID: txIdOf(rawHex) }; };
+  /**
+   * 设过期时间。seen：同一批里已经用过的交易号——同一收款人、同一金额、同一毫秒建的两笔原文会一模一样（交易号相同，链上只算一笔），
+   * 遇到重复就把过期时间往后挪 1 毫秒，保证一批里每笔交易号都不同
+   */
+  const withExpiry = (tx, seen = null) => {
+    let at = now() + SIGN_TTL_MS, rawHex, txID;
+    for (;;) { rawHex = setExpiration(tx.raw_data_hex, at); txID = txIdOf(rawHex); if (!seen || !seen.has(txID)) break; at += 1; }
+    seen?.add(txID);
+    return { rawHex, txID };
+  };
 
   /** 作废一个没签名的 TRON 打款批次：签名批次先改成 expired（之后交来的签名一律 409），再把单退回已审核 */
   async function voidTronBatch(ptId) {
@@ -159,9 +168,10 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: 'admin' });
       rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, coalesce(batch_line, 0), id', [[...pick]]);
       const steps = [];
+      const seen = new Set();
       for (const w of rows) {
         const tx = await tron.buildUsdtTransfer({ from: hot, to: w.to_address, amount: w.amount, feeLimit: USDT_FEE_LIMIT });
-        steps.push({ kind: 'withdraw', stage: 1, withdrawal_id: w.id, owner: hot, expect: { to: w.to_address, amount: w.amount }, ...withExpiry(tx) });
+        steps.push({ kind: 'withdraw', stage: 1, withdrawal_id: w.id, owner: hot, expect: { to: w.to_address, amount: w.amount }, ...withExpiry(tx, seen) });
       }
       const id = await saveBatch('withdraw', { steps, payout_batch: ptId });
       return { batch_id: id, payout_batch: ptId, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total, count: pick.size, left };
@@ -242,6 +252,8 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const sigs = b.signatures || {};
       const plan = batch.plan;
       const all = batch.kind === 'withdraw' ? plan.steps : plan.items.flatMap((it) => it.steps);
+      // 一批里交易号必须各不相同：相同的两笔链上只会执行一次，却会被记成两笔都付了
+      need(new Set(all.map((s) => s.txID)).size === all.length, 'duplicate_txid', 409);
       for (const s of all) {
         const sig = String(sigs[s.txID] || '');
         need(txIdOf(s.rawHex) === s.txID, 'plan_corrupted', 500);
@@ -257,8 +269,8 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
             if (!pt) throw new PayError('invalid_state', 409);
           }
           for (const s of plan.steps) {
-            const [w] = await t.query(`update withdrawals set status = 'broadcast', txid = $2, batch_id = coalesce(batch_id, $3), updated_at = now() where id = $1 and status = any($4::text[]) returning id`,
-              [s.withdrawal_id, s.txID, batch.id, plan.payout_batch ? ['signing'] : ['pending', 'approved']]);
+            const [w] = await t.query(`update withdrawals set status = 'broadcast', txid = $2, batch_id = coalesce(batch_id, $3), tx_expires_at = $5, updated_at = now() where id = $1 and status = any($4::text[]) returning id`,
+              [s.withdrawal_id, s.txID, batch.id, plan.payout_batch ? ['signing'] : ['pending', 'approved'], decodeRaw(s.rawHex).expiration]);
             if (!w) throw new PayError('invalid_state', 409);
             await core.wdCallback(t, s.withdrawal_id);
           }
@@ -434,17 +446,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const r = await tron.resources(hot).catch(() => null);
       return { initialized: !!xpub, xpub_fingerprint: xpub ? xpub.slice(-8) : null, first_address: xpub ? deriveAddress(xpub, 0) : null, customers: n.n, network: tron.network, hot: await info(hot), cold: await info(cold), energy: r ? { left: Math.max(0, r.energyLimit - r.energyUsed), limit: r.energyLimit, per_sweep: ENERGY_PER_SWEEP } : null };
     },
-    /** 初始化：只接受账户级公钥（xpub），并核对浏览器算出的第 1 个地址。只能做一次 */
-    async 'wallet-init'(b, actor) {
-      need(!(await getMeta(db, 'xpub')), 'already_initialized', 409);
-      need(await verifyAdminCode(String(b.code || '')), 'bad_code', 400);
-      let xpub;
-      try { xpub = checkXpub(b.xpub); } catch (e) { throw new PayError(e.message === 'private_key_not_allowed' ? 'private_key_not_allowed' : 'invalid_xpub', 422, 'xpub'); }
-      need(deriveAddress(xpub, 0) === String(b.first_address || ''), 'first_address_mismatch', 422, 'first_address');
-      await setMeta(db, 'xpub', xpub);
-      await audit(db, actor, 'wallet.init', xpub.slice(-8));
-      return { ok: true, first_address: deriveAddress(xpub, 0) };
-    },
+    // 第 0 批的"初始化主助记词"（wallet-init）已去掉（2026-11-14 定）：新系统不再派生 TRON 地址
   };
 
   const handle = async function handle(request) {

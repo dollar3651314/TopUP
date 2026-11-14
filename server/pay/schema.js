@@ -365,8 +365,11 @@ create index if not exists payout_tx_batches_status on payout_tx_batches (chain,
 alter table payout_tx_batches add column if not exists signed_raw text;
 alter table payout_tx_batches add column if not exists nonce text;
 alter table payout_tx_batches add column if not exists rebroadcast_at timestamptz;
+alter table payout_tx_batches add column if not exists drop_suspect_at timestamptz; -- 第一次看到"nonce 已被用掉、我们的交易查不到"的时间（隔一轮再确认）
 -- 挂起：已审核的单收款地址转不了（链上回滚解出是这一笔、收款地址是 0），不再进批，等管理员驳回
 alter table withdrawals add column if not exists hold_reason text;
+-- TRON：交了签名的那笔交易原文里的过期时间（毫秒）。链上最新区块时间过了它、链上仍查不到，才算没发出去
+alter table withdrawals add column if not exists tx_expires_at bigint;
 `;
 
 /**

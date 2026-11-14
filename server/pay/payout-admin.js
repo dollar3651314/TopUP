@@ -45,7 +45,7 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
         card.enabled = true;
         try {
           const s = await svc().status(chain);
-          Object.assign(card, { hot: s.hot, contract: s.contract, hot_balance: usdt(s.hot_balance), allowance: usdt(s.allowance), cap: usdt(s.cap), by: s.by, hot_low: s.hot_low, allowance_busy: s.allowance_busy, onchain: s.onchain });
+          Object.assign(card, { hot: s.hot, contract: s.contract, hot_balance: usdt(s.hot_balance), allowance: usdt(s.allowance), inflight: usdt(s.inflight), cap: usdt(s.cap), by: s.by, hot_low: s.hot_low, allowance_busy: s.allowance_busy, onchain: s.onchain });
           if (s.onchain === 'mismatch') card.blocked = 'contract_mismatch';
           else if (s.onchain !== 'ok') card.blocked = 'contract_unverified';
           else if (s.allowance_busy) card.blocked = 'allowance_in_progress';
@@ -100,7 +100,7 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
         g.items.push(item(w));
       }
       for (const g of groups) { g.count = g.items.length; g.total = usdt(g.items.reduce((s, x) => s + (parseUsdt(x.amount) ?? 0), 0)); }
-      const recent = await db.query(`select * from payout_tx_batches where status <> 'expired' order by created_at desc limit 20`);
+      const recent = await db.query(`select * from payout_tx_batches order by created_at desc limit 20`); // 作废的（没签名、作废重凑）也列出来
       // 已审核、还没凑进批次的单（可以在这里驳回）；挂起的（收款地址转不了）排最前
       const appr = await db.query(`select w.*, m.name merchant from withdrawals w join merchants m on m.id = w.merchant_id where w.status = 'approved' and w.batch_id is null order by (w.hold_reason is null), w.approved_at, w.created_at limit 200`);
       const limits = await payout.getPayoutLimits(db);
@@ -115,6 +115,8 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
     'payout-plans': () => plans(),
     /** 已审核（还没凑进批次）的驳回：原因必填，退冻结、回调、审计；挂起的（收款地址转不了）用它了结 */
     'payout-reject-approved': (b, actor) => payout.rejectApprovedPayout(db, { id: String(b.id || ''), reason: b.reason, actor }),
+    /** 解除挂起：挂起的单回到普通的已审核（下一轮照常凑批），审计 payout.unhold */
+    'payout-unhold': (b, actor) => payout.unholdPayout(db, { id: String(b.id || ''), actor }),
     /**
      * 作废一个还没签名的批次（页面关了、想重凑）：单回到已审核。只作废 planned 的——已经交了签名、可能已经广播的一律不动（invalid_state）。
      * TRON 先把签名批次改成 expired，之后交来的签名一律 409。
@@ -190,7 +192,7 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
           payout_enabled: evmOn().includes(chain), contracts_configured: Boolean(cfg.complete), operator: layer?.providers?.contract?.operator || null, onchain: layer?.onchain?.[chain]?.result ?? null,
           hot_balance: null, allowance: null, hot_max: usdt(limits.hotMax), hot_low: usdt(limits.hotLow), allowance_steps: chain === 'eth' ? 2 : 1 };
         if (card.payout_enabled) {
-          try { const s = await svc().status(chain); card.hot_balance = usdt(s.hot_balance); card.allowance = usdt(s.allowance); card.low = s.hot_low; } catch { card.error = 'rpc'; }
+          try { const s = await svc().status(chain); card.hot_balance = usdt(s.hot_onchain); card.allowance = usdt(s.allowance_onchain); card.low = s.hot_low; } catch { card.error = 'rpc'; }
         }
         cards.push(card);
       }

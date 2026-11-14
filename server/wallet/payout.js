@@ -23,6 +23,8 @@ export const MAX_FEE_WEI = Object.freeze({ eth: 2n * 10n ** 17n, bsc: 5n * 10n *
 export const BATCH_PAYOUT_CODE_HASH = '0x44298a4edf4971ca1dfb065391abee29659b97daf10e53727a0a3ca02ad728f8';
 const STALE_MS = 30 * 60_000; // 广播后 30 分钟还没上链：查 nonce，没被用掉就重发，用掉了才算没发出去
 const ALLOWANCE_TTL_MS = 30 * 60_000; // 改额度的两笔要在 30 分钟内签完，期间这条链的打款暂停
+const REVERIFY_MS = 60_000; // 没核对上的链：用到时再核对，最多每分钟一次
+const DROP_RECHECK_MS = 5 * 60_000; // nonce 用掉、我们的交易查不到：隔 5 分钟再查一轮仍是这样才退回
 const MAX_REPLAN = 5; // 凑批时试算发现某一笔转不了：挂起那一笔重凑，最多几次
 const TRANSFER_FAILED = selectorOf('TransferFailed(uint256)');
 const ZERO_ADDRESS_ERR = selectorOf('ZeroAddress()');
@@ -57,16 +59,17 @@ export async function verifyPayoutChain(c) {
   if (c.adapter.fake) return { result: 'ok', fake: true };
   const sel = (sig) => '0x' + selectorOf(sig);
   const word = (a) => String(a).replace(/^0x/, '').toLowerCase().padStart(64, '0');
-  let code, payer, owner;
+  // 先取代码：取不到（连不上、节点报错）才算"未核对"；取到了但不是这一版 BatchPayout（别的合约、普通地址）直接判不一致，
+  // 不再去调 isPayer / owner（别的合约上调这两个会回滚，不能因此当成"未核对"）
+  let code;
+  try { code = await c.adapter.getCode(c.contract); } catch { return { result: 'unverified' }; }
+  if (payoutCodeHash(code) !== BATCH_PAYOUT_CODE_HASH) return { result: 'mismatch', fields: ['code'] };
+  let payer, owner;
   try {
-    [code, payer, owner] = await Promise.all([
-      c.adapter.getCode(c.contract),
-      c.adapter.call({ to: c.contract, data: sel('isPayer(address)') + word(c.hot) }),
-      c.adapter.call({ to: c.contract, data: sel('owner()') }),
-    ]);
+    payer = await c.adapter.call({ to: c.contract, data: sel('isPayer(address)') + word(c.hot) });
+    owner = await c.adapter.call({ to: c.contract, data: sel('owner()') });
   } catch { return { result: 'unverified' }; }
   const fields = [];
-  if (payoutCodeHash(code) !== BATCH_PAYOUT_CODE_HASH) fields.push('code');
   if (!/^0x0{63}1$/i.test(String(payer || ''))) fields.push('isPayer');
   const o = /^0x[0-9a-fA-F]{64}$/.test(String(owner || '')) ? '0x' + owner.slice(-40).toLowerCase() : null;
   if (!o || !c.safe || o !== String(c.safe).toLowerCase()) fields.push('owner');
@@ -84,8 +87,20 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
     if (!c) throw new PayError(chain === 'tron' ? 'not_applicable' : 'chain_not_enabled', 409, 'chain');
     return c;
   };
-  const readyOf = (chain) => {
+  /**
+   * 还没核对上（启动时节点连不上）的链：用到时再核对一次，同一条链最多每分钟一次。
+   * web 进程没有 worker 的定时任务，靠这里自己恢复；worker 每轮也会核对（deps.js）
+   */
+  const lastTry = {};
+  async function ensureVerified(chain) {
+    if (!verifyContracts) return;
+    const r = onchain[chain]?.result;
+    if (r === 'ok' || r === 'mismatch' || (lastTry[chain] && now() - lastTry[chain] < REVERIFY_MS)) return;
+    await verify({ timeoutMs: 5000, only: chain }).catch(() => {});
+  }
+  const readyOf = async (chain) => {
     const c = cfgOf(chain);
+    await ensureVerified(chain);
     if (verifyContracts && onchain[chain]?.result !== 'ok') throw new PayError(onchain[chain]?.result === 'mismatch' ? 'payout_contract_mismatch' : 'payout_contract_unverified', 409, 'chain');
     return c;
   };
@@ -108,9 +123,10 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
   }
 
   /** 核对每条链的 BatchPayout；不一致的停用这条链的打款并告警，一致了清掉告警 */
-  async function verify({ timeoutMs = 8000 } = {}) {
-    await Promise.all(Object.keys(chains).map(async (chain) => {
+  async function verify({ timeoutMs = 8000, only = null } = {}) {
+    await Promise.all(Object.keys(chains).filter((ch) => !only || ch === only).map(async (chain) => {
       if (onchain[chain]?.result === 'mismatch') return; // 停用到修好配置、重启为止
+      lastTry[chain] = now();
       let timer;
       const r = await Promise.race([verifyPayoutChain(chains[chain]), new Promise((ok) => { timer = setTimeout(() => ok({ result: 'unverified' }), timeoutMs); })]).finally(() => clearTimeout(timer));
       onchain[chain] = { ...r, at: new Date(now()).toISOString() };
@@ -125,13 +141,30 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
   /** 热钱包 USDT 余额（0.000001 单位）：运营概览算平台资产用 */
   async function hotBalance(chain) { const c = cfgOf(chain); return Number(toUnits(await c.adapter.tokenBalanceRaw(c.hot, c.token), c.decimals)); }
 
+  /** 在途：已交签名、还没出结果的批次合计（0.000001 单位）。链上余额和额度还没扣它们，凑新批时要先扣掉 */
+  async function inflightOf(chain) {
+    const [r] = await db.query(`select coalesce(sum(total), 0)::bigint v from payout_tx_batches where chain = $1 and status = 'broadcast'`, [chain]);
+    return BigInt(r.v);
+  }
+  /** 热钱包余额、授权额度（链上读，0.000001 单位）够不够付这么多：用来区分"收款地址转不了"和"钱或额度不够" */
+  async function fundsCover(c, units) {
+    const [hotRaw, alRaw] = await Promise.all([c.adapter.tokenBalanceRaw(c.hot, c.token), c.adapter.allowanceRaw(c.hot, c.contract, c.token)]);
+    const need = BigInt(units);
+    return toUnits(hotRaw, c.decimals) >= need && toUnits(alRaw, c.decimals) >= need;
+  }
+
+  /** hot_balance、allowance 是扣掉在途批次之后还能用的（链上的原数是 hot_onchain、allowance_onchain） */
   async function status(chain) {
     const c = cfgOf(chain);
+    await ensureVerified(chain);
     const [hotRaw, alRaw] = await Promise.all([c.adapter.tokenBalanceRaw(c.hot, c.token), c.adapter.allowanceRaw(c.hot, c.contract, c.token)]);
-    const hot = toUnits(hotRaw, c.decimals), allowance = toUnits(alRaw, c.decimals);
+    const inflight = await inflightOf(chain);
+    const hot0 = toUnits(hotRaw, c.decimals), al0 = toUnits(alRaw, c.decimals);
+    const free = (v) => (v > inflight ? v - inflight : 0n);
+    const hot = free(hot0), allowance = free(al0);
     const limits = await getPayoutLimits(db);
     const { cap, by } = effectiveBatchCap({ perBatch: limits.perBatch, hotBalance: hot, allowance });
-    return { chain, hot: c.hot, contract: c.contract, hot_balance: Number(hot), allowance: Number(allowance), cap: Number(cap), by, limits, hot_low: Number(hot) < limits.hotLow, allowance_busy: await allowanceBusy(chain), onchain: verifyContracts ? onchain[chain]?.result || 'unverified' : 'ok' };
+    return { chain, hot: c.hot, contract: c.contract, hot_balance: Number(hot), allowance: Number(allowance), hot_onchain: Number(hot0), allowance_onchain: Number(al0), inflight: Number(inflight), cap: Number(cap), by, limits, hot_low: Number(hot0) < limits.hotLow, allowance_busy: await allowanceBusy(chain), onchain: verifyContracts ? onchain[chain]?.result || 'unverified' : 'ok' };
   }
 
   /**
@@ -139,7 +172,7 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
    * 每批先试算（eth_estimateGas）：会回滚的不出交易——解得出是哪一笔（TransferFailed(i)）就挂起那一笔重凑，解不出整次拒绝（不回落默认网络费）。
    */
   async function plan(chain, { actor = 'admin' } = {}) {
-    const c = readyOf(chain);
+    const c = await readyOf(chain);
     if (await allowanceBusy(chain)) throw new PayError('allowance_in_progress', 409);
     for (const b of await db.query(`select id from payout_tx_batches where chain = $1 and status = 'planned'`, [chain])) await expirePayoutBatch(db, b.id);
     const chainId = await chainIdOf(chain);
@@ -163,7 +196,11 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
           try { gas = (await c.adapter.estimateGas({ from: c.hot, to: c.contract, data })) * 12n / 10n; }
           catch (e) {
             const i = failedIndexOf(e?.data);
-            if (i !== null && b.items[i]) { bad = b.items[i].id; break; }
+            // TransferFailed(i) 也可能是热钱包余额或额度不够（代币在第 i 笔时扣不动）：先确认钱和额度够付这一批，才算第 i 个收款地址转不了
+            if (i !== null && b.items[i]) {
+              if (!(await fundsCover(c, b.total))) throw new PayError('funds_short', 409);
+              bad = b.items[i].id; break;
+            }
             if (isRevert(e)) throw new PayError('estimate_reverted', 409);
             throw new PayError('rpc_unreachable', 503);
           }
@@ -211,7 +248,7 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
     const [b] = await db.query('select * from payout_tx_batches where id = $1', [String(id || '')]);
     if (!b) throw new PayError('not_found', 404);
     if (b.status !== 'planned' || !b.raw_hex) throw new PayError('invalid_state', 409);
-    const c = readyOf(b.chain);
+    const c = await readyOf(b.chain);
     const signed = decode(() => attachSignature(b.raw_hex, String(sigHex || '')));
     if (signed.from.toLowerCase() !== c.hot.toLowerCase()) throw new PayError('wrong_signer', 422, 'signature');
     const nonce = String(decodeUnsignedLegacyTx(b.raw_hex).nonce);
@@ -240,6 +277,9 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
       const i = failedIndexOf(e?.data);
       const wid = i !== null ? b.item_ids[i] : null;
       if (!wid) return null;
+      // 钱或额度不够也会回滚在第 i 笔：确认现在够付这一批和别的在途批次，才怪到收款地址上
+      // 在途合计里已经含这一批
+      try { if (!(await fundsCover(c, await inflightOf(b.chain)))) return null; } catch { return null; }
       await holdPayout(db, wid, 'transfer_failed', 'system').catch(() => {});
       return wid;
     }
@@ -248,7 +288,7 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
   /**
    * worker 每轮：已广播的批次按回执处理。确认 → 整批完成；回滚 → 整批回到已审核（转不了的那一笔挂起）。
    * 30 分钟还没上链：热钱包已确认的 nonce 还没超过这笔的 nonce → 用存的已签名原文重发、继续等（不退回）；
-   * nonce 已被别的交易用掉且我们的交易没有回执 → 这笔永远上不了链，整批回到已审核。
+   * nonce 已被别的交易用掉、我们这笔的回执和交易都查不到 → 先记下时间，隔 DROP_RECHECK_MS 再查一轮仍是这样，才整批回到已审核。
    */
   async function confirm() {
     const rows = await db.query(`select * from payout_tx_batches where status = 'broadcast' and chain = any($1::text[]) order by created_at limit 50`, [Object.keys(chains)]);
@@ -264,19 +304,27 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
         if (notify) await notify(`打款整批回滚：${b.id}`, `${b.chain.toUpperCase()} 打款交易 ${b.tx_hash} 在链上失败（整笔回滚），这一批 ${b.item_ids.length} 笔都回到了"已审核"，商户余额没动。${held ? `其中 ${held} 的收款地址转不了，已挂起、不再进批（在"打款审核"里驳回它，冻结的金额退回商户）。` : ''}请到运营后台"打款审核"重新凑批签名。`);
         continue;
       }
-      const since = Math.max(new Date(b.updated_at).getTime(), b.rebroadcast_at ? new Date(b.rebroadcast_at).getTime() : 0);
-      if (s !== 'pending' || now() - since <= STALE_MS) { out.pending++; continue; }
-      let used, rc;
-      try { [used, rc] = await Promise.all([c.adapter.confirmedNonce(c.hot), c.adapter.receipt(b.tx_hash)]); } catch { out.pending++; continue; }
+      if (s !== 'pending' || now() - new Date(b.updated_at).getTime() <= STALE_MS) { out.pending++; continue; }
       const nonce = BigInt(b.nonce ?? decodeUnsignedLegacyTx(b.raw_hex).nonce);
-      if (rc) { out.pending++; continue; } // 已上链、确认数还不够
+      // 先读 nonce，再读我们这笔交易（按顺序，不并发）：负载均衡的节点可能有快有慢，先看到 nonce 用掉、后去查交易，查交易的节点至少不比查 nonce 的旧
+      let used;
+      try { used = await c.adapter.confirmedNonce(c.hot); } catch { out.pending++; continue; }
       if (used > nonce) {
-        // 这个 nonce 已经被别的交易用掉（且已确认），我们的交易没有回执：永远上不了链
+        let rc, tx;
+        try { rc = await c.adapter.receipt(b.tx_hash); tx = await c.adapter.txByHash(b.tx_hash); } catch { out.pending++; continue; }
+        // 节点还认识我们这笔（在交易池里，或已上链、确认数还不够）：用掉 nonce 的就是它，继续等
+        if (rc || tx) { if (b.drop_suspect_at) await db.query(`update payout_tx_batches set drop_suspect_at = null where id = $1`, [b.id]); out.pending++; continue; }
+        // nonce 已被用掉、我们这笔查不到：先只记下时间，隔 DROP_RECHECK_MS 再查一轮仍是这样才退回（防止碰上落后的节点误判）
+        if (!b.drop_suspect_at) { await db.query(`update payout_tx_batches set drop_suspect_at = $2 where id = $1 and status = 'broadcast'`, [b.id, new Date(now())]); out.pending++; continue; }
+        if (now() - new Date(b.drop_suspect_at).getTime() < DROP_RECHECK_MS) { out.pending++; continue; }
+        // 连续两轮：这个 nonce 已经被别的交易用掉（且已确认），我们的交易既没有回执、节点也不认识：永远上不了链
         await settlePayoutBatch(db, b.id, { success: false, error: 'dropped' });
         out.failed++;
-        if (notify) await notify(`打款没上链：${b.id}`, `${b.chain.toUpperCase()} 打款交易 ${b.tx_hash} 没上链，热钱包的这个 nonce（${nonce}）已经被别的交易用掉，这笔不会再上链。这一批 ${b.item_ids.length} 笔已回到"已审核"，商户余额没动，可以重新凑批签名。`);
+        if (notify) await notify(`打款没上链：${b.id}`, `${b.chain.toUpperCase()} 打款交易 ${b.tx_hash} 没上链，热钱包的这个 nonce（${nonce}）已经被别的交易用掉（隔了 ${Math.round(DROP_RECHECK_MS / 60_000)} 分钟查了两次），这笔不会再上链。这一批 ${b.item_ids.length} 笔已回到"已审核"，商户余额没动，可以重新凑批签名。`);
         continue;
       }
+      if (b.drop_suspect_at) await db.query(`update payout_tx_batches set drop_suspect_at = null where id = $1`, [b.id]);
+      if (b.rebroadcast_at && now() - new Date(b.rebroadcast_at).getTime() <= STALE_MS) { out.pending++; continue; }
       // nonce 还没被用掉：旧交易随时可能被人重新广播上链，不能退回；用存的已签名原文重发，继续等
       const first = !b.rebroadcast_at;
       const err = b.signed_raw ? await broadcast(c, b.signed_raw) : 'no_signed_raw';
@@ -289,7 +337,7 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
 
   /** 改授权额度：原因 + 动态码，审计；新额度不超过热钱包上限；以太坊当前不是 0 时先 approve(0) 再 approve(新值) 两笔 */
   async function allowancePlan(chain, { amount, reason, code, actor = 'admin' }) {
-    const c = readyOf(chain);
+    const c = await readyOf(chain);
     if (!String(reason || '').trim()) throw new PayError('reason_required', 422, 'reason');
     if (!verifyCode || !(await verifyCode(String(code || '')))) throw new PayError('bad_code', 400);
     const units = typeof amount === 'number' ? amount : /^\d{1,16}$/.test(String(amount)) ? Number(amount) : NaN;
@@ -321,7 +369,7 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
   }
   /** 改额度的一笔签名：rawHex 必须是 allowancePlan 刚给出的、按顺序的下一笔；签名人必须是热钱包。节点连不上不算完成（同一笔可以重签再交） */
   async function allowanceSubmit(chain, { rawHex, sigHex, actor = 'admin' }) {
-    const c = readyOf(chain);
+    const c = await readyOf(chain);
     const p = await getMeta(db, allowanceKey(chain));
     const next = p?.steps?.find((s) => !s.done);
     if (!next || next.rawHex !== rawHex || now() - Date.parse(p.at) > ALLOWANCE_TTL_MS) throw new PayError('invalid_state', 409);

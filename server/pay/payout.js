@@ -165,6 +165,14 @@ export async function holdPayout(db, id, reason, actor = 'system') {
   return Boolean(w);
 }
 
+/** 解除挂起（管理员确认收款地址没问题，例如代币已解除拉黑）：回到普通的已审核，下一轮照常凑批；记审计 */
+export async function unholdPayout(db, { id, actor }) {
+  const [w] = await db.query(`update withdrawals set hold_reason = null, updated_at = now() where id = $1 and status = 'approved' and batch_id is null and hold_reason is not null returning id, chain, amount`, [String(id || '')]);
+  if (!w) throw new PayError('invalid_state', 409);
+  await audit(db, actor, 'payout.unhold', w.id, { chain: w.chain, amount: usdt(w.amount) });
+  return { ok: true };
+}
+
 // ---------- 商户批量 ----------
 /** 商户批次的对外状态：有还没审的 pending；全取消 cancelled；驳回的占了全部（不算取消） rejected；有驳回 partially_rejected；全部完成 completed；其余 approved */
 function batchStatus(items) {

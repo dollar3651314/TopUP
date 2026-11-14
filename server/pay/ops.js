@@ -221,9 +221,12 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
 
     // ---------- 批量打款（第 3 批）：商户上传表格、开放 API ----------
     /** 逐行检查（不冻结）：rows 是 parsePayoutSheet 的结果；enough = 没问题的行合计 ≤ 可用余额（余额一个数） */
-    payoutCheck(m, rows, at = now()) {
+    async payoutCheck(m, rows, at = now()) {
       if (rows.length > payout.MAX_ITEMS_PER_REQUEST) throw new PayError('too_many_items', 422, 'csv');
       const checked = payout.checkPayoutRows(rows, m);
+      // 超过单笔上限的行：照样能提交，但审核时只能驳回（或等管理员改上限），先提醒商户
+      const { perItem } = await payout.getPayoutLimits(db);
+      for (const r of checked) if (r.ok && r.amount > perItem) r.warnings.push('over_per_item_limit');
       const good = checked.filter((r) => r.ok);
       const need = good.reduce((s, r) => s + r.amount + r.fee, 0);
       return {

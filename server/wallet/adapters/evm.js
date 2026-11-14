@@ -145,6 +145,8 @@ export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decim
     async estimateGas(tx) { return BigInt(await rpc.call('eth_estimateGas', [tx])); },
     async sendRaw(raw) { return rpc.call('eth_sendRawTransaction', [raw]); },
     /** 节点认不认识这笔交易（在交易池里或已上链）；连不上时抛出 */
+    /** 按交易号查交易（在交易池里或已上链）；查不到 null，连不上抛出 */
+    async txByHash(hash) { return rpc.call('eth_getTransactionByHash', [hash]); },
     async txKnown(hash) { return (await rpc.call('eth_getTransactionByHash', [hash])) !== null; },
   };
 }
