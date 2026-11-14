@@ -60,8 +60,14 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
           const acc = await tron.account(wallets.hot);
           const hot = Number(acc.trc20[tron.contract] || 0);
           const { cap, by } = payout.effectiveBatchCap({ perBatch: limits.perBatch, hotBalance: hot, allowance: null });
-          Object.assign(card, { hot_balance: usdt(hot), cap: usdt(cap), by, hot_low: hot < limits.hotLow });
-          if (a.n && Number(cap) <= 0) card.blocked = 'hot_balance';
+          Object.assign(card, { hot_balance: usdt(hot), cap: usdt(cap), by, hot_low: hot < limits.hotLow, energy: { mode: 'burn' } });
+          // 和以太坊 / BSC 一样自动拆批：先看这一批能签几笔、剩几笔留到下一轮（签名时服务器按同样的规则再算一次）
+          const rows = a.n ? await db.query(`select id, amount from withdrawals where chain = 'tron' and status = 'approved' and batch_id is null and hold_reason is null order by approved_at, created_at, coalesce(batch_line, 0), id`) : [];
+          const pl = payout.planPayoutBatches(rows.map((r) => ({ id: r.id, amount: Number(r.amount) })), { chain: 'tron', perBatch: limits.perBatch, hotBalance: hot, allowance: null, perItem: limits.perItem });
+          card.batch_count = pl.batches[0]?.items.length || 0;
+          card.batch_total = usdt(pl.batches[0]?.total ?? 0);
+          card.left_count = a.n - card.batch_count;
+          if (a.n && !card.batch_count) card.blocked = Number(cap) <= 0 || pl.held.some((h) => h.reason === 'exceeds_hot_balance') ? 'hot_balance' : 'per_batch';
         } catch { card.blocked = 'rpc'; }
       }
       out.push(card);

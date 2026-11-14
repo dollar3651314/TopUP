@@ -141,7 +141,10 @@ function planCard(ui: WalletUi, c: any, legacyTron: TronSign, planned: any[] = [
     contract_unverified: '批量打款合约还没核对上（节点暂时连不上），先不能签。稍后再试。',
   };
   const disabled = !c.approved_count || Boolean(c.blocked);
-  const sign = h('button', { type: 'button', class: 'btn btn-primary', 'data-payout-sign': c.chain, disabled, onclick: () => (evm ? signEvm(ui, c.chain) : legacyTron([])) }, c.approved_count ? `核对并签名这 ${c.approved_count} 笔` : '没有要签的') as HTMLButtonElement;
+  // TRON 自动拆批：这一批签几笔、剩几笔留到下一轮
+  const split = !evm && c.batch_count && c.left_count > 0;
+  const label = !c.approved_count ? '没有要签的' : split ? `核对并签名这一批 ${c.batch_count} 笔` : `核对并签名这 ${c.approved_count} 笔`;
+  const sign = h('button', { type: 'button', class: 'btn btn-primary', 'data-payout-sign': c.chain, disabled, onclick: () => (evm ? signEvm(ui, c.chain) : legacyTron([])) }, label) as HTMLButtonElement;
   return h('article', { class: 'card stack-sm plan-card', 'data-payout-plan': c.chain },
     h('div', { class: 'batch-head' }, chainTag(c.chain), h('span', { class: 'muted' }, `${c.approved_count} 笔已审核`)),
     h('div', { class: 'batch-amt' }, usd(c.approved_total), h('small', {}, ' USDT')),
@@ -149,7 +152,9 @@ function planCard(ui: WalletUi, c: any, legacyTron: TronSign, planned: any[] = [
       ['怎么付', evm ? '批量合约一笔交易付完（BatchPayout），失败整批回滚' : `N 笔普通转账（每批 ≤ ${c.max_items} 笔），逐笔记账`],
       ['热钱包', c.hot_balance === null ? '—' : `${usd(c.hot_balance)} USDT${evm ? ` · 授权额度 ${c.allowance === null ? '—' : usd(c.allowance)}` : ''}`],
       ['每批实际上限', c.cap === null ? '—' : `${usd(c.cap)} USDT（${BY[c.by] || '—'}最小）`],
+      ...(evm ? [] : [['能量', h('span', { 'data-energy-line': '' }, energyText({ mode: 'burn' }))] as [string, Node | string]]),
     ]),
+    split ? h('p', { class: 'hint m0', 'data-plan-split': '' }, `这一批 ${c.batch_count} 笔（${usd(c.batch_total)} USDT），剩下 ${c.left_count} 笔超过这一批的上限（${BY[c.by] || '每批上限'}或每批 ≤ ${c.max_items} 笔），留到下一轮再签。`) : null,
     c.blocked && c.approved_count ? h('p', { class: 'warn-box m0', 'data-plan-why': c.blocked }, why[c.blocked] || c.blocked) : c.blocked === 'not_enabled' ? h('p', { class: 'hint muted m0' }, why.not_enabled) : null,
     c.blocked === 'allowance' ? h('div', {}, h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-goto-allowance': '', onclick: () => ui.go('p-wallet') }, '去改授权额度')) : null,
     // 上次凑好了没签完（窗口关了）：这些单锁在批次里，给"继续签名"和"作废重凑"

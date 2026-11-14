@@ -276,7 +276,8 @@ render.withdrawals = async (p) => {
     if (resume) { openWdSign(resume, Object.fromEntries(resume.items.map((w: any) => [w.id, w])), p); return; }
     let r;
     try { r = await call('withdrawals', undefined, '&approved=tron'); } catch (e) { say(errText(e)); return; }
-    const chosen = r.items.slice(0, 20);
+    // 全部已审核的交给服务器，服务器按"每批上限、热钱包余额、每批 ≤ 20 笔"装这一批，装不下的留到下一轮
+    const chosen = r.items;
     if (!chosen.length) { say('没有已审核待签名的 TRON 打款'); return; }
     await planWd(chosen, p);
   });
@@ -284,6 +285,7 @@ render.withdrawals = async (p) => {
 async function planWd(chosen: any[], p: HTMLElement) {
   let plan;
   try { plan = await call('withdraw-plan', { ids: chosen.map((w) => w.id) }); } catch (e) { say(errText(e)); return; }
+  if (plan.left) say(`这一批 ${plan.count} 笔，剩下 ${plan.left} 笔超过这一批的上限，签完这一批后再签下一轮`);
   openWdSign(plan, Object.fromEntries(chosen.map((w) => [w.id, w])), p);
 }
 /** TRON 打款签名窗口：新凑的批次（withdraw-plan）和没签完的批次（payout-resume）共用 */

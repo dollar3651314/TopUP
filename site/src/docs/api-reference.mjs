@@ -281,7 +281,7 @@ export const ENDPOINTS = [
       ['items', 'array', true, ['Up to 500 items: [{ chain, to, amount, customer_id?, merchant_ref? }] (chain: eth, bsc or tron; amount in USDT, up to 6 decimals)', '最多 500 笔：[{ chain, to, amount, customer_id?, merchant_ref? }]（chain 是 eth、bsc 或 tron；amount 是 USDT，最多 6 位小数）']],
     ],
     returns: ['PayoutBatch', 'PayoutBatchService'], errors: ['ip_not_allowed', 'too_many_items', 'invalid_rows', 'insufficient_balance', 'invalid_param'],
-    note: ['Requires an IP whitelist. If any item is invalid the whole request is rejected with 422 invalid_rows and error.rows = [{ index, code }] (index starts at 0); nothing is frozen. Otherwise amount + fee of every item is frozen at once and each item is reviewed manually. Network fees are not charged separately. Body limit for this endpoint is 256 KB.', '需要先设置 IP 白名单。有一笔不对整个请求返回 422 invalid_rows，error.rows 列出 [{ index, code }]（index 从 0 起），不冻结任何金额；全部没问题时一次冻结每笔的"金额 + 手续费"，每一笔都经过人工审核。网络费不另收。这个接口的请求体上限是 256 KB。'],
+    note: ['Requires an IP whitelist. If any item is invalid the whole request is rejected with 422 invalid_rows and error.rows = [{ index, line, code, errors }] (index starts at 0, line = index + 1; code is the first problem of the item, errors lists all of them); nothing is frozen. Otherwise amount + fee of every item is frozen at once and each item is reviewed manually. Network fees are not charged separately. Body limit for this endpoint is 256 KB.', '需要先设置 IP 白名单。有一笔不对整个请求返回 422 invalid_rows，error.rows 列出 [{ index, line, code, errors }]（index 从 0 起，line = index + 1；code 是这一笔的第一个问题，errors 列出全部问题），不冻结任何金额；全部没问题时一次冻结每笔的"金额 + 手续费"，每一笔都经过人工审核。网络费不另收。这个接口的请求体上限是 256 KB。'],
   },
   {
     method: 'GET', path: 'payouts/batch/', title: ['Get a batch payout', '查询批量打款'],
@@ -325,7 +325,7 @@ export const ERRORS = [
   ['422', 'invalid_param', ['A parameter is missing or invalid; see error.field', '参数缺失或格式错误，见 error.field']],
   ['422', 'invalid_address', ['Not a valid address for the chain', '不是这条链的合法地址']],
   ['422', 'too_many_items', ['More than 500 items in one batch', '一批超过 500 笔']],
-  ['422', 'invalid_rows', ['Some batch items are invalid; see error.rows = [{ index, code }]', '批量打款里有不对的行，见 error.rows = [{ index, code }]']],
+  ['422', 'invalid_rows', ['Some batch items are invalid; see error.rows = [{ index, line, code, errors }]', '批量打款里有不对的行，见 error.rows = [{ index, line, code, errors }]']],
   ['422', 'address_not_registered', ['cashout to a wallet that is not registered', 'cashout 的地址不是登记过的钱包']],
   ['422', 'insufficient_balance', ['Amount + fee exceeds available balance', '金额加手续费超过了可用余额']],
   ['429', 'rate_limited', ['More than 20 requests per second; retry later', '每秒超过 20 个请求，请稍后重试']],

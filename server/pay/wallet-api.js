@@ -17,7 +17,7 @@ import { walletAdminActions } from '../wallet/admin-actions.js';
 import { evmUnswept } from '../wallet/addresses.js';
 import { getSweepSettings } from '../wallet/sweep.js';
 import { payoutAdminActions } from './payout-admin.js';
-import { createPayoutTxBatch, expirePayoutBatch, getPayoutLimits, MAX_ITEMS_PER_TX } from './payout.js';
+import { createPayoutTxBatch, expirePayoutBatch, getPayoutLimits, planPayoutBatches, MAX_ITEMS_PER_REQUEST } from './payout.js';
 
 const TRX = 1_000_000;
 const SIGN_TTL_MS = 30 * 60 * 1000; // 待签名交易的有效期
@@ -141,25 +141,30 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     /** 为选中的提币构造待签名的交易（热钱包 → 收款地址） */
     async 'withdraw-plan'(b) {
       const ids = [...new Set((b.ids || []).map(String))];
-      need(ids.length > 0 && ids.length <= MAX_ITEMS_PER_TX.tron, 'invalid_param', 422, 'ids');
+      need(ids.length > 0 && ids.length <= MAX_ITEMS_PER_REQUEST, 'invalid_param', 422, 'ids');
       // 只收已审核、没凑进批次、没挂起的：审核只在"打款审核"的逐笔审核里做（单笔、每天上限、收款地址提示），签名不顺带审核
       let rows = await db.query(`select * from withdrawals where id = any($1::text[]) and status = 'approved' and batch_id is null and hold_reason is null and chain = 'tron'`, [ids]);
       need(rows.length === ids.length, 'not_approved', 409);
-      const hotUsdt = (await tron.account(hot)).trc20[tron.contract] || 0;
-      const total = rows.reduce((s, w) => s + w.amount, 0);
-      need(total <= hotUsdt, 'hot_wallet_insufficient', 409);
-      need(total <= (await getPayoutLimits(db)).perBatch, 'exceeds_batch_cap', 409);
+      const hotUsdt = Number((await tron.account(hot)).trc20[tron.contract] || 0);
+      // 和以太坊 / BSC 一样自动拆批：这一批取 min(每批上限, 热钱包余额)、最多 20 笔，按审核先后装；装不下的留到下一轮
+      const limits = await getPayoutLimits(db);
+      rows.sort((a, b) => (new Date(a.approved_at) - new Date(b.approved_at)) || (new Date(a.created_at) - new Date(b.created_at)) || ((a.batch_line || 0) - (b.batch_line || 0)) || (a.id < b.id ? -1 : 1));
+      const p = planPayoutBatches(rows.map((w) => ({ id: w.id, amount: Number(w.amount) })), { chain: 'tron', perBatch: limits.perBatch, hotBalance: hotUsdt, allowance: null, perItem: limits.perItem });
+      if (!p.batches.length) need(false, p.held.some((h) => h.reason === 'exceeds_hot_balance') ? 'hot_wallet_insufficient' : 'exceeds_batch_cap', 409);
+      const pick = new Set(p.batches[0].items.map((x) => x.id));
+      const left = rows.length - pick.size;
+      const total = Number(p.batches[0].total);
       // 之前凑了没签的 TRON 批次作废（单回到已审核）；已经交了签名的（不是 planned）不动
       for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) await voidTronBatch(x.id);
-      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids, actor: 'admin' });
-      rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, coalesce(batch_line, 0), id', [ids]);
+      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: 'admin' });
+      rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, coalesce(batch_line, 0), id', [[...pick]]);
       const steps = [];
       for (const w of rows) {
         const tx = await tron.buildUsdtTransfer({ from: hot, to: w.to_address, amount: w.amount, feeLimit: USDT_FEE_LIMIT });
         steps.push({ kind: 'withdraw', stage: 1, withdrawal_id: w.id, owner: hot, expect: { to: w.to_address, amount: w.amount }, ...withExpiry(tx) });
       }
       const id = await saveBatch('withdraw', { steps, payout_batch: ptId });
-      return { batch_id: id, payout_batch: ptId, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total };
+      return { batch_id: id, payout_batch: ptId, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total, count: pick.size, left, cap: Number(p.cap), by: p.by };
     },
 
     // ---------- 归集 ----------
