@@ -95,19 +95,25 @@ pull() {
 revision() { docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$1" 2> /dev/null || true; }
 
 health_json() { curl -s --max-time 5 "$HEALTH" 2> /dev/null || true; }
-# 应用活着：提交号对得上、数据库、Redis、主密钥都配好，worker 5 分钟内跑过。
+# 应用活着：提交号对得上、数据库、Redis、主密钥都配好，web 的收付款初始化成功，worker 5 分钟内跑过。
+# db / storage / secret 只说明"变量填了"；web 初始化失败（连不上库、建表出错）时它们照样是 true，
+# 这时健康检查里没有 wallet 这一项（server/web.js：初始化成功才有），所以还要看 wallet 在不在。
+# 第三个参数（秒）：worker 最近一次扫链要在这么多秒以内——刚换版本时旧 worker 留下的扫链时间不算新版本的 worker 活着。
 # 邮件、节点 Key 没配不算失败（那是要填的设置，换回旧版本也解决不了），在 status 和 watch 里显示
 app_alive() {
-  local body=$1 want=${2:-}
+  local body=$1 want=${2:-} within=${3:-}
   [ -n "$body" ] || return 1
   [ -z "$want" ] || [ "$(jq -r '.commit // empty' <<< "$body" 2> /dev/null)" = "${want:0:7}" ] || return 1
-  jq -e '.db == true and .storage == true and .secret == true and .worker.ok == true' <<< "$body" > /dev/null 2>&1
+  [ -z "$within" ] || jq -e --argjson s "$within" '.worker.age_s != null and .worker.age_s <= $s' <<< "$body" > /dev/null 2>&1 || return 1
+  jq -e '.db == true and .storage == true and .secret == true and .worker.ok == true
+    and (.wallet | type) == "object" and .wallet.error == null' <<< "$body" > /dev/null 2>&1
 }
 wait_alive() {
-  local want=$1 body end=$((SECONDS + ${TOPUP_WAIT_S:-180}))
+  local want=$1 body start=$SECONDS end=$((SECONDS + ${TOPUP_WAIT_S:-180}))
   while [ "$SECONDS" -lt "$end" ]; do
     body=$(health_json)
-    app_alive "$body" "$want" && return 0
+    # 换版本（或重建容器）之后新 worker 跑过一轮才算：扫链时间要晚于开始等的时候（多留 5 秒误差）
+    app_alive "$body" "$want" $((SECONDS - start + 5)) && return 0
     sleep 2
   done
   note "3 分钟内没有通过健康检查。最后一次返回：$body"
