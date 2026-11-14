@@ -449,7 +449,7 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
     await admin.unroute(isWallet('withdrawals'));
   });
 
-  test('TC-PB16 C1：批量打款只能整批取消还没审核的部分——提币记录里批次中的单笔没有"取消"按钮，普通单笔提币照旧有', async () => {
+  test('TC-PB16 批量取消口径（2026-11-14 定）：批量打款只能整批取消还没审核的部分——提币记录里批次中的单笔没有"取消"按钮，普通单笔提币照旧有', async () => {
     // 新建一批（2 笔）和一笔普通提币，都还没审核
     const sheet = ['chain,to,amount', `bsc,${rndEvm()},4`, `bsc,${rndEvm()},4`].join('\n');
     const sub = await mcall('payout-batch-submit', { csv: sheet, code: await code(st.merchantSecret) });

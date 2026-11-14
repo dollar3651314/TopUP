@@ -226,9 +226,9 @@ test('开放 API：500 笔可以（请求体超过 32 KB 也要收），501 笔 
   assert.equal((await s.call(s.credB, 'GET', `payouts/batch/?batch_no=${ok.body.batch_no}`)).status, 404, '商户隔离');
 });
 
-// C1（2026-11-14）：批量打款只能整批取消还没审核的部分；批次里的单笔不能单独取消（商户后台、开放 API 都一样）。
+// 批量取消口径（2026-11-14 定）：批量打款只能整批取消还没审核的部分；批次里的单笔不能单独取消（商户后台、开放 API 都一样）。
 // 被拒：409 batch_item_cancel（研发 2026-11-14 报来的错误码）；这一笔仍是待审核、余额和冻结都没动、批次里其余的也没动。
-test('C1 批量打款里的单笔不能单独取消：商户后台 withdraw-cancel、开放 API withdrawals/cancel/ 都拒绝；整批取消照旧可以', async () => {
+test('批量取消口径：批量打款里的单笔不能单独取消：商户后台 withdraw-cancel、开放 API withdrawals/cancel/ 都拒绝；整批取消照旧可以', async () => {
   const s = await setup({ fund: 1_000 });
   const r = await s.call('payout-batch-submit', { csv: csv([['eth', evm(), '10'], ['tron', TRON_A, '5']]), code: s.code() });
   assert.equal(r.status, 200, JSON.stringify(r.body));
