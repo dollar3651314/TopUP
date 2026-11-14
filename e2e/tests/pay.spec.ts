@@ -99,11 +99,18 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
     await expect(admin.locator('[data-view="app"]')).toBeVisible();
     // Q-A1：后台不再提供"初始化主助记词"。旧地址（第 0 批）的主助记词在旧系统里早已初始化：
     // 测试进程生成助记词、只把账户级公钥写进旧数据（服务器只有公钥），后面 TC-P06 归集旧地址时在页面里输入助记词签名
+    // B1（2026-11-14）：全新系统（还没初始化、也没有任何客户）也不出现"初始化主助记词"
+    await admin.click('[data-tab="p-wallet"]');
+    const wpanel = admin.locator('[data-panel="p-wallet"]');
+    await expect(wpanel.locator('[data-wallet-card="tron"]')).toBeVisible();
+    expect((await admin.evaluate(async () => (await fetch('/api/wallet/?a=wallet')).json())).initialized).toBe(false); // 先确认到了"全新系统"这个状态
+    await expect(wpanel).not.toContainText('初始化主助记词');
     const legacy = await legacyMnemonic(admin, B);
     words = legacy.words;
     expect(words).toHaveLength(24);
+    await admin.reload();
+    await expect(admin.locator('[data-view="app"]')).toBeVisible();
     await admin.click('[data-tab="p-wallet"]');
-    const wpanel = admin.locator('[data-panel="p-wallet"]');
     await expect(wpanel.locator('[data-wallet-card="tron"] [data-legacy-addresses]')).toContainText('照常归集');
     await expect(wpanel).not.toContainText('初始化主助记词');
     // 服务器认的是这份旧公钥：第 1 个地址和测试自己用助记词推出来的一致
