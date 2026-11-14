@@ -28,9 +28,11 @@ CERT_NAME=topup
 OTHERS_ROOT=${TOPUP_OTHERS_ROOT:-/opt}
 # 演练模式（只在开发机上用，服务器上不要设）：不装软件、不碰 systemd、证书用自签名、镜像只用本机已有的
 DRILL=${TOPUP_DRILL:-}
-# 所有容器内存上限之和（MB），和 compose.yml 一致：postgres 320 + redis 96 + web 288 + worker 288 + nginx 48
-LIMITS_MB=1040
-# 系统和 Docker 自己要留的（MB，推断）；启动前要求可用内存 ≥ 上限之和 + 这个数
+# 所有容器内存上限之和（MB），和 compose.yml 一致：postgres 256 + redis 80 + web 256 + worker 256 + nginx 32
+# （按 1.6 GB 的测试服务器定：停掉别的项目后可用约 1,050 MB；依据和实测峰值见 deploy/README.md 第 3 节）
+LIMITS_MB=880
+# 容器之外 Docker 还要的（MB）：每个容器一个 containerd-shim、每个对外端口一个 docker-proxy（开发机实测 RSS 合计约 77 MB，见 README 第 3 节）
+# 启动前要求可用内存 ≥ 上限之和 + 这个数
 RESERVE_MB=100
 HEALTH=http://127.0.0.1:18080/api/health/
 # 备份：本机保留 7 天、至少 3 份；本机备份合计超过这个大小时从最旧的删起（至少留 3 份）
