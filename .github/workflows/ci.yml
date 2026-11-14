@@ -32,8 +32,10 @@ jobs:
         ports: ['6379:6379']
         options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
         with:
           node-version: 26
           cache: npm
@@ -60,8 +62,10 @@ jobs:
         ports: ['5432:5432']
         options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
         with:
           node-version: 26
           cache: npm
@@ -73,18 +77,18 @@ jobs:
       - name: 构建页面（先检查中英文案结构）
         run: cd site && npm ci && npm run build
       - name: 浏览器缓存
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4（v4.3.0）
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package-lock.json') }}
       # Playwright 1.56 在 Node 26 下解压浏览器会卡住（本地复现：Node 22 正常、Node 26 卡住），浏览器用 Node 22 安装，测试仍在 Node 26 上跑
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
         with:
           node-version: 22
       - name: 安装测试浏览器（Node 22）
         timeout-minutes: 15
         run: cd e2e && npm ci && npx playwright install --with-deps chromium
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
         with:
           node-version: 26
       - name: 端到端测试
@@ -93,7 +97,7 @@ jobs:
         run: cd e2e && npx playwright test
       - name: 失败时保存截图和日志
         if: failure()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5（v5.0.0）
         with:
           name: e2e-results
           path: |
@@ -107,10 +111,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
         with:
           submodules: recursive
-      - uses: foundry-rs/foundry-toolchain@v1
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1（v1.9.2）
         with:
           version: v1.5.1
       # 不只核对仓库里的 sha256 清单（清单和源码可以一起被改），还从 GitHub 拉上游固定提交逐字节比较
@@ -123,7 +128,7 @@ jobs:
       # TRON 派生版合约（src/tron/）的单测：单独一个 profile（test-tron/），不影响上面以太坊版的编译和测试
       - name: forge test（TRON 派生版合约，FOUNDRY_PROFILE=tron）
         run: cd contracts && FOUNDRY_PROFILE=tron forge test -vvv
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
         with:
           node-version: 26
           cache: npm
@@ -142,8 +147,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
         with:
           node-version: 26
           cache: npm
@@ -164,7 +171,7 @@ jobs:
             node --test test/tron-local/*.test.js
       - name: 保存报告
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5（v5.0.0）
         with:
           name: tron-local-report
           path: tron-*-report.json
@@ -195,7 +202,9 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
       - name: 构建并推送镜像（APP_ENV=staging）
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -219,7 +228,9 @@ jobs:
     env:
       STAGING_URL: ${{ secrets.STAGING_URL }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
       - name: 测试环境检查
         run: |
           if [ -z "$STAGING_URL" ]; then echo "::warning::仓库密钥 STAGING_URL 还没有配置，跳过"; exit 0; fi

@@ -16,7 +16,9 @@ jobs:
     env:
       STAGING_URL: ${{ secrets.STAGING_URL }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
       - name: 测试环境检查
         run: |
           if [ -z "$STAGING_URL" ]; then echo "::warning::仓库密钥 STAGING_URL 还没有配置，跳过"; exit 0; fi
