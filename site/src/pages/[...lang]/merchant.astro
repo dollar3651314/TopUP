@@ -9,7 +9,7 @@ const { lang } = Astro.props as { lang: Lang };
 const c = copy[lang];
 const other: Lang = lang === 'en' ? 'zh' : 'en';
 const base = (l: Lang) => (l === 'en' ? '/' : '/zh/');
-const tabs = ['overview', 'customers', 'orders', 'transactions', 'withdraw', 'api', 'callbacks'] as const;
+const tabs = ['overview', 'customers', 'orders', 'transactions', 'withdraw', 'payout-batch', 'api', 'callbacks'] as const;
 ---
 <AppLayout lang={lang} title={c.meta.title} badge={c.header.badge} switchHref={`${base(other)}merchant/`} switchLabel={c.header.switch} switchAria={c.header.switchAria}>
   <div id="m-root" data-prototype={IS_PROTOTYPE ? '1' : undefined} data-lang={lang} data-base={base(lang)}>

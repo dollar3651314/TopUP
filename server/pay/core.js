@@ -368,7 +368,7 @@ export async function rejectWithdrawal(db, id, reason, actor) {
 }
 /** 管理员批准并签名后：进入 signing（已批准），广播后进入 broadcast */
 export async function markWithdrawal(db, id, to, extra = {}) {
-  const from = { signing: ['pending'], broadcast: ['signing'] }[to];
+  const from = { signing: ['pending', 'approved'], broadcast: ['signing'] }[to];
   if (!from) throw new Error('bad transition');
   return db.tx(async (t) => { await moveWithdrawal(t, id, from, to, extra); await wdCallback(t, id); return withdrawalView(t, id); });
 }

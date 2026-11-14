@@ -19,6 +19,20 @@ import { scanEvm } from '../wallet/scan.js';
 import { confirmSweeps, proposeDue } from '../wallet/sweep.js';
 import { checkRentalBalance } from '../wallet/energy.js';
 import { checkWalletsChange } from './wallets-change.js';
+import { createPayoutService } from '../wallet/payout.js';
+import { isEvmAddress } from '../wallet/create2.js';
+
+/** 批量打款（第 3 批）开通的链：钱包层开通了这条链，且 config/wallets.json 的 evm.<链> 写了 hot（热钱包）和 payout（BatchPayout） */
+export function payoutChains(layer, evm = {}) {
+  const out = {};
+  for (const chain of ['eth', 'bsc']) {
+    const e = evm[chain] || {};
+    const adapter = layer?.adapters?.[chain];
+    if (!adapter || !layer.enabledChains.includes(chain) || !isEvmAddress(e.hot || '') || !isEvmAddress(e.payout || '')) continue;
+    out[chain] = { adapter, token: layer.config[chain].usdt, contract: e.payout, hot: e.hot, decimals: layer.config[chain].decimals };
+  }
+  return out;
+}
 
 const WALLETS_RAW = readFileSync(new URL('../../config/wallets.json', import.meta.url), 'utf8');
 const WALLETS = JSON.parse(WALLETS_RAW);
@@ -36,7 +50,8 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   const wallets = walletsFor(config.appEnv);
   // 钱包层（ETH、BSC、TRON 合约钱包；cobo、fireblocks 未开通）。TRON 一节空着时不开通 TRON 合约钱包
   const layer = createWalletLayer({ db, config, evm: wallets.evm || {}, tron: wallets.tron || null });
-  const ops = createOps({ db, keys, payBase: origin, keyPrefix, wallet: layer });
+  const notify0 = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
+  const ops = createOps({ db, keys, payBase: origin, keyPrefix, wallet: layer, notify: notify0 });
   const gate = createAdminGate({ redis: kyb.redis, kybKeys: kyb.keys });
   const notify = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
   // 启动时用 eth_call 核对链上批量合约的 parent、factory 和配置一致；不一致的链不开通并告警（最多等 8 秒，连不上下一轮再核对）
@@ -51,16 +66,20 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
     return m && m.callback_url && m.api_secret_enc ? { url: m.callback_url, secret: decryptJson(keys.enc, m.api_secret_enc) } : null;
   };
   const listApproved = kyb.listApproved || (async () => []);
+  // 以太坊、BSC 批量打款：服务器上没有热钱包私钥，只出交易原文、收签名、广播、按回执记账
+  const pchains = payoutChains(layer, wallets.evm || {});
+  const payoutSvc = Object.keys(pchains).length ? createPayoutService({ db, chains: pchains, verifyCode: (c) => gate.verifyAdminCode(c), notify }) : null;
   const pendingKyb = kyb.pendingKyb || (async () => 0);
   return {
     db, tron, keys, ops, wallets, layer,
     v1: createApiV1({ db, keys, ops, getIp, redis: kyb.redis }), // 限流计数和开户共用同一个 Redis
     merchant: createMerchantApi({ db, keys, ops, send }),
     pay: createPayApi({ db, layer, redis: kyb.redis, getIp }), // 按 IP 限流，和开放 API 共用 Redis
-    wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, notify, diskPath }), diskPath, ...gate }),
+    wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, notify, diskPath }), diskPath, payoutSvc, ...gate }),
     tick: () => runTick({
       db, tron, getTarget, notify, adminUrl: `${origin}/admin/`,
       scanEvm: () => scanEvm(db, { layer, notify }),
+      confirmPayouts: payoutSvc ? () => payoutSvc.confirm() : null,
       // 归集：TRON 第 0 批的浏览器签名批次；ETH、BSC 合约钱包确认已发出的批次、到点凑批（东八区 10:00、20:00）
       confirmSweeps: async () => {
         const tronSweeps = await sweepProgress(db, tron, { notify });

@@ -39,7 +39,8 @@
       "api": "API settings",
       "callbacks": "Callbacks",
       "docs": "Developer docs",
-      "logout": "Sign out"
+      "logout": "Sign out",
+      "payout-batch": "Batch payouts"
     },
     "common": {
       "none": "None yet",
@@ -209,7 +210,7 @@
       "kindCashout": "Cash-out (to my registered wallet)",
       "cashoutWallet": "Registered wallet",
       "noWallet": "No registered wallet. Contact us to register one.",
-      "to": "Recipient address (TRON)",
+      "to": "Recipient address",
       "amount": "Amount (USDT)",
       "fee": "Payout fee",
       "freeze": "Will be frozen",
@@ -256,7 +257,16 @@
       "submitted": "Submitted. {amount} USDT is frozen until the request is processed.",
       "reason": "Reason",
       "customer": "Customer ID (optional)",
-      "customerHint": "For payouts to your customer: links this payout to the customer for statistics."
+      "customerHint": "For payouts to your customer: links this payout to the customer for statistics.",
+      "chain": "Chain",
+      "chainFee": "fee {fee} per withdrawal",
+      "chainNone": " (no registered address)",
+      "toRegistered": "Recipient (only addresses registered for this chain)",
+      "noWalletChain": "You have no registered address on {net}. Contact us to register one.",
+      "payTo": "Recipient address",
+      "errAddressChain": "Enter a valid {net} address.",
+      "chainCol": "Chain",
+      "balanceNote": "Your available balance is shared by all three chains; choose the chain when you withdraw."
     },
     "api": {
       "title": "API settings",
@@ -426,12 +436,15 @@
       "weak_password": "Password must be at least 12 characters.",
       "cannot_match": "This deposit cannot be matched to this order.",
       "not_matched": "This deposit is not matched to this order.",
-      "invalid_address": "Enter a valid TRON address.",
-      "address_not_registered": "This address is not one of your registered wallets.",
+      "invalid_address": "Invalid address for the chosen chain.",
+      "address_not_registered": "This address is not a wallet you registered on this chain.",
       "duplicate_customer": "This customer already exists.",
       "not_configured": "The service is not configured yet.",
       "unauthorized": "Your session has ended. Please sign in again.",
-      "generic": "Something went wrong. Please try again."
+      "generic": "Something went wrong. Please try again.",
+      "too_many_items": "At most 500 items at a time.",
+      "invalid_rows": "Some rows have problems; see the check result of each row.",
+      "invalid_sheet": "Could not read the sheet: the first row must be the header chain,to,amount."
     },
     "picker": {
       "placeholder": "Search by customer ID, name or email, or type a new ID",
@@ -460,6 +473,87 @@
       "tronLater": "After release 2 goes live, generated when the customer makes a deposit on TRON.",
       "sameNote": "The Ethereum and BSC addresses are the same string: this customer can receive USDT on both networks. Tell the payer which network to use.",
       "copiedNote": "Copied. Tell the payer to use the {net} ({std}) network only."
+    },
+    "pb": {
+      "title": "Batch payouts",
+      "sub": "Pay many recipients at once: upload a sheet or use the API",
+      "steps": [
+        "Upload",
+        "Check rows",
+        "Review and submit"
+      ],
+      "uploadTitle": "Upload a sheet to pay many recipients at once",
+      "uploadHint": "One payout per row: chain (Ethereum / BSC / TRON), recipient, amount (USDT), and optional customer ID and your reference. CSV with a header row, up to 500 rows.",
+      "choose": "Choose a sheet",
+      "header": "Header: chain,to,amount,customer_id,merchant_ref",
+      "template": "Download template",
+      "apiNote": "Integrated systems can use the API instead: POST /api/v1/payouts/batch/ (with Idempotency-Key; the same key counts once; add an IP whitelist in API settings first). Batches from both are listed below, and every item sends callbacks.",
+      "tooMany": "A sheet can have at most 500 rows; this one has {n}. Split it and upload again.",
+      "badSheet": "Could not read the sheet: the first row must be the header chain,to,amount (optionally customer_id,merchant_ref).",
+      "summary": "{n} rows: {ok} OK · {bad} with problems · {warn} to confirm.",
+      "summaryNote": "Rows with problems are not submitted.",
+      "cols": {
+        "line": "Row",
+        "chain": "Chain",
+        "to": "Recipient",
+        "amount": "Amount",
+        "ref": "Reference",
+        "check": "Check",
+        "count": "Items",
+        "fee": "Payout fee",
+        "total": "Total",
+        "batch": "Batch",
+        "source": "Source",
+        "status": "Status",
+        "time": "Submitted"
+      },
+      "lineNo": "Row {n}",
+      "lineNote": "Row numbers match the sheet (row 1 is the header). Addresses are checked per chain: Ethereum / BSC 0x + 40 hex (mixed case must match the checksum), TRON starts with T, 34 characters.",
+      "err": {
+        "unknown_chain": "Chain must be Ethereum / BSC / TRON",
+        "invalid_address": "Invalid address: not a {net} address",
+        "invalid_amount": "Amount must be greater than 0",
+        "decimals": "At most 6 decimals",
+        "invalid_customer_id": "Customer ID may only use letters, digits and _ . @ -",
+        "invalid_merchant_ref": "Reference is at most 64 characters",
+        "duplicate_row": "Same as another row (chain, address and amount): pay twice?"
+      },
+      "ok": "OK",
+      "reupload": "Fix the sheet and upload again",
+      "onlyValid": "Submit only the {n} rows without problems",
+      "next": "Next",
+      "needOnlyValid": "Rows with problems are not submitted: tick \"submit only the rows without problems\", or fix the sheet and upload again.",
+      "sumTitle": "By chain (no separate network fee; it is included in the payout fee)",
+      "available": "Available balance {v} USDT (shared by all chains)",
+      "need": "{v} USDT will be frozen (amounts + payout fees)",
+      "notEnough": "Insufficient balance: this batch needs {need} USDT but only {have} USDT is available. Remove some rows or wait for incoming payments.",
+      "code": "Authenticator code (6 digits)",
+      "submit": "Submit and freeze",
+      "back": "Back",
+      "submitted": "Submitted {n} items, batch {no}. Each item is reviewed and then paid; you get a callback for every item.",
+      "late": "Outside processing hours (8:00–23:00 UTC+8): it will be processed after 8:00 tomorrow.",
+      "failed": "Not submitted: {why}",
+      "history": "Batch payout history",
+      "none": "No batch payouts yet.",
+      "view": "View items",
+      "cancel": "Cancel unreviewed",
+      "cancelTitle": "Cancel batch {no}",
+      "cancelConfirm": "Only items not yet reviewed are cancelled; reviewed items are still paid. Cancelled amounts return to your available balance.",
+      "cancelled": "Cancelled {n} items; the amounts are back in your available balance.",
+      "status": {
+        "pending": "Under review",
+        "approved": "Approved",
+        "partially_rejected": "Partly rejected",
+        "rejected": "Rejected",
+        "completed": "Completed",
+        "cancelled": "Cancelled"
+      },
+      "sources": {
+        "web": "Uploaded sheet",
+        "api": "API"
+      },
+      "itemsTitle": "Items in batch {no}",
+      "tx": "Transaction"
     }
   },
   "zh": {
@@ -502,7 +596,8 @@
       "api": "API 设置",
       "callbacks": "回调记录",
       "docs": "开发者文档",
-      "logout": "退出登录"
+      "logout": "退出登录",
+      "payout-batch": "批量打款"
     },
     "common": {
       "none": "暂无",
@@ -672,7 +767,7 @@
       "kindCashout": "商户提现（到已登记的钱包）",
       "cashoutWallet": "已登记的钱包",
       "noWallet": "还没有登记的钱包，请联系我们登记。",
-      "to": "收款地址（TRON）",
+      "to": "收款地址",
       "amount": "金额（USDT）",
       "fee": "付款手续费",
       "freeze": "将冻结",
@@ -719,7 +814,16 @@
       "submitted": "已提交，{amount} USDT 已冻结，处理完成前不能使用。",
       "reason": "原因",
       "customer": "客户标识（选填）",
-      "customerHint": "代付给你的客户时填写，用于按客户统计。"
+      "customerHint": "代付给你的客户时填写，用于按客户统计。",
+      "chain": "选链",
+      "chainFee": "手续费 {fee} / 笔",
+      "chainNone": "（没有登记地址）",
+      "toRegistered": "收款地址（只能选这条链登记过的）",
+      "noWalletChain": "{net} 没有登记提币地址，不能提到这条链。需要时请联系我们登记。",
+      "payTo": "收款地址",
+      "errAddressChain": "请输入正确的 {net} 地址。",
+      "chainCol": "链",
+      "balanceNote": "可用余额是一个数，三条链共用，提的时候选链。"
     },
     "api": {
       "title": "API 设置",
@@ -889,12 +993,15 @@
       "weak_password": "密码至少 12 位。",
       "cannot_match": "这笔到账不能匹配到这个订单。",
       "not_matched": "这笔到账没有匹配到这个订单。",
-      "invalid_address": "请输入正确的 TRON 地址。",
-      "address_not_registered": "这个地址不是你已登记的钱包。",
+      "invalid_address": "地址格式不对（按选的链检查）。",
+      "address_not_registered": "这个地址不是你在这条链上登记的钱包。",
       "duplicate_customer": "这个客户已经存在。",
       "not_configured": "服务还没有配置好。",
       "unauthorized": "登录已过期，请重新登录。",
-      "generic": "操作失败，请稍后重试。"
+      "generic": "操作失败，请稍后重试。",
+      "too_many_items": "一次最多 500 笔。",
+      "invalid_rows": "表格里有问题的行，请看每一行的检查结果。",
+      "invalid_sheet": "没读出表格：第一行要是表头 chain,to,amount。"
     },
     "picker": {
       "placeholder": "输入客户编号、名称或邮箱搜索；也可以输入新的编号",
@@ -923,6 +1030,87 @@
       "tronLater": "第 2 批上线后，客户在 TRON 发起充值时生成。",
       "sameNote": "以太坊和 BSC 的地址是同一串：这个客户两条链都能收 USDT。付款时按付款人用的网络告诉他。",
       "copiedNote": "已复制。告诉付款人只用 {net}（{std}）网络转账。"
+    },
+    "pb": {
+      "title": "批量打款",
+      "sub": "一次付给很多人：上传表格，或者用开放 API",
+      "steps": [
+        "上传表格",
+        "逐行检查",
+        "核对金额并提交"
+      ],
+      "uploadTitle": "上传一张表格，一次付给很多人",
+      "uploadHint": "每行一笔：链（以太坊 / BSC / TRON）、收款地址、金额（USDT）、客户标识和你的单号（选填）。CSV 文件，第一行是表头，最多 500 行。",
+      "choose": "选择表格文件",
+      "header": "表头写：chain,to,amount,customer_id,merchant_ref",
+      "template": "下载模板",
+      "apiNote": "接了系统的话，也可以用开放 API 提交：POST /api/v1/payouts/batch/（带 Idempotency-Key，同一个 Key 重复提交只算一次；要先在\"API 设置\"里加 IP 白名单）。两种入口提交的批次都在下面，每一笔的状态变化都会发回调。",
+      "tooMany": "一张表最多 500 行，这张有 {n} 行。请拆成几张再传。",
+      "badSheet": "没读出表格：第一行要是表头 chain,to,amount（后面可以有 customer_id,merchant_ref）。",
+      "summary": "{n} 行：{ok} 行没问题 · {bad} 行有问题 · {warn} 行要你确认。",
+      "summaryNote": "有问题的行不会提交。",
+      "cols": {
+        "line": "行",
+        "chain": "链",
+        "to": "收款地址",
+        "amount": "金额",
+        "ref": "单号",
+        "check": "检查结果",
+        "count": "笔数",
+        "fee": "付款手续费",
+        "total": "合计",
+        "batch": "批次",
+        "source": "来源",
+        "status": "状态",
+        "time": "提交时间"
+      },
+      "lineNo": "第 {n} 行",
+      "lineNote": "行号对应表格里的行（第 1 行是表头）。地址按链检查：以太坊 / BSC 是 0x 开头 40 位（大小写混合的要校验和对），TRON 是 T 开头 34 位。",
+      "err": {
+        "unknown_chain": "链只能填 以太坊 / BSC / TRON",
+        "invalid_address": "地址不对：这一串不是 {net} 的地址",
+        "invalid_amount": "金额要大于 0",
+        "decimals": "小数最多 6 位",
+        "invalid_customer_id": "客户标识只能用字母、数字和 _ . @ -",
+        "invalid_merchant_ref": "单号最多 64 个字符",
+        "duplicate_row": "和别的行重复（链、地址、金额都相同）：确定要付两次吗？"
+      },
+      "ok": "没问题",
+      "reupload": "改好表格重新上传",
+      "onlyValid": "只提交没问题的 {n} 行",
+      "next": "下一步",
+      "needOnlyValid": "有问题的行不会提交：勾上\"只提交没问题的行\"，或者改好表格重新上传。",
+      "sumTitle": "按链汇总（网络费不另收，含在付款手续费里）",
+      "available": "可用余额 {v} USDT（三条链共用）",
+      "need": "这次一共冻结 {v} USDT（金额 + 付款手续费）",
+      "notEnough": "余额不够：这批要冻结 {need} USDT，可用余额只有 {have} USDT。先少付几笔，或者等收款进来再提交。",
+      "code": "验证器动态码（6 位）",
+      "submit": "提交并冻结",
+      "back": "上一步",
+      "submitted": "已提交 {n} 笔，批次 {no}。平台逐笔审核后付出，每一笔的结果都会发回调。",
+      "late": "现在不在处理时段（东八区 8:00–23:00），第二天 8:00 后处理。",
+      "failed": "没提交成功：{why}",
+      "history": "批量打款记录",
+      "none": "还没有批量打款。",
+      "view": "看每一笔",
+      "cancel": "取消还没审核的",
+      "cancelTitle": "取消批次 {no}",
+      "cancelConfirm": "只取消还没审核的笔，已审核的照常付出。取消的金额退回可用余额。",
+      "cancelled": "已取消 {n} 笔，金额已退回可用余额。",
+      "status": {
+        "pending": "待审核",
+        "approved": "已审核",
+        "partially_rejected": "部分被驳回",
+        "rejected": "已驳回",
+        "completed": "已完成",
+        "cancelled": "已取消"
+      },
+      "sources": {
+        "web": "后台上传",
+        "api": "API"
+      },
+      "itemsTitle": "批次 {no} 的每一笔",
+      "tx": "交易哈希"
     }
   }
 }

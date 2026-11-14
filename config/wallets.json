@@ -1,5 +1,5 @@
 {
-  "_说明": "热钱包、冷钱包的地址（公开信息，不是密钥）。签名页面只允许把钱归集到这两个地址，修改必须提交 PR。production 和 staging 的地址在部署时提供后走 PR 填写；local 是本地测试用的地址，对应公开的测试私钥，只用于自动化测试。usdt 是签名页面认可的 USDT 合约地址（生产是主网，测试环境和本地是 Nile 测试网）。 evm 是 ETH、BSC 合约钱包的参数（公开地址）：usdt、factory（BitGo 工厂）、implementation（转发合约实现）、parent（冷钱包，Safe 多签）、batcher（批量合约 SweepBatcher）、ver（这套参数的版本，换参数时加 1）；空着的链不开通。local 的是本地替身用的假地址，不在任何链上。 tron 是 TRON 合约钱包（第 2 批）的参数（公开地址，T 开头）：usdt、factory（TRON 版工厂 ForwarderFactoryTron）、implementation（ForwarderTron）、parent（冷钱包）、batcher（SweepBatcherTron）、ver；空着的不开通，local 不开通 TRON 合约钱包（本地只有第 0 批的老 TRON 地址）。",
+  "_说明": "热钱包、冷钱包的地址（公开信息，不是密钥）。签名页面只允许把钱归集到这两个地址，修改必须提交 PR。production 和 staging 的地址在部署时提供后走 PR 填写；local 是本地测试用的地址，对应公开的测试私钥，只用于自动化测试。usdt 是签名页面认可的 USDT 合约地址（生产是主网，测试环境和本地是 Nile 测试网）。 evm 是 ETH、BSC 合约钱包的参数（公开地址）：usdt、factory（BitGo 工厂）、implementation（转发合约实现）、parent（冷钱包，Safe 多签）、batcher（批量合约 SweepBatcher）、ver（这套参数的版本，换参数时加 1）；空着的链不开通。hot（打款热钱包，第 3 批）和 payout（批量打款合约 BatchPayout）空着时这条链不开通批量打款，签名页面只认这里的热钱包和 BatchPayout。local 的是本地替身用的假地址，不在任何链上；local 的 hot 是公开测试私钥 11…11 对应的地址，只用于自动化测试。 tron 是 TRON 合约钱包（第 2 批）的参数（公开地址，T 开头）：usdt、factory（TRON 版工厂 ForwarderFactoryTron）、implementation（ForwarderTron）、parent（冷钱包）、batcher（SweepBatcherTron）、ver；空着的不开通，local 不开通 TRON 合约钱包（本地只有第 0 批的老 TRON 地址）。",
   "production": {
     "hot": "",
     "cold": "",
@@ -11,7 +11,9 @@
         "implementation": "",
         "parent": "",
         "batcher": "",
-        "ver": 1
+        "ver": 1,
+        "hot": "",
+        "payout": ""
       },
       "bsc": {
         "usdt": "",
@@ -19,7 +21,9 @@
         "implementation": "",
         "parent": "",
         "batcher": "",
-        "ver": 1
+        "ver": 1,
+        "hot": "",
+        "payout": ""
       }
     },
     "tron": {
@@ -42,7 +46,9 @@
         "implementation": "",
         "parent": "",
         "batcher": "",
-        "ver": 1
+        "ver": 1,
+        "hot": "",
+        "payout": ""
       },
       "bsc": {
         "usdt": "",
@@ -50,7 +56,9 @@
         "implementation": "",
         "parent": "",
         "batcher": "",
-        "ver": 1
+        "ver": 1,
+        "hot": "",
+        "payout": ""
       }
     },
     "tron": {
@@ -73,7 +81,9 @@
         "implementation": "0x0000000000000000000000000000000000001001",
         "parent": "0x0000000000000000000000000000000000005afe",
         "batcher": "0x000000000000000000000000000000000000ba7c",
-        "ver": 1
+        "ver": 1,
+        "hot": "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+        "payout": "0x000000000000000000000000000000000000ba70"
       },
       "bsc": {
         "usdt": "0x000000000000000000000000000000000000B5c6",
@@ -81,7 +91,9 @@
         "implementation": "0x0000000000000000000000000000000000001001",
         "parent": "0x0000000000000000000000000000000000005afe",
         "batcher": "0x000000000000000000000000000000000000ba7c",
-        "ver": 1
+        "ver": 1,
+        "hot": "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A",
+        "payout": "0x000000000000000000000000000000000000ba70"
       }
     }
   }

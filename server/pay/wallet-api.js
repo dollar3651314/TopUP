@@ -16,6 +16,8 @@ import { diskUsage } from './disk.js';
 import { walletAdminActions } from '../wallet/admin-actions.js';
 import { evmUnswept } from '../wallet/addresses.js';
 import { getSweepSettings } from '../wallet/sweep.js';
+import { payoutAdminActions } from './payout-admin.js';
+import { approvePayouts, createPayoutTxBatch, expirePayoutBatch, settlePayoutItem, getPayoutLimits, MAX_ITEMS_PER_TX } from './payout.js';
 
 const TRX = 1_000_000;
 const SIGN_TTL_MS = 30 * 60 * 1000; // 待签名交易的有效期
@@ -23,7 +25,8 @@ const VERIFY_TTL_MS = 5 * 60 * 1000; // 验证码通过后 5 分钟内必须提�
 const ENERGY_PER_SWEEP = 65_000; // 转 USDT 到已经有 USDT 的地址，大约需要的能量
 const USDT_FEE_LIMIT = 30 * TRX;
 
-export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null }) {
+export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null, payoutSvc = null }) {
+  const payoutActions = payoutAdminActions({ db, tron, wallets, layer, payoutSvc, verifyAdminCode, now });
   const hot = wallets.hot, cold = wallets.cold;
   const need = (cond, code, status = 422, field) => { if (!cond) throw new PayError(code, status, field); };
   const merchantRow = async (id) => { const m = await core.getMerchant(db, id); need(m, 'not_found', 404); return m; };
@@ -75,7 +78,6 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     /** 开通商户：用开户申请的企业名称和授权联系人邮箱，发送设置密码的邮件 */
     async 'merchant-open'(b, actor) {
       need(b.name && b.email && /@/.test(b.email), 'invalid_param', 422, 'email');
-      for (const w of b.cashout_wallets || []) need(isValidAddress(w), 'invalid_address', 422, 'cashout_wallets');
       const m = await core.createMerchant(db, { name: String(b.name).slice(0, 200), kybRef: b.kyb_ref || null, feeIn: b.fee_in, feeOut: b.fee_out, mode: b.order_mode, cashoutWallets: b.cashout_wallets || [] });
       const lang = b.lang === 'en' ? 'en' : 'zh';
       await inviteMerchantUser(db, keys, { merchantId: m.id, email: String(b.email).trim(), send, origin, lang });
@@ -86,8 +88,8 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const m = await merchantRow(b.id);
       const fee_in = core.checkFee(b.fee_in ?? m.fee_in, 'fee_in'), fee_out = core.checkFee(b.fee_out ?? m.fee_out, 'fee_out'), mode = core.checkMode(b.order_mode ?? m.order_mode);
       const status = b.status === 'disabled' ? 'disabled' : 'active';
-      const wallets = b.cashout_wallets ?? m.cashout_wallets;
-      for (const w of wallets) need(isValidAddress(w), 'invalid_address', 422, 'cashout_wallets');
+      // 提现地址按链登记：元素 { chain, address }（老数据的字符串当作 TRON），按链校验地址
+      const wallets = core.normalizeCashoutWallets(b.cashout_wallets ?? m.cashout_wallets);
       await db.query('update merchants set fee_in = $2::jsonb, fee_out = $3::jsonb, order_mode = $4::jsonb, status = $5, cashout_wallets = $6::jsonb where id = $1',
         [m.id, JSON.stringify(fee_in), JSON.stringify(fee_out), JSON.stringify(mode), status, JSON.stringify(wallets)]);
       await audit(db, actor, 'merchant.save', m.id, { fee_in, fee_out, order_mode: mode, status, cashout_wallets: wallets });
@@ -122,27 +124,44 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     // ---------- 提币审核 ----------
     async withdrawals(b, actor, q) {
       const all = q.get('all') === '1';
-      const rows = await db.query(`select w.*, m.name merchant from withdrawals w join merchants m on m.id = w.merchant_id ${all ? '' : "where w.status = 'pending'"} order by w.created_at desc limit 200`);
+      // approved=tron：已审核、还没凑进批次的 TRON 单（TRON 卡片的"核对并签名"用）
+      const where = q.get('approved') === 'tron' ? "where w.status = 'approved' and w.batch_id is null and w.chain = 'tron'" : all ? '' : "where w.status = 'pending'";
+      const rows = await db.query(`select w.*, m.name merchant from withdrawals w join merchants m on m.id = w.merchant_id ${where} order by ${q.get('approved') ? 'w.approved_at, w.created_at' : 'w.created_at desc'} limit 200`);
       let hotUsdt = null; try { hotUsdt = (await tron.account(hot)).trc20[tron.contract] || 0; } catch { /* 查询失败时页面显示"—" */ }
-      return { hot: { address: hot, usdt: hotUsdt }, items: rows.map((w) => ({ id: w.id, merchant_id: w.merchant_id, merchant: w.merchant, kind: w.kind, customer_id: w.customer_id, to: w.to_address, amount: w.amount, fee: w.fee, source: w.source, status: w.status, txid: w.txid, reason: w.reason, created_at: iso(w.created_at), registered: w.kind === 'cashout' })) };
+      const overview = await payoutActions['payout-overview']();
+      return { ...overview, hot: { address: hot, usdt: hotUsdt }, items: rows.map((w) => ({ id: w.id, merchant_id: w.merchant_id, merchant: w.merchant, kind: w.kind, chain: w.chain, batch_no: w.batch_ref || null, customer_id: w.customer_id, to: w.to_address, amount: w.amount, fee: w.fee, source: w.source, status: w.status, txid: w.txid, reason: w.reason, created_at: iso(w.created_at), registered: w.kind === 'cashout' })) };
     },
     'withdraw-reject': (b, actor) => core.rejectWithdrawal(db, String(b.id || ''), b.reason, actor),
     /** 为选中的提币构造待签名的交易（热钱包 → 收款地址） */
     async 'withdraw-plan'(b) {
       const ids = [...new Set((b.ids || []).map(String))];
-      need(ids.length > 0 && ids.length <= 50, 'invalid_param', 422, 'ids');
-      const rows = await db.query(`select * from withdrawals where id = any($1::text[]) and status = 'pending'`, [ids]);
+      need(ids.length > 0 && ids.length <= MAX_ITEMS_PER_TX.tron, 'invalid_param', 422, 'ids');
+      let rows = await db.query(`select * from withdrawals where id = any($1::text[]) and status in ('pending', 'approved') and batch_id is null and chain = 'tron'`, [ids]);
       need(rows.length === ids.length, 'invalid_state', 409);
       const hotUsdt = (await tron.account(hot)).trc20[tron.contract] || 0;
       const total = rows.reduce((s, w) => s + w.amount, 0);
       need(total <= hotUsdt, 'hot_wallet_insufficient', 409);
+      need(total <= (await getPayoutLimits(db)).perBatch, 'exceeds_batch_cap', 409);
+      // 页面上"审核 + 签名"一起做的（待审核的）：先按单笔、每天上限审核通过，超了的不签
+      const pend = rows.filter((w) => w.status === 'pending').map((w) => w.id);
+      if (pend.length) {
+        const r = await approvePayouts(db, { ids: pend, actor: 'admin', now: now() });
+        if (r.refused.length) throw Object.assign(new PayError(r.refused[0].reason, 409, 'ids'), { rows: r.refused });
+      }
+      // 之前凑了没签的 TRON 批次作废（单回到已审核）
+      for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) {
+        await expirePayoutBatch(db, x.id);
+        await db.query(`update sign_batches set status = 'expired', updated_at = now() where kind = 'withdraw' and status = 'planned' and plan->>'payout_batch' = $1`, [x.id]);
+      }
+      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids, actor: 'admin' });
+      rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, id', [ids]);
       const steps = [];
       for (const w of rows) {
         const tx = await tron.buildUsdtTransfer({ from: hot, to: w.to_address, amount: w.amount, feeLimit: USDT_FEE_LIMIT });
         steps.push({ kind: 'withdraw', stage: 1, withdrawal_id: w.id, owner: hot, expect: { to: w.to_address, amount: w.amount }, ...withExpiry(tx) });
       }
-      const id = await saveBatch('withdraw', { steps });
-      return { batch_id: id, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total };
+      const id = await saveBatch('withdraw', { steps, payout_batch: ptId });
+      return { batch_id: id, payout_batch: ptId, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total };
     },
 
     // ---------- 归集 ----------
@@ -221,10 +240,12 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       }
       await audit(db, actor, `${batch.kind}.signed`, batch.id, { count: all.length });
       if (batch.kind === 'withdraw') {
-        for (const s of plan.steps) await core.markWithdrawal(db, s.withdrawal_id, 'signing', { batchId: batch.id });
+        if (plan.payout_batch) await db.query(`update payout_tx_batches set status = 'broadcast', updated_at = now() where id = $1 and status = 'planned'`, [plan.payout_batch]);
+        else for (const s of plan.steps) await core.markWithdrawal(db, s.withdrawal_id, 'signing', { batchId: batch.id });
         for (const s of plan.steps) {
           const err = await broadcastSteps([s]);
-          if (err) { await core.settleWithdrawal(db, s.withdrawal_id, false); if (notify) await notify(`提币广播失败：${s.withdrawal_id}`, `原因：${err}。冻结的金额已退回商户。`); }
+          if (err && plan.payout_batch) { await settlePayoutItem(db, s.withdrawal_id, { success: false, reason: String(err).slice(0, 200) }); if (notify) await notify(`TRON 打款没发出去：${s.withdrawal_id}`, `原因：${err}。这一笔回到"已审核"，可以重新签名，冻结的金额不动。`); }
+          else if (err) { await core.settleWithdrawal(db, s.withdrawal_id, false); if (notify) await notify(`提币广播失败：${s.withdrawal_id}`, `原因：${err}。冻结的金额已退回商户。`); }
           else await core.markWithdrawal(db, s.withdrawal_id, 'broadcast', { txid: s.txid });
         }
         await db.query(`update sign_batches set status = 'done', plan = $2::jsonb, updated_at = now() where id = $1`, [batch.id, JSON.stringify(plan)]);
@@ -370,6 +391,8 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
 
     // ---------- 合约钱包（ETH、BSC）：归集、钱包提供方、每条链的状态（server/wallet/admin-actions.js） ----------
     ...walletAdminActions({ db, layer, verifyAdminCode, notify, origin, now }),
+    // ---------- 批量打款（第 3 批）：打款审核、凑批签名、上限、授权额度、钱包设置的每链卡片（server/pay/payout-admin.js） ----------
+    ...payoutActions,
 
     // ---------- 钱包 ----------
     async wallet() {

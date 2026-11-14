@@ -7,13 +7,13 @@ import * as M from './mock';
 
 export type Amount = number | string;
 export interface Mode { enabled: boolean; low: number; high: number; ttlMin: number; lookbackH: number }
-export interface Me { authed: boolean; email?: string; merchant?: { id: string; name: string; order_mode: Mode; fee_in: { ppm: number; fixed: number; min: number }; fee_out: { ppm: number; fixed: number; min: number }; cashout_wallets: string[] } }
+export interface Me { authed: boolean; email?: string; merchant?: { id: string; name: string; order_mode: Mode; fee_in: { ppm: number; fixed: number; min: number }; fee_out: { ppm: number; fixed: number; min: number }; cashout_wallets: (string | { chain: string; address: string })[] } }
 export interface ChainAddr { chain: 'eth' | 'bsc' | 'tron'; address: string }
 export interface Dep { id: string; customer_id: string; chain?: string; address: string; txid: string; amount: Amount; fee: Amount; credited: Amount; result: string; order_no: string | null; matched_by: string | null; time: string; confirmations?: number }
 export interface Cust { customer_id: string; name: string; email: string; remark: string; address: string | null; addresses?: ChainAddr[]; total: Amount; count: number; fees: Amount; unmatched: Amount; last_payment_at: string | null; created_at: string }
 export interface OrderItem { order_no: string; merchant_order_no: string; customer_id: string; amount: Amount; matched: Amount; status: M.OrderState; created_at: string; expires_at: string }
 export interface OrderFull extends OrderItem { address: string | null; network?: string; chain?: string | null; addresses?: ChainAddr[]; pay_url: string; deposits: { id: string; txid: string; amount: Amount; matched_by: string; time: string }[] }
-export interface Wd { withdrawal_no: string; kind: 'payout' | 'cashout'; customer_id: string | null; to: string; amount: Amount; fee: Amount; status: string; txid: string | null; reason: string | null; source: 'web' | 'api'; created_at: string }
+export interface Wd { withdrawal_no: string; kind: 'payout' | 'cashout'; chain?: string; batch_no?: string | null; customer_id: string | null; to: string; amount: Amount; fee: Amount; status: string; txid: string | null; reason: string | null; source: 'web' | 'api'; created_at: string }
 export interface Led { id: string; type: M.LedgerType; amount: Amount; available_after: Amount; ref: string; customer_id: string | null; created_at: string }
 export interface Cb { id: string; event: string; ref: string; status: 'pending' | 'ok' | 'failed'; attempts: number; last_code: number | null; next_at: string | null; created_at: string }
 /** 列表最多取这么多条；更早的记录用导出查看 */
@@ -48,7 +48,9 @@ export interface MerchantData {
   match(orderNo: string, depositId: string, on: boolean): Promise<void>;
   deposits(customerId: string, onlyUnmatched: boolean): Promise<Dep[]>;
   ledger(customerId: string): Promise<Led[]>;
-  withdraw(b: { kind: string; to: string; amount: string; customer_id?: string; code: string }): Promise<Wd>;
+  withdraw(b: { kind: string; chain?: string; to: string; amount: string; customer_id?: string; code: string }): Promise<Wd>;
+  /** 批量打款（第 3 批）的接口：payout-batch-check / -submit / payout-batches / payout-batch / payout-batch-cancel */
+  raw(a: string, body?: unknown, qs?: string): Promise<any>;
   withdrawals(): Promise<Wd[]>;
   cancelWithdrawal(id: string): Promise<void>;
   api(): Promise<ApiInfo>;
@@ -98,6 +100,7 @@ export function realData(): MerchantData {
     deposits: (customerId, only) => all('deposits', q({ customer_id: customerId, matched: only ? 'false' : '' })),
     ledger: (customerId) => all('ledger', q({ customer_id: customerId })),
     withdraw: (b) => call('withdraw', b),
+    raw: (a, body, qs = '') => call(a, body, qs),
     withdrawals: () => all('withdrawals'),
     cancelWithdrawal: async (id) => { await call('withdraw-cancel', { withdrawal_no: id }); },
     api: () => call('api'),
@@ -204,6 +207,7 @@ export function protoData(): MerchantData {
     callbacks: async () => M.callbacks.map((x) => ({ id: x.id, event: CB[x.event] || x.event, ref: x.ref, status: x.result === 'retrying' ? 'pending' : x.result, attempts: x.attempts, last_code: x.code, next_at: x.next || null, created_at: x.time })),
     resend: async (id) => { const x = M.callbacks.find((c) => c.id === id); if (x) { x.attempts += 1; x.result = 'ok'; x.code = 200; x.next = undefined; } },
     exportUrl: () => null,
+    raw: async () => { throw new ApiErr('not_configured'); },
   };
 }
 

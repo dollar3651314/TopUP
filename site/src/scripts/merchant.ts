@@ -5,6 +5,7 @@ import copy from '../i18n/merchant.json';
 import { calcFee, describeFee, fmtUsdt, isTronAddress, parseUsdt, shortAddr } from '../lib/money';
 import { realData, protoData, units, ApiErr, MAX_ROWS, type List, type Amount, type Cust, type Dep, type OrderFull, type Wd, type Me, type ChainAddr } from './merchant-data';
 import * as Mock from './mock';
+import { isChecksumAddress } from '../../../server/wallet/evm-payout-codec.js';
 import { copyBtn, field, fieldErr, fmtTime, h, makeDialog, mono, qrDataUrl, stat, status, table, toast, tpl } from './ui';
 
 const root = document.getElementById('m-root')!;
@@ -51,7 +52,7 @@ function addressCards(list: ChainAddr[] | undefined) {
 // ---------- 视图与导航 ----------
 const views = [...root.querySelectorAll<HTMLElement>('[data-view]')];
 const showView = (v: string) => views.forEach((x) => (x.hidden = x.dataset.view !== v));
-const TABS = ['overview', 'customers', 'orders', 'transactions', 'withdraw', 'api', 'callbacks'];
+const TABS = ['overview', 'customers', 'orders', 'transactions', 'withdraw', 'payout-batch', 'api', 'callbacks'];
 const render: Record<string, (p: HTMLElement) => Promise<void>> = {};
 let current = 'overview';
 async function go(tab: string) {
@@ -436,20 +437,24 @@ render.withdraw = async (p) => {
   const cw = c.wd;
   const [ov, list] = await Promise.all([D.overview(), D.withdrawals()]);
   const available = units(ov.available);
-  const kindPayout = h('input', { type: 'radio', name: 'wd-kind', value: 'payout', checked: true }) as HTMLInputElement;
-  const kindCash = h('input', { type: 'radio', name: 'wd-kind', value: 'cashout' }) as HTMLInputElement;
-  const to = h('input', { autocomplete: 'off', spellcheck: false, class: 'mono-input', placeholder: 'T…' }) as HTMLInputElement;
+  // P5：余额一个数，提的时候选链；提现只能提到这条链上登记过的地址（{ chain, address }，老数据的字符串是 TRON）
+  const wallets = (me.cashout_wallets || []).map((w) => (typeof w === 'string' ? { chain: 'tron', address: w } : w));
+  const regOf = (ch: string) => wallets.filter((w) => w.chain === ch).map((w) => w.address);
+  const kindCash = h('input', { type: 'radio', name: 'wd-kind', value: 'cashout', checked: true }) as HTMLInputElement;
+  const kindPayout = h('input', { type: 'radio', name: 'wd-kind', value: 'payout' }) as HTMLInputElement;
+  const chainSel = h('select', {}, ...CHAINS.map((ch) => h('option', { value: ch }, `${netName(ch)}（${netStd(ch)}）${regOf(ch).length ? '' : cw.chainNone}`))) as HTMLSelectElement;
+  chainSel.value = CHAINS.find((ch) => regOf(ch).length) || 'eth';
+  const toSel = h('select', { class: 'mono-input' }) as HTMLSelectElement;
+  const noReg = h('p', { class: 'alert m0', 'data-no-wallet': '' });
+  const payTo = h('input', { autocomplete: 'off', spellcheck: false, class: 'mono-input' }) as HTMLInputElement;
   const custWho = h('p', { class: 'hint m0' });
   const custPicker = customerPicker('mw-cust', ({ id, cust: x }) => { custWho.textContent = !id ? '' : x ? [x.customer_id, x.name, x.email].filter(Boolean).join(' · ') : CUST_RE.test(id) ? c.picker.isNew : ''; });
   const custIn = custPicker.input;
-  const wallets = me.cashout_wallets;
-  const sel = h('select', {}, ...wallets.map((w) => h('option', { value: w }, w))) as HTMLSelectElement;
   const amt = h('input', { inputmode: 'decimal', autocomplete: 'off' }) as HTMLInputElement;
   const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' }) as HTMLInputElement;
-  const toField = field('mw-to', cw.to, to);
+  const toField = field('mw-to', cw.toRegistered, toSel);
+  const payField = field('mw-pay-to', cw.payTo, payTo);
   const custField = h('div', { class: 'stack' }, pickerField('mw-cust', cw.customer, custPicker, cw.customerHint), custWho);
-  const selField = wallets.length ? field('mw-sel', cw.cashoutWallet, sel) : h('div', { class: 'f' }, h('span', { class: 'lbl' }, cw.cashoutWallet), h('p', { class: 'alert m0' }, cw.noWallet));
-  selField.hidden = true;
   const fee = h('b'), freeze = h('b'), after = h('b');
   const summary = h('dl', { class: 'kv kv-tight' }, h('dt', {}, cw.fee), h('dd', {}, fee), h('dt', {}, cw.freeze), h('dd', {}, freeze), h('dt', {}, cw.after), h('dd', {}, after));
   const upd = () => {
@@ -462,18 +467,26 @@ render.withdraw = async (p) => {
     after.classList.toggle('neg', a + f > available);
   };
   amt.addEventListener('input', upd);
-  const onKind = () => { toField.hidden = kindCash.checked; custField.hidden = kindCash.checked; selField.hidden = !kindCash.checked; };
-  kindPayout.addEventListener('change', onKind); kindCash.addEventListener('change', onKind);
+  const onChange = () => {
+    const ch = chainSel.value, cash = kindCash.checked, reg = regOf(ch);
+    toSel.replaceChildren(...reg.map((a) => h('option', { value: a }, a)));
+    noReg.textContent = tpl(cw.noWalletChain, { net: netName(ch) });
+    toField.hidden = !cash || !reg.length; noReg.hidden = !cash || reg.length > 0;
+    payField.hidden = cash; custField.hidden = cash;
+    payTo.placeholder = ch === 'tron' ? 'T…' : '0x…';
+  };
+  chainSel.addEventListener('change', onChange); kindCash.addEventListener('change', onChange); kindPayout.addEventListener('change', onChange);
   const submit = h('button', { class: 'btn btn-primary', type: 'submit' }, cw.submit) as HTMLButtonElement;
   const form = h('form', { class: 'card form-card wd-form', novalidate: true },
-    h('div', { class: 'f' }, h('span', { class: 'lbl' }, cw.kind), h('div', { class: 'choices' }, h('label', {}, kindPayout, cw.kindPayout), h('label', {}, kindCash, cw.kindCashout))),
-    toField, custField, selField, field('mw-amt', cw.amount, amt), summary, field('mw-code', cw.code, code), submit);
+    h('div', { class: 'f' }, h('span', { class: 'lbl' }, cw.kind), h('div', { class: 'choices' }, h('label', {}, kindCash, cw.kindCashout), h('label', {}, kindPayout, cw.kindPayout))),
+    field('mw-chain', cw.chain, chainSel, tpl(cw.chainFee, { fee: `${describeFee(me.fee_out, lang)}` })), toField, noReg, payField, custField, field('mw-amt', cw.amount, amt), summary, field('mw-code', cw.code, code), submit);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const cash = kindCash.checked;
+    const cash = kindCash.checked, ch = chainSel.value;
     const a = parseUsdt(amt.value);
     const cid = custIn.value.trim();
-    let bad = cash ? !wallets.length : fieldErr(to, isTronAddress(to.value) ? null : cw.errAddress);
+    const okAddr = (v: string) => (ch === 'tron' ? isTronAddress(v) : isChecksumAddress(v.trim()));
+    let bad = cash ? !regOf(ch).length : fieldErr(payTo, okAddr(payTo.value) ? null : tpl(cw.errAddressChain, { net: netName(ch) }));
     if (!cash) bad = fieldErr(custIn, !cid || CUST_RE.test(cid) ? null : c.orders.create.errCustomer) || bad;
     const f = a ? calcFee(a, me.fee_out) : 0;
     bad = fieldErr(amt, !a ? cw.errAmount : a + f > available ? cw.errInsufficient : null) || bad;
@@ -481,30 +494,143 @@ render.withdraw = async (p) => {
     if (bad) return;
     submit.disabled = true;
     try {
-      const w = await D.withdraw({ kind: cash ? 'cashout' : 'payout', to: cash ? sel.value : to.value.trim(), amount: amt.value.replace(/[,\s]/g, ''), customer_id: !cash && cid ? cid : undefined, code: code.value.trim() });
+      const w = await D.withdraw({ kind: cash ? 'cashout' : 'payout', chain: ch, to: cash ? toSel.value : payTo.value.trim(), amount: amt.value.replace(/[,\s]/g, ''), customer_id: !cash && cid ? cid : undefined, code: code.value.trim() });
       say(tpl(cw.submitted, { amount: usd(units(w.amount) + units(w.fee)) }));
       await render.withdraw(p); updateCounts();
     } catch (err) {
       const k = (err as ApiErr).code;
-      fieldErr(k === 'bad_code' ? code : k === 'invalid_address' || k === 'address_not_registered' ? to : amt, errText(err));
+      fieldErr(k === 'bad_code' ? code : k === 'invalid_address' || k === 'address_not_registered' ? (cash ? toSel : payTo) : amt, errText(err));
     } finally { submit.disabled = false; }
   });
-  upd();
+  onChange(); upd();
   const cc = cw.cols;
   p.replaceChildren(
     toolbar(cw.title),
     h('div', { class: 'note-box', 'data-sla': '' }, cw.note),
     h('div', { class: 'wd-grid' }, h('div', {}, h('h2', { class: 'h-sm' }, cw.new), form),
-      h('div', { class: 'stats stats-col' }, stat(c.overview.available, usd(ov.available), 'USDT'), stat(c.overview.frozen, usd(ov.frozen), 'USDT'))),
+      h('div', { class: 'stats stats-col' }, stat(c.overview.available, usd(ov.available), cw.balanceNote), stat(c.overview.frozen, usd(ov.frozen), 'USDT'))),
     h('h2', { class: 'h-sm' }, cw.history),
-    table([cc.time, cc.id, cc.kind, cc.customer, cc.to, cc.amount, cc.fee, cc.source, cc.status], list.map((w: Wd) => {
+    table([cc.time, cc.id, cw.chainCol, cc.kind, cc.customer, cc.to, cc.amount, cc.fee, cc.source, cc.status], list.map((w: Wd) => {
       const st = h('span', { class: 'status-cell' }, wdBadge(w.status));
       if (w.status === 'pending') st.append(h('button', { type: 'button', class: 'link-btn', onclick: () => cancelWd(w, p) }, cw.cancel));
       if (w.reason) st.append(h('span', { class: 'hint muted' }, `${cw.reason}：${w.reason}`));
-      return [t(w.created_at), mono(w.withdrawal_no), cw.kinds[w.kind], w.customer_id ? mono(w.customer_id) : '—', mono(shortAddr(w.to), w.to), usd(w.amount), usd(w.fee), cw.sources[w.source], st];
+      return [t(w.created_at), mono(w.withdrawal_no), chainTag(w.chain || 'tron'), cw.kinds[w.kind], w.customer_id ? mono(w.customer_id) : '—', mono(shortAddr(w.to), w.to), usd(w.amount), usd(w.fee), cw.sources[w.source], st];
     }), c.common.none, { page: pg(list) }),
   );
 };
+
+// ---------- 批量打款（第 3 批）：上传 → 逐行检查 → 按链汇总 + 动态码提交；批次记录、明细、取消还没审核的 ----------
+type PbRow = { line: number; chain: string; to: string; amount: Amount; amount_text: string; fee: Amount; ok: boolean; errors: string[]; warnings: string[] };
+type PbCheck = { rows: PbRow[]; totals: Record<string, { count: number; amount: string; fee: string; total: string }>; ok_count: number; bad_count: number; need: Amount; available: Amount; enough: boolean; service: { open: boolean; next_open_at?: string } };
+const pb = { step: 1, csv: '', check: null as PbCheck | null, onlyValid: false, err: '', done: null as null | { n: number; no: string; late: boolean } };
+const PB_ST: Record<string, string> = { pending: 'submitted', approved: 'invited', partially_rejected: 'needs_info', rejected: 'rejected', completed: 'approved', cancelled: 'expired' };
+render['payout-batch'] = async (p) => {
+  const cp = c.pb;
+  const list = await D.raw('payout-batches');
+  const reset = () => { pb.step = 1; pb.csv = ''; pb.check = null; pb.onlyValid = false; pb.err = ''; render['payout-batch'](p); };
+  const resetBtn = h('button', { type: 'button', class: 'btn btn-outline', 'data-mb-reset': '', onclick: reset }, cp.reupload);
+  const stepper = h('ol', { class: 'stepper-3', 'data-steps': String(pb.step) }, ...cp.steps.map((x: string, i: number) => h('li', { class: i + 1 < pb.step ? 'done' : i + 1 === pb.step ? 'on' : '' }, x)));
+  let body: HTMLElement;
+  if (pb.step === 1) {
+    const file = h('input', { type: 'file', accept: '.csv,text/csv', 'data-mb-file': '', class: 'visually-hidden' }) as HTMLInputElement;
+    file.addEventListener('change', async () => {
+      const f = file.files?.[0]; if (!f) return;
+      pb.csv = await f.text(); pb.err = ''; pb.done = null;
+      try { pb.check = await D.raw('payout-batch-check', { csv: pb.csv }); pb.step = 2; }
+      catch (e) {
+        const k = (e as ApiErr).code;
+        const n = pb.csv.split(/\r?\n/).filter((x) => x.trim()).length - 1;
+        pb.err = k === 'too_many_items' ? tpl(cp.tooMany, { n }) : k === 'invalid_sheet' ? cp.badSheet : errText(e);
+      }
+      render['payout-batch'](p);
+    });
+    const tplHref = URL.createObjectURL(new Blob(['﻿chain,to,amount,customer_id,merchant_ref\n'], { type: 'text/csv' }));
+    body = h('div', { class: 'card upload-card stack', 'data-mb-step': '1' },
+      h('h2', { class: 'h-sm m0' }, cp.uploadTitle), h('p', { class: 'muted m0' }, cp.uploadHint),
+      h('div', {}, h('label', { class: 'btn btn-primary btn-lg' }, cp.choose, file)),
+      h('p', { class: 'hint muted m0' }, mono(cp.header), ' · ', h('a', { href: tplHref, download: 'payouts-template.csv' }, cp.template)),
+      pb.err ? h('div', { class: 'stack-sm' }, h('p', { class: 'alert m0', 'data-mb-error': '' }, pb.err), h('div', {}, resetBtn)) : null,
+      pb.done ? h('div', { class: 'info-box', 'data-mb-done': '' }, tpl(cp.submitted, { n: pb.done.n, no: pb.done.no }), pb.done.late ? h('b', { class: 'block' }, ` ${cp.late}`) : null) : null);
+  } else if (pb.step === 2 && pb.check) {
+    const k = pb.check;
+    const warn = k.rows.filter((r) => r.ok && r.warnings.length).length;
+    const msg = (r: PbRow) => {
+      if (r.ok && !r.warnings.length) return h('span', { class: 'ok' }, `✓ ${cp.ok}`);
+      const parts = r.errors.map((e) => e === 'invalid_amount' && /\.\d{7,}/.test(r.amount_text) ? cp.err.decimals : tpl((cp.err as Record<string, string>)[e] || e, { net: netName(r.chain) }));
+      return h('span', { class: r.ok ? 'warn' : 'bad' }, ...(r.ok ? r.warnings.map((w) => `! ${(cp.err as Record<string, string>)[w] || w}`) : parts.map((x) => `× ${x}`)));
+    };
+    const only = h('input', { type: 'checkbox', id: 'mb-only-valid', checked: pb.onlyValid }) as HTMLInputElement;
+    only.addEventListener('change', () => { pb.onlyValid = only.checked; note.hidden = true; });
+    const note = h('p', { class: 'alert m0' }, cp.needOnlyValid); note.hidden = true;
+    const next = h('button', { type: 'button', class: 'btn btn-primary', 'data-mb-next': '', disabled: !k.ok_count, onclick: () => {
+      if (k.bad_count && !only.checked) { note.hidden = false; return; }
+      pb.step = 3; render['payout-batch'](p);
+    } }, cp.next);
+    body = h('div', { class: 'card stack', 'data-mb-step': '2' },
+      h('p', { class: 'm0' }, h('b', {}, tpl(cp.summary, { n: k.rows.length, ok: k.ok_count, bad: k.bad_count, warn })), ' ', h('span', { class: 'muted' }, cp.summaryNote)),
+      table([cp.cols.line, cp.cols.chain, cp.cols.to, cp.cols.amount, cp.cols.check], k.rows.map((r) => [tpl(cp.lineNo, { n: r.line + 1 }), CHAINS.includes(r.chain as any) ? netName(r.chain) : r.chain || '—', mono(shortAddr(r.to || '—'), r.to), r.amount_text, msg(r)]), c.common.none,
+        { rowAttrs: (i) => ({ 'data-row-line': String(k.rows[i].line), class: !k.rows[i].ok ? 'row-bad' : k.rows[i].warnings.length ? 'row-warn' : '' }), page: { size: 100, more: (n) => tpl(c.common.more, { n }) } }),
+      h('p', { class: 'hint muted m0' }, cp.lineNote),
+      k.bad_count ? h('label', { class: 'check-row' }, only, tpl(cp.onlyValid, { n: k.ok_count })) : null, note,
+      h('div', { class: 'row-actions spread' }, resetBtn, next));
+  } else {
+    const k = pb.check!;
+    const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' }) as HTMLInputElement;
+    const sub = h('button', { type: 'button', class: 'btn btn-primary', 'data-mb-submit': '', disabled: !k.enough }, cp.submit) as HTMLButtonElement;
+    const failBox = h('div');
+    sub.addEventListener('click', async () => {
+      if (fieldErr(code, /^\d{6}$/.test(code.value.trim()) ? null : c.wd.errCode)) return;
+      sub.disabled = true;
+      try {
+        const r = await D.raw('payout-batch-submit', { csv: pb.csv, code: code.value.trim(), only_valid: pb.onlyValid });
+        pb.done = { n: r.accepted.length, no: r.batch_no, late: r.service && r.service.open === false };
+        pb.step = 1; pb.csv = ''; pb.check = null; pb.onlyValid = false;
+        await render['payout-batch'](p); updateCounts();
+      } catch (e) {
+        sub.disabled = false;
+        if ((e as ApiErr).code === 'bad_code') fieldErr(code, errText(e));
+        else failBox.replaceChildren(h('p', { class: 'alert m0' }, tpl(cp.failed, { why: errText(e) })));
+      }
+    });
+    body = h('div', { class: 'card stack', 'data-mb-step': '3' },
+      h('h2', { class: 'h-sm m0' }, cp.sumTitle),
+      table([cp.cols.chain, cp.cols.count, cp.cols.amount, cp.cols.fee, cp.cols.total], Object.entries(k.totals).map(([ch, x]) => [chainTag(ch), String(x.count), usd(x.amount), usd(x.fee), h('b', {}, usd(x.total))]), c.common.none,
+        { rowAttrs: (i) => ({ 'data-sum-chain': Object.keys(k.totals)[i] }) }),
+      h('p', { class: 'm0', 'data-mb-available': '' }, tpl(cp.available, { v: usd(k.available) })),
+      h('p', { class: 'm0' }, h('b', {}, tpl(cp.need, { v: usd(k.need) }))),
+      !k.enough ? h('p', { class: 'alert m0', 'data-mb-short': '' }, tpl(cp.notEnough, { need: usd(k.need), have: usd(k.available) })) : null,
+      k.service && !k.service.open ? h('p', { class: 'warn-box m0' }, cp.late) : null,
+      field('mb-code', cp.code, code), failBox,
+      h('div', { class: 'row-actions spread' }, h('button', { type: 'button', class: 'btn btn-outline', onclick: () => { pb.step = 2; render['payout-batch'](p); } }, cp.back), resetBtn, sub));
+  }
+  const items = list.items as { batch_no: string; status: string; count: number; total: Amount; created_at: string; source: string }[];
+  p.replaceChildren(
+    toolbar(cp.title, h('span', { class: 'muted' }, cp.sub)),
+    stepper, body,
+    h('p', { class: 'info-box' }, cp.apiNote),
+    h('h2', { class: 'h-sm' }, cp.history),
+    table([cp.cols.batch, cp.cols.source, cp.cols.count, cp.cols.total, cp.cols.status, cp.cols.time, ''], items.map((b) => [
+      mono(b.batch_no), (cp.sources as Record<string, string>)[b.source] || b.source, String(b.count), usd(b.total),
+      status(PB_ST[b.status] || 'submitted', (cp.status as Record<string, string>)[b.status] || b.status), t(b.created_at),
+      h('span', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => pbDetail(b.batch_no) }, cp.view),
+        b.status === 'pending' ? h('button', { type: 'button', class: 'link-btn bad', 'data-mb-cancel': '', onclick: () => pbCancel(b.batch_no, p) }, cp.cancel) : null),
+    ]), cp.none, { rowAttrs: (i) => ({ 'data-mb-batch': items[i].batch_no }) }),
+  );
+};
+async function pbDetail(no: string) {
+  let d: any;
+  try { d = await D.raw('payout-batch', undefined, `&batch_no=${encodeURIComponent(no)}`); } catch (e) { say(errText(e)); return; }
+  const cp = c.pb;
+  dialog(tpl(cp.itemsTitle, { no }), table([c.wd.cols.id, cp.cols.chain, cp.cols.to, cp.cols.amount, cp.cols.fee, cp.cols.status, cp.tx], d.items.map((w: any) => [mono(w.withdrawal_no), chainTag(w.chain), mono(shortAddr(w.to), w.to), usd(w.amount), usd(w.fee),
+    h('span', { class: 'status-cell' }, wdBadge(w.status), w.reason ? h('span', { class: 'hint muted' }, w.reason) : null), w.txid ? mono(shortAddr(w.txid), w.txid) : '—']), c.common.none), c.common.close, null, false, true);
+}
+function pbCancel(no: string, p: HTMLElement) {
+  const cp = c.pb;
+  dialog(tpl(cp.cancelTitle, { no }), h('p', { class: 'm0' }, cp.cancelConfirm), cp.cancel, async () => {
+    try { const r = await D.raw('payout-batch-cancel', { batch_no: no }); say(tpl(cp.cancelled, { n: r.cancelled })); } catch (e) { say(errText(e)); return; }
+    await render['payout-batch'](p); updateCounts();
+  }, true);
+}
 function cancelWd(w: Wd, p: HTMLElement) {
   dialog(c.wd.cancel, h('p', { class: 'm0' }, c.wd.cancelConfirm), c.wd.cancel, async () => {
     try { await D.cancelWithdrawal(w.withdrawal_no); } catch (e) { say(errText(e)); return; }

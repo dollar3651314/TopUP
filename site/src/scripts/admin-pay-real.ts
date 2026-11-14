@@ -14,6 +14,7 @@ import { describeFee, fmtUsdt, parseUsdt, shortAddr } from '../lib/money';
 import { copyBtn, field, fieldErr, fmtTime, h, mono, stat, status, table, toast } from './ui';
 import { dialog, feeInputs, modeInputs, modeText, tronscan, minsAgo, TRONSCAN } from './admin-pay';
 import { mountOverview } from './admin-overview';
+import { renderPayoutReview, renderWalletCards } from './admin-payout';
 import { pickSweepChain, renderEvmSweep, renderRoutes, walletBadges, walletStatus, walletTodo, type WalletUi } from './admin-wallet';
 
 const root = document.getElementById('admin-root')!;
@@ -69,7 +70,7 @@ async function counts() {
   // 三个数字分别读取：一个失败不影响其他两个
   const jobs: [string, string, () => Promise<number>][] = [
     ['merchants', '已开通的商户', async () => (await call('merchants')).merchants.filter((x: any) => x.status === 'active').length],
-    ['withdrawals', '待审核的提币', async () => (await call('withdrawals')).items.length],
+    ['withdrawals', '待审核的打款', async () => (await call('withdrawals')).items.length],
     ['anomalies', '未处理的异常到账', async () => (await call('anomalies')).items.filter((x: any) => !x.handled).length],
   ];
   await Promise.all([...jobs.map(async ([k, meaning, f]) => {
@@ -253,47 +254,16 @@ async function customerDetail(x: any) {
 
 // ============ 提币审核 ============
 const wdSel = new Set<string>();
-let wdAll = false;
-const WD: Record<string, [string, string]> = { pending: ['submitted', '待审核'], rejected: ['rejected', '已驳回'], cancelled: ['expired', '已取消'], signing: ['invited', '已批准'], broadcast: ['in_progress', '已广播'], completed: ['approved', '已完成'], failed: ['needs_info', '失败'] };
 render.withdrawals = async (p) => {
-  const r = await call('withdrawals', undefined, wdAll ? '&all=1' : '');
-  const pend = r.items.filter((w: any) => w.status === 'pending');
-  for (const id of [...wdSel]) if (!pend.some((w: any) => w.id === id)) wdSel.delete(id);
-  const chosen = pend.filter((w: any) => wdSel.has(w.id));
-  const need = chosen.reduce((s: number, w: any) => s + u(w.amount), 0);
-  const hotUsdt = r.hot.usdt === null ? null : u(r.hot.usdt);
-  const short = hotUsdt !== null && need > hotUsdt;
-  const filters = h('div', { class: 'filters' },
-    h('button', { type: 'button', 'aria-pressed': String(!wdAll), onclick: () => { wdAll = false; render.withdrawals(p); } }, `待审核 ${wdAll ? '' : r.items.length}`),
-    h('button', { type: 'button', 'aria-pressed': String(wdAll), onclick: () => { wdAll = true; render.withdrawals(p); } }, '全部'));
-  p.replaceChildren(
-    toolbar('提币审核', h('span', { class: 'muted' }, `热钱包 ${hotUsdt === null ? '—' : fmtUsdt(hotUsdt)} USDT`)),
-    h('p', { class: 'hint muted' }, '每一笔提币都要人工审核（后台和 API 发起的都一样）。有新的提币申请时，系统给你发邮件，1 分钟内的多笔合并成一封。商户看到的处理时效：东八区 8:00–23:00 内 1 小时处理。'),
-    filters,
-    table(['', '编号', '提交时间', '商户', '类型 · 来源', '客户', '收款地址', '金额（手续费）', '状态'], r.items.map((w: any) => {
-      const isP = w.status === 'pending';
-      const cb = h('input', { type: 'checkbox', class: 'check', checked: isP && wdSel.has(w.id), disabled: !isP, 'aria-label': `选择 ${w.id}` }) as HTMLInputElement;
-      cb.addEventListener('change', () => { cb.checked ? wdSel.add(w.id) : wdSel.delete(w.id); render.withdrawals(p); });
-      const st = h('span', { class: 'status-cell' }, status(...(WD[w.status] || ['submitted', w.status])));
-      if (w.txid) st.append(h('a', { href: `${TRONSCAN}/#/transaction/${w.txid}`, target: '_blank', rel: 'noopener noreferrer', class: 'mono' }, w.txid.slice(0, 8) + '…'));
-      if (w.reason) st.append(h('span', { class: 'hint muted' }, w.reason));
-      return [cb, mono(w.id), sub(t(w.created_at), isP ? `已等待 ${minsAgo(w.created_at)}` : ''), w.merchant, `${w.kind === 'payout' ? '代付' : '商户提现'} · ${w.source === 'api' ? 'API' : '后台'}`, w.customer_id ? mono(w.customer_id) : '—', mono(shortAddr(w.to), w.to), sub(h('b', {}, usd(w.amount)), `手续费 ${usd(w.fee)}`), st];
-    }), wdAll ? '暂无提币' : '暂无待审核的提币'),
-    short ? h('p', { class: 'alert' }, `热钱包余额不足：已选 ${fmtUsdt(need)} USDT，热钱包只有 ${fmtUsdt(hotUsdt!)} USDT。请先归集，或少选几笔。`) : h('span'),
-    !r.items.length ? h('span') : h('div', { class: 'sumbar' }, h('span', {}, '已选 ', h('b', {}, String(chosen.length)), ' 笔 · 合计打出 ', h('b', {}, `${fmtUsdt(need)} USDT`)),
-      h('span', { class: 'sumbar-actions' },
-        h('button', { type: 'button', class: 'btn btn-outline btn-on-dark', disabled: !chosen.length, onclick: () => rejectWd(chosen, p) }, '驳回'),
-        h('button', { type: 'button', class: 'btn btn-primary', disabled: !chosen.length || short || !RULES.hot, onclick: () => planWd(chosen, p) }, `批准并签名（${chosen.length} 笔）`))),
-  );
+  // 第 3 批：打款审核（逐笔审 → 按链凑批 → 浏览器核对并签名），见 admin-payout.ts；TRON 的签名仍走下面的 planWd（N 笔普通转账）
+  await renderPayoutReview(wui('p-withdrawals'), p, async () => {
+    let r;
+    try { r = await call('withdrawals', undefined, '&approved=tron'); } catch (e) { say(errText(e)); return; }
+    const chosen = r.items.slice(0, 20);
+    if (!chosen.length) { say('没有已审核待签名的 TRON 打款'); return; }
+    await planWd(chosen, p);
+  });
 };
-function rejectWd(chosen: any[], p: HTMLElement) {
-  const reason = h('textarea', { rows: '3' }) as HTMLTextAreaElement;
-  dialog(`驳回 ${chosen.length} 笔提币`, h('div', { class: 'stack' }, field('pr-reason', '驳回原因（商户能看到）', reason), h('p', { class: 'hint muted m0' }, '驳回后，冻结的金额退回商户的可用余额，并发回调通知商户。')), '驳回', async () => {
-    if (fieldErr(reason, reason.value.trim() ? null : '请填写驳回原因')) return false;
-    for (const w of chosen) { try { await call('withdraw-reject', { id: w.id, reason: reason.value.trim() }); } catch (e) { say(`${w.id}：${errText(e)}`); } }
-    wdSel.clear(); say('已驳回，冻结金额已退回'); render.withdrawals(p); counts();
-  }, true);
-}
 async function planWd(chosen: any[], p: HTMLElement) {
   let plan;
   try { plan = await call('withdraw-plan', { ids: chosen.map((w) => w.id) }); } catch (e) { say(errText(e)); return; }
@@ -398,22 +368,10 @@ render.recon = async (p) => {
 
 // ============ 钱包设置 ============
 render.wallet = async (p) => {
+  // P4 / Q-A1：每条链一张卡；TRON 的"主助记词"只留一行"旧地址 N 个，照常归集"。
+  // 全新系统（还没有任何客户、也没初始化）时仍可初始化第 0 批的主助记词（兼容，见交付说明）
   const w = await call('wallet');
-  const acc = (x: any, name: string) => h('section', { class: 'card stack' }, h('h2', { class: 'h-sm m0' }, name),
-    x ? h('dl', { class: 'kv' }, h('dt', {}, '地址'), h('dd', {}, h('span', { class: 'copy-row' }, mono(x.address), copyBtn(() => x.address, '复制', '已复制', 'link-copy'), tronscan(x.address))),
-      h('dt', {}, 'USDT'), h('dd', {}, x.error ? '查询失败' : usd(x.usdt)), h('dt', {}, 'TRX'), h('dd', {}, x.error ? '查询失败' : usd(x.trx))) : h('p', { class: 'm0 muted' }, '没有配置（config/wallets.json）'));
-  p.replaceChildren(
-    toolbar('钱包设置', h('span', { class: 'muted' }, `网络：${netName(w.network)}`)),
-    h('section', { class: 'card stack' }, h('h2', { class: 'h-sm m0' }, '主助记词（收款地址）'),
-      w.initialized ? h('dl', { class: 'kv' }, h('dt', {}, '状态'), h('dd', {}, status('approved', '已初始化')), h('dt', {}, '推导路径'), h('dd', {}, mono("m/44'/195'/0'/0/序号")),
-        h('dt', {}, '公钥末 8 位'), h('dd', {}, mono(w.xpub_fingerprint)), h('dt', {}, '第 1 个地址（用来核对）'), h('dd', {}, mono(w.first_address)), h('dt', {}, '已分配地址'), h('dd', {}, `${w.customers} 个`))
-        : h('div', { class: 'stack' }, h('p', { class: 'm0' }, '还没有初始化。初始化后才能给客户分配收款地址。'), h('div', {}, h('button', { type: 'button', class: 'btn btn-primary', onclick: () => initWallet(p) }, '初始化主助记词'))),
-      h('p', { class: 'hint muted m0' }, '系统只保存公钥，无法动用任何收款地址里的钱。助记词请离线抄写两份，分开保存。')),
-    acc(w.hot, '热钱包'),
-    w.energy ? h('p', { class: 'hint muted' }, `热钱包可借出能量 ${Number(w.energy.left).toLocaleString('en')} / ${Number(w.energy.limit).toLocaleString('en')}，大约够 ${Math.floor(w.energy.left / w.energy.per_sweep)} 笔归集。质押 TRX、增加能量：在 TronLink 或 Tronscan 里操作。`) : h('span'),
-    acc(w.cold, '冷钱包'),
-    h('p', { class: 'note-box' }, '热钱包和冷钱包的地址写在代码仓库的配置文件 config/wallets.json 里，签名页面只允许把钱归集到这两个地址。修改地址要提交 PR，服务器改不了。'),
-  );
+  await renderWalletCards(wui('p-wallet'), p, { initialized: w.initialized, xpub_fingerprint: w.xpub_fingerprint, first_address: w.first_address, customers: w.customers, init: () => initWallet(p), canInit: !w.initialized && !w.customers });
 };
 function initWallet(p: HTMLElement) {
   const words = generateMnemonic(wordlist, 256).split(' ');
