@@ -27,7 +27,7 @@ const waitAttr = (m: number) => (m > 60 ? 'late' : m > 30 ? 'warn' : 'ok');
 const BY: Record<string, string> = { hot_balance: '热钱包余额', allowance: '授权额度', per_batch: '每批上限' };
 const HELD: Record<string, string> = { exceeds_per_item_limit: '超过单笔上限（只能驳回，或先改上限）', exceeds_batch_cap: '超过每批上限', exceeds_hot_balance: '热钱包余额不够', exceeds_allowance: '授权额度不够', transfer_failed: '收款地址转不了（代币拒收），已挂起', zero_address: '收款地址是全 0 地址，已挂起' };
 /** 挂起的原因（已审核但不再进批，只能驳回） */
-const HOLD: Record<string, string> = { transfer_failed: '收款地址转不了（代币拒收，例如被 USDT 拉黑）', zero_address: '收款地址是全 0 地址' };
+const HOLD: Record<string, string> = { transfer_failed: '收款地址转不了，代币拒收，例如被 USDT 拉黑', zero_address: '收款地址是全 0 地址' };
 /** 单的内部状态 → 中文（批次详情里用） */
 const WST: Record<string, string> = { pending: '待审核', approved: '已审核，等凑批', signing: '已凑批，等签名', broadcast: '已广播，等链上确认', completed: '已完成', rejected: '已驳回', cancelled: '商户已取消', failed: '失败，已退回' };
 const PERR: Record<string, string> = {
@@ -36,7 +36,7 @@ const PERR: Record<string, string> = {
   broadcast_unreachable: '节点暂时连不上，这一笔没算签完：稍后用同一个窗口再签一次同一笔（同一笔交易，不会重复）。', rpc_unreachable: '节点暂时连不上（以太坊 / BSC 节点），稍后再试。', estimate_reverted: '节点试算这一批会失败（合约回滚），没出交易：检查热钱包余额、授权额度和收款地址后再试。',
   too_many_bad_items: '这一轮有多笔收款地址转不了，已逐笔挂起；请先处理挂起的，再凑批。', exceeds_hot_max: '新额度不能超过热钱包上限：先改上限，或者调低额度。',
   payout_contract_mismatch: '这条链的批量打款合约核对不一致（代码、付款人或所有者不对），打款已停用。请研发核对配置后重启。', payout_contract_unverified: '这条链的批量打款合约还没核对上（节点暂时连不上），先不出交易，稍后再试。',
-  not_approved: '只能签已审核的打款：先在上面逐笔审核通过。', plan_expired: '这一批交易原文已经快过期了：点"作废重凑"重新凑批再签。', invalid_state: '状态已经变化（可能已经签过或已作废），请刷新后再看。',
+  not_approved: '只能签已审核的打款：先在上面逐笔审核通过。', funds_short: '热钱包余额或授权额度不够付这一批（在途的批次已经占用了一部分）：先补款或改额度，等在途的批次出结果再凑。', duplicate_txid: '这一批里有两笔交易号相同，页面已拦下：请作废重凑。', plan_expired: '这一批交易原文已经快过期了：点"作废重凑"重新凑批再签。', invalid_state: '状态已经变化（可能已经签过或已作废），请刷新后再看。',
   fee_too_high: '现在的网络费超过上限，先不签，稍后再试。', chain_not_enabled: '这条链还没开通批量打款（config/wallets.json 没写热钱包和 BatchPayout）。', not_applicable: 'TRON 打款不走合约，不用授权额度。',
 };
 /** 上限之间的约束（服务器 updatePayoutLimits 的 rows[0].rule） */
@@ -87,7 +87,9 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
   const held = appr.filter((x) => x.hold).length;
   const approvedT = table(['单号', '商户', '链', '收款地址', '金额 USDT', '情况', ''], appr.map((x) => [mono(x.id), x.merchant, chainTag(x.chain), mono(shortAddr(x.to), x.to), usd(x.amount),
     x.hold ? h('span', { class: 'bad' }, `已挂起：${HOLD[x.hold] || x.hold}`) : h('span', { class: 'muted' }, x.batch_no ? `批量 ${x.batch_no} · 等凑批` : '等凑批'),
-    h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-reject-approved': x.id, onclick: (e: Event) => { e.stopPropagation(); rejectApproved(ui, x); } }, '驳回')]),
+    h('span', { class: 'row-actions' },
+      x.hold ? h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-unhold': x.id, onclick: (e: Event) => { e.stopPropagation(); unhold(ui, x); } }, '解除挂起') : null,
+      h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-reject-approved': x.id, onclick: (e: Event) => { e.stopPropagation(); rejectApproved(ui, x); } }, '驳回'))]),
     '没有已审核待凑批的单。', { rowAttrs: (i) => ({ 'data-approved-row': appr[i].id, ...(appr[i].hold ? { class: 'row-over' } : {}) }) });
   const L = r.limits;
   const limits = h('section', { class: 'card stack', 'data-payout-limits': '' },
@@ -140,7 +142,8 @@ function planCard(ui: WalletUi, c: any, legacyTron: TronSign, planned: any[] = [
     contract_mismatch: '批量打款合约核对不一致（代码、付款人或所有者不对），这条链的打款已停用。请研发核对配置后重启。',
     contract_unverified: '批量打款合约还没核对上（节点暂时连不上），先不能签。稍后再试。',
   };
-  const disabled = !c.approved_count || Boolean(c.blocked);
+  // 有凑好了还没签完的批次：主按钮不能点（点了会把那批作废重凑），先在下面继续签名或作废重凑
+  const disabled = !c.approved_count || Boolean(c.blocked) || planned.length > 0;
   // TRON 自动拆批：这一批签几笔、剩几笔留到下一轮
   const split = !evm && c.batch_count && c.left_count > 0;
   const label = !c.approved_count ? '没有要签的' : split ? `核对并签名这一批 ${c.batch_count} 笔` : `核对并签名这 ${c.approved_count} 笔`;
@@ -172,7 +175,7 @@ function batchDetail(ui: WalletUi, b: any, legacyTron: TronSign) {
       d.resumable ? null : h('span', { class: 'hint muted' }, '交易原文快过期了，只能作废重凑')) : null;
     ui.dialog(`签名批次 ${b.id}`, h('div', { class: 'stack' }, kv([['链', chainTag(d.chain)], ['状态', batchState(d)], ['交易', d.tx_hash ? mono(d.tx_hash) : '—']]), acts,
       table(['单号', '商户', '收款地址', '金额', '状态'], d.withdrawals.map((w: any) => [mono(w.id), w.merchant, mono(shortAddr(w.to), w.to), usd(w.amount),
-        h('span', { class: w.hold ? 'bad' : '' }, `${WST[w.status] || w.status}${w.hold ? `，已挂起（${HOLD[w.hold] || w.hold}）` : ''}${w.reason ? `（${w.reason}）` : ''}`)]), '—')), '关闭', null, false, true);
+        h('span', { class: w.hold ? 'bad' : '' }, `${WST[w.status] || w.status}${w.hold ? `，已挂起：${HOLD[w.hold] || w.hold}` : ''}${w.reason ? ` · ${w.reason}` : ''}`)]), '—')), '关闭', null, false, true);
   }).catch((e) => ui.say(errOf(ui, e)));
 }
 /** 继续签一个没签完的批次：以太坊 / BSC 回到四步签名；TRON 打开 TRON 签名窗口 */
@@ -188,6 +191,15 @@ function voidBatch(ui: WalletUi, b: any) {
     try { await ui.call('payout-void', { id: b.id }); } catch (e) { msg.replaceChildren(h('p', { class: 'alert m0' }, errOf(ui, e))); return false; }
     ui.say(`已作废 ${b.id}，${b.count} 笔回到已审核`); ui.rerender(); return true;
   }, true);
+}
+/** 解除挂起：确认收款地址没问题（例如代币已解除拉黑）后，回到普通的已审核，下一轮照常凑批 */
+function unhold(ui: WalletUi, x: any) {
+  const msg = h('div');
+  ui.dialog(`解除挂起 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', x.merchant], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['挂起原因', HOLD[x.hold] || x.hold]]),
+    h('p', { class: 'hint muted m0' }, '确认这个收款地址现在能收款后再解除。解除后回到已审核，下一轮凑批照常付；如果还是转不了，会再被挂起。记审计。'), msg), '解除挂起', async () => {
+    try { await ui.call('payout-unhold', { id: x.id }); } catch (e) { msg.replaceChildren(h('p', { class: 'alert m0' }, errOf(ui, e))); return false; }
+    ui.say(`已解除挂起 ${x.id}，下一轮凑批照常付`); ui.rerender(); return true;
+  });
 }
 /** 已审核（还没凑进批次）的驳回：原因必填，退冻结、发回调 */
 function rejectApproved(ui: WalletUi, x: any) {
@@ -355,7 +367,8 @@ function signBatch(ui: WalletUi, chain: string, plan: any, idx: number) {
       try {
         const d = await ui.call('payout-tx-batch', undefined, `&id=${encodeURIComponent(b.id)}`);
         // 链上确认后完成：关掉弹窗（还有下一批时留着让你接着签）
-        if (d.status === 'confirmed') { state.textContent = `已完成：${d.count} 笔都已付出`; ui.say(`${b.id} 已完成：${d.count} 笔都已付出`); if (!more) dlg.close(); ui.rerender(); return; }
+        // 链上确认后：窗口里写"✓ 已提交，N 笔都付出了"，停 3 秒再关（还有下一批时留着让你接着签）
+        if (d.status === 'confirmed') { state.textContent = `✓ 已提交，${d.count} 笔都付出了`; state.className = 'ok m0'; ui.say(`${b.id} 已完成：${d.count} 笔都付出了`); ui.rerender(); if (!more) setTimeout(() => { if (body4.isConnected && dlg.open) dlg.close(); }, 3000); return; }
         if (d.status === 'failed') { state.textContent = d.error === 'dropped' ? '没上链：热钱包的这个 nonce 已被别的交易用掉，每笔回到已审核，商户余额没动，可以重新凑批签名' : '整批回滚：交易在链上失败，每笔回到已审核，商户余额没动，可以重新凑批签名'; state.className = 'alert m0'; ui.rerender(); return; }
         if (d.rebroadcast_at) state.textContent = '30 分钟还没上链：为了不付两次不会退回，系统已用原来签好的交易重发（通常是网络费出低了，等网络费回落）。';
       } catch { /* 稍后再查 */ }

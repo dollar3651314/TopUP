@@ -89,7 +89,7 @@ function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, Par
     h('h2', { class: 'h-sm' }, '资金'),
     h('div', { class: 'stats' },
       stat('代收总额', usd(f.collected_total), `帮商户收到的钱 · ${num(f.deposit_count)} 笔`),
-      stat('欠商户', usd(f.owed_total), `可提 ${usd(f.owed_available)} · 提币中冻结 ${usd(f.owed_frozen)}`),
+      stat('欠商户', usd(f.owed_total), `可提 ${usd(f.owed_available)} · 打款中冻结 ${usd(f.owed_frozen)}`),
       stat('平台资产', usd(f.assets_total), `未归集 ${usd(f.unswept_total)} + 热钱包 ${usd(f.hot_usdt)}${f.cold_configured ? ` + 冷钱包 ${usd(f.cold_usdt)}` : ''}`),
       stat('利润', usd(f.profit_total), '平台资产 − 欠商户'),
     ),

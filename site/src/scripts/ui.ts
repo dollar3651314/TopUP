@@ -69,7 +69,30 @@ export function toast(root: ParentNode, sel: string, msg: string) {
  */
 export function secretInput(multiline = false): HTMLInputElement | HTMLTextAreaElement {
   const attrs = { autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: false, 'data-secret': '', 'data-lpignore': 'true', 'data-1p-ignore': '', class: 'mono-input secret-input' };
-  return (multiline ? h('textarea', { rows: '3', ...attrs }) : h('input', { type: 'text', ...attrs })) as HTMLInputElement | HTMLTextAreaElement;
+  const el = (multiline ? h('textarea', { rows: '3', ...attrs }) : h('input', { type: 'text', ...attrs })) as HTMLInputElement | HTMLTextAreaElement;
+  // 浏览器不支持 -webkit-text-security 时（推断：部分 Firefox 版本）：框里只显示圆点，真正的内容放在这里，读写 el.value 拿到的是真内容
+  if (typeof CSS !== 'undefined' && !CSS.supports('-webkit-text-security', 'disc')) maskWithDots(el);
+  return el;
+}
+/** 圆点遮盖：拦下每次输入（键入、粘贴、删除），自己维护真内容，框里显示同样多的圆点；仍是普通文本框，不会触发"保存密码" */
+function maskWithDots(el: HTMLInputElement | HTMLTextAreaElement) {
+  const proto = Object.getPrototypeOf(el);
+  const native = Object.getOwnPropertyDescriptor(proto, 'value')!;
+  let real = '';
+  const show = (caret: number) => { native.set!.call(el, '•'.repeat(real.length)); el.setSelectionRange(caret, caret); };
+  Object.defineProperty(el, 'value', { configurable: true, get: () => real, set: (v: string) => { real = String(v ?? ''); native.set!.call(el, '•'.repeat(real.length)); } });
+  el.addEventListener('beforeinput', (e: InputEvent) => {
+    e.preventDefault();
+    const a = el.selectionStart ?? real.length, b = el.selectionEnd ?? real.length;
+    const t = e.inputType;
+    if (t.startsWith('insert')) { const add = e.data ?? e.dataTransfer?.getData('text/plain') ?? (t === 'insertLineBreak' ? '\n' : ''); real = real.slice(0, a) + add + real.slice(b); show(a + add.length); }
+    else if (t === 'deleteContentBackward') { const from = a === b ? Math.max(0, a - 1) : a; real = real.slice(0, from) + real.slice(b); show(from); }
+    else if (t === 'deleteContentForward') { const to = a === b ? Math.min(real.length, b + 1) : b; real = real.slice(0, a) + real.slice(to); show(a); }
+    else if (t.startsWith('delete')) { real = real.slice(0, a) + real.slice(b); show(a); }
+  });
+  // 不让复制、剪切出圆点以外的东西（真内容不进剪贴板）
+  el.addEventListener('copy', (e) => e.preventDefault());
+  el.addEventListener('cut', (e) => e.preventDefault());
 }
 /** 清空一块区域里所有私钥、助记词输入框 */
 export function wipeSecrets(scope: ParentNode) {

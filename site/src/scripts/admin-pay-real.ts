@@ -122,7 +122,8 @@ function signDialog(job: SignJob) {
     bad.length ? h('p', { class: 'alert m0' }, '有交易没通过核对，页面已拦下，不能签名，请不要继续，把这个提示截图给研发。') : null,
     payout ? h('p', { class: 'hint muted m0', 'data-sign-scope': '' }, '页面能拦下的：付款地址（只认写在代码里的热钱包）、USDT 合约、交易过期时间。收款人和金额是和服务器给的审核列表对比，以服务器为准；万一服务器被人改了，最多付出热钱包里的钱——热钱包余额上限就是兜底。') : null,
     h('dl', { class: 'kv kv-tight' }, ...job.summary.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, h('b', {}, v))])),
-    h('p', { class: 'hint muted m0' }, `热钱包：${RULES.hot || '（没有配置）'}${RULES.cold ? ` · 冷钱包：${RULES.cold}` : ''}。大额打款前，可以在 Tronscan 上再核对一次收款地址。`),
+    // 打款窗口只写付款的热钱包（冷钱包和打款无关）；归集窗口照旧写热钱包和冷钱包
+    h('p', { class: 'hint muted m0' }, payout ? `付款热钱包：${RULES.hot || '没有配置'}。大额打款前，可以在 Tronscan 上再核对一次收款地址。` : `热钱包：${RULES.hot || '（没有配置）'}${RULES.cold ? ` · 冷钱包：${RULES.cold}` : ''}。大额打款前，可以在 Tronscan 上再核对一次收款地址。`),
     field('ps-code', '验证器动态码（6 位）', code),
     job.needMnemonic ? field('ps-mn', '主助记词（只在本页面使用，签名后立即清除，不会发送给服务器）', mn) : null,
     field('ps-hot', '热钱包的私钥或助记词（64 位十六进制的私钥，或 TronLink 里这个钱包的 12/24 个单词；只在本页面使用，签名后立即清除，不会发送给服务器）', hot),
@@ -298,7 +299,7 @@ function openWdSign(plan: any, byId: Record<string, any>, p: HTMLElement) {
     summary: [['合计打出', `${usd(plan.total)} USDT`], ['付款地址', `热钱包 ${shortAddr(RULES.hot)}`]],
     onDone: (r) => {
       const failed = r.results.filter((x: any) => x.status !== 'broadcast');
-      say(failed.length ? `${failed.length} 笔广播时出错（${failed.map((x: any) => x.error).join('；')}）：可能已经发出去了，先不退回；交易 30 分钟后过期，过期后链上仍查不到才回到已审核` : `${r.results.length} 笔已广播，链上确认后自动完成`);
+      say(failed.length ? `${failed.length} 笔广播时出错（${failed.map((x: any) => x.error).join('；')}）：可能已经发出去了，先不退回；交易 30 分钟后过期，过期后链上仍查不到才回到已审核` : `✓ 已提交，${r.results.length} 笔都已广播，链上确认后自动完成`);
       wdSel.clear(); render.withdrawals(p); counts();
     },
   });
