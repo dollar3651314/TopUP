@@ -3,6 +3,8 @@
 // 这时热钱包的 nonce N 还没被用掉，A 的已签名原文已经公开（进过内存池），任何人都能重新广播并上链。
 // 要求：nonce N 被用掉之前，这一笔不能回到"已审核"（否则重新凑批出 B，A、B 都上链 = 付两次）；
 // 全过程收款人链上只收到 100、账本只按这笔扣一次 100、冻结清零、最后是已完成。
+// 另两条（修复轮补测）：nonce N 已被别的交易用掉、A 没有回执 → 整批回到已审核，重凑后只付一次；
+// 一批里有一个收款人转不了（试算回滚 TransferFailed(i)）→ 只挂起那一笔、其余照常凑批付出，挂起的不再进批，驳回后退冻结。
 // 怎么跑：和 test/anvil/payout-anvil.test.js 相同（CI contracts 一节，一个文件一个文件跑）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -133,4 +135,103 @@ test('以太坊打款：广播后节点查不到（30 分钟）但 nonce 还没�
   } finally {
     await rpc('evm_setAutomine', [true]);
   }
+});
+
+/** 公共准备：部署 BatchPayout 和测试 USDT、给热钱包钱和授权额度、商户余额 */
+async function prepare() {
+  const { createEvmAdapter } = await import('../../server/wallet/adapters/evm.js');
+  const { createPayoutService } = await import('../../server/wallet/payout.js');
+  const core = await import('../../server/pay/core.js');
+  const { approvePayouts } = await import('../../server/pay/payout.js');
+  const { toChecksumAddress } = await import('../../server/wallet/create2.js');
+  await rpc('evm_setAutomine', [true]);
+  const [deployer] = await rpc('eth_accounts');
+  const hotKey = randomBytes(32);
+  const hot = '0x' + hex(keccak_256(secp256k1.getPublicKey(hotKey, false).slice(1))).slice(24);
+  await rpc('anvil_setBalance', [hot, '0x' + (10n ** 19n).toString(16)]);
+  const payout = await deploy(deployer, artifact(OUT, 'BatchPayout.sol', 'BatchPayout'), hot);
+  const usdt = await deploy(deployer, artifact(OUT_P, 'PayoutMocks.sol', 'MockUsdtTF'));
+  await send(deployer, usdt, call('mint(address,uint256)', hot, 5_000n * BigInt(U)));
+  const chainId = Number(BigInt(await rpc('eth_chainId')));
+  const db = await setupDb({ customers: [] });
+  await db.query('update balances set available = available + $1', [10_000 * U]);
+  const clock = { skew: 0 };
+  const svc = createPayoutService({ db, verifyCode: async () => true, now: () => Date.now() + clock.skew,
+    chains: { eth: { adapter: createEvmAdapter({ chain: 'eth', rpcUrl: RPC, usdt, decimals: 6, confirmations: 0 }), chainId, token: usdt, contract: payout, hot, decimals: 6 } } });
+  for (const s of (await svc.allowancePlan('eth', { amount: 5_000 * U, reason: 'qa', code: '000000' })).steps) {
+    const o = await svc.allowanceSubmit('eth', { rawHex: s.rawHex, sigHex: sign(s.rawHex, hotKey) });
+    await waitReceipt(o.tx_hash);
+  }
+  const m1 = await core.getMerchant(db, 'm1');
+  const newPayee = () => toChecksumAddress('0x' + hex(randomBytes(20)));
+  const pay = async (to, amount) => {
+    const wid = (await core.requestWithdrawal(db, m1, { kind: 'payout', chain: 'eth', to, amount: amount * U, source: 'api' })).withdrawal_no;
+    await approvePayouts(db, { ids: [wid], actor: 'admin' });
+    return wid;
+  };
+  const statusOf = async (wid) => (await db.query('select status, hold_reason from withdrawals where id = $1', [wid]))[0];
+  return { db, svc, hot, hotKey, usdt, payout, deployer, clock, newPayee, pay, statusOf };
+}
+
+test('以太坊打款：A 被挤出交易池后热钱包的 nonce N 被别的交易用掉、A 没有回执 → 整批回到已审核；重凑后收款人只收到一次', { skip, timeout: 180_000 }, async () => {
+  const { encodeUnsignedLegacyTx, attachSignature } = await import('../../server/wallet/evm-payout-codec.js');
+  try {
+    const t = await prepare();
+    const payee = t.newPayee();
+    const wid = await t.pay(payee, 100);
+    await rpc('evm_setAutomine', [false]);
+    const A = (await t.svc.plan('eth')).batches[0];
+    const sentA = await t.svc.submit(A.id, { sigHex: sign(A.rawHex, t.hotKey) });
+    await rpc('anvil_dropTransaction', [sentA.tx_hash]);
+    // 运营用同一个 nonce 签一笔"转 0 给自己"、网络费更高的交易把 A 作废，上链
+    const cancelRaw = encodeUnsignedLegacyTx({ nonce: BigInt(A.nonce), gasPrice: 10n ** 11n, gas: 21_000n, to: t.hot, value: 0, data: '0x', chainId: Number(BigInt(await rpc('eth_chainId'))) });
+    const cancel = attachSignature(cancelRaw, sign(cancelRaw, t.hotKey));
+    await rpc('eth_sendRawTransaction', [cancel.raw]);
+    await rpc('evm_mine', []);
+    await rpc('evm_setAutomine', [true]);
+    assert.ok(BigInt(await rpc('eth_getTransactionCount', [t.hot, 'latest'])) > BigInt(A.nonce), '前提：nonce N 已被用掉');
+    t.clock.skew = 31 * 60_000;
+    await t.svc.confirm();
+    assert.equal((await t.statusOf(wid)).status, 'approved', 'nonce N 已被别的交易用掉、A 没有回执：整批回到已审核');
+    t.clock.skew = 0;
+    const B = (await t.svc.plan('eth')).batches;
+    assert.equal(B.length, 1, '可以重新凑批');
+    const sentB = await t.svc.submit(B[0].id, { sigHex: sign(B[0].rawHex, t.hotKey) });
+    await waitReceipt(sentB.tx_hash);
+    await t.svc.confirm();
+    assert.equal(await balanceOf(t.usdt, payee), 100n * BigInt(U), '收款人只收到一次 100');
+    assert.equal((await t.statusOf(wid)).status, 'completed');
+    assert.equal(await rpc('eth_getTransactionReceipt', [sentA.tx_hash]), null, 'A 不会再上链');
+  } finally {
+    await rpc('evm_setAutomine', [true]);
+  }
+});
+
+test('以太坊打款：一批里一个收款人转不了（试算回滚 TransferFailed(i)）→ 只挂起那一笔，其余照常付出；挂起的不再进批，驳回后退冻结', { skip, timeout: 180_000 }, async () => {
+  const { rejectApprovedPayout } = await import('../../server/pay/payout.js');
+  const t = await prepare();
+  const good1 = t.newPayee(), bad = t.newPayee(), good2 = t.newPayee();
+  const ids = [await t.pay(good1, 10), await t.pay(bad, 20), await t.pay(good2, 30)];
+  await send(t.deployer, t.usdt, call('block_(address,bool)', bad, 1)); // 代币拉黑这个收款人
+  const p = await t.svc.plan('eth');
+  assert.deepEqual(p.held.filter((h) => h.reason === 'transfer_failed').map((h) => h.id), [ids[1]], '只挂起转不了的那一笔');
+  assert.equal(p.batches.length, 1);
+  assert.deepEqual(p.batches[0].items.map((i) => i.id).sort(), [ids[0], ids[2]].sort(), '其余照常凑批');
+  const sent = await t.svc.submit(p.batches[0].id, { sigHex: sign(p.batches[0].rawHex, t.hotKey) });
+  assert.equal((await waitReceipt(sent.tx_hash)).status, '0x1');
+  await t.svc.confirm();
+  assert.equal(await balanceOf(t.usdt, good1), 10n * BigInt(U));
+  assert.equal(await balanceOf(t.usdt, good2), 30n * BigInt(U));
+  assert.equal(await balanceOf(t.usdt, bad), 0n);
+  const held = await t.statusOf(ids[1]);
+  assert.equal(held.status, 'approved', '挂起的对外仍是已审核');
+  assert.equal(held.hold_reason, 'transfer_failed');
+  const again = await t.svc.plan('eth');
+  assert.equal(again.batches.length, 0, '挂起的不再进批');
+  const before = (await t.db.query(`select available::bigint a, frozen::bigint f from balances where merchant_id = 'm1'`))[0];
+  await rejectApprovedPayout(t.db, { id: ids[1], reason: '收款地址转不了', actor: 'admin' });
+  const after = (await t.db.query(`select available::bigint a, frozen::bigint f from balances where merchant_id = 'm1'`))[0];
+  const [w] = await t.db.query('select amount::bigint a, fee::bigint f, status from withdrawals where id = $1', [ids[1]]);
+  assert.equal(w.status, 'rejected');
+  assert.equal(Number(before.f) - Number(after.f), Number(w.a) + Number(w.f), '驳回后退冻结（金额 + 手续费）');
 });
