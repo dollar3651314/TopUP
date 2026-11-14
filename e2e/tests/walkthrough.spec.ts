@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { readJsonl, decodeQP, MAILS, KYB_ENV, TMP } from '../stack.mjs';
 // @ts-ignore 与后端同一份 TOTP 实现
 import { totpCode, totpStep } from '../../server/kyb/totp.js';
-import { legacyTron } from './legacy-tron';
+import { legacyTron, legacyMnemonic } from './legacy-tron';
 
 // 页面走查：逐页、逐状态截图，并自动检查常见的显示问题。
 // 注意：8094 端口用的是 site/dist，运行前先 `cd site && npm run build`，否则截到的是旧页面。
@@ -93,15 +93,10 @@ test.describe.serial('页面走查', () => {
     await expect(admin.locator('[data-view="app"]')).toBeVisible();
     // 钱包还没初始化时的各页面（空状态之一）
     for (const tab of ['p-overview', 'p-wallet', 'p-sweep']) { await adminTab(admin, tab); await shot(admin, `admin-0-uninit-${tab}`); }
+    // Q-A1：后台不再提供"初始化主助记词"；旧地址（第 0 批）要用的主助记词按"旧系统早已初始化"造旧数据（服务器只有公钥）
+    expect((await legacyMnemonic(admin, B)).words).toHaveLength(24);
     await adminTab(admin, 'p-wallet');
-    await admin.click('text=初始化主助记词');
-    const words = await admin.locator('.mnemonic li').allTextContents();
-    await admin.click('[data-pdialog-ok]');
-    for (const [i, n] of [3, 11, 20].entries()) await admin.fill(`#wi-${i}`, words[n - 1]);
-    await admin.fill('#wi-code', await code(adminSecret));
-    await admin.click('[data-pdialog-ok]');
-    await expect(admin.locator('[data-pdialog]')).toContainText('初始化完成');
-    await admin.click('[data-pdialog-ok]');
+    await expect(admin.locator('[data-panel="p-wallet"]')).not.toContainText('初始化主助记词');
     const r = await post(admin, '/api/wallet/?a=merchant-open', { name: 'Walkthrough Trading Co., Ltd.', email: M_EMAIL, fee_in: { ppm: 10000, fixed: 0, min: 0 }, fee_out: { ppm: 0, fixed: 2 * U, min: 0 }, order_mode: { enabled: true, low: 900000, high: 1100000, ttlMin: 30, lookbackH: 24 } });
     expect(r.status).toBe(200);
     await expect.poll(() => mailsTo(M_EMAIL).length).toBeGreaterThan(0);

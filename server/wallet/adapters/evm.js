@@ -4,7 +4,7 @@
 // 每个请求都有超时（默认 10 秒）；出错直接抛出，不返回空结果、不推进游标，由 worker 下一轮重试。
 import { toUnits } from '../units.js';
 import { toChecksumAddress, isEvmAddress } from '../create2.js';
-import { encodeBalanceOf, keccakHex } from '../evm-tx.js';
+import { encodeBalanceOf, encodeAllowance, keccakHex } from '../evm-tx.js';
 
 export const TRANSFER_TOPIC = keccakHex(Buffer.from('Transfer(address,address,uint256)'));
 const TOPIC_GROUP = 100; // 地址多时分组查，每组 100 个
@@ -14,7 +14,7 @@ const topicOf = (addr) => '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(
 const addrOfTopic = (t) => toChecksumAddress('0x' + t.slice(-40));
 
 export class RpcError extends Error {
-  constructor(message, { code = 'rpc_error', rpcCode } = {}) { super(message); this.code = code; this.rpcCode = rpcCode; }
+  constructor(message, { code = 'rpc_error', rpcCode, data } = {}) { super(message); this.code = code; this.rpcCode = rpcCode; if (data !== undefined) this.data = data; }
 }
 
 /** 最小的 JSON-RPC 客户端：单个或批量请求，超时，HTTP / JSON-RPC 错误都抛出 RpcError（错误信息不含节点地址，节点地址里可能有 API Key） */
@@ -32,7 +32,8 @@ export function createRpc({ rpcUrl, fetchImpl = fetch, timeoutMs = 10_000, label
   }
   const unwrap = (r, method) => {
     if (!r || typeof r !== 'object') throw new RpcError(`${label}: ${method}: empty response`);
-    if (r.error) throw new RpcError(`${label}: ${method}: ${r.error.message || 'error'}`, { rpcCode: r.error.code });
+    // data：合约回滚时节点带回的回滚数据（自定义错误的选择器 + 参数），批量打款用它找出是哪一笔
+    if (r.error) throw new RpcError(`${label}: ${method}: ${r.error.message || 'error'}`, { rpcCode: r.error.code, data: typeof r.error.data === 'string' ? r.error.data : r.error.data?.data });
     return r.result;
   };
   return {
@@ -124,14 +125,43 @@ export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decim
     head, transfers, receipt, txStatus,
     /** USDT 余额（原始数，bigint） */
     async tokenBalanceRaw(address, token = usdt) { return BigInt(await rpc.call('eth_call', [{ to: token, data: encodeBalanceOf(address) }, 'latest'])); },
+    /** USDT 授权额度 allowance(owner, spender)（原始数，bigint）：批量打款读热钱包给 BatchPayout 的额度 */
+    async allowanceRaw(owner, spender, token = usdt) { return BigInt(await rpc.call('eth_call', [{ to: token, data: encodeAllowance(owner, spender) }, 'latest'])); },
     async nativeBalance(address) { return BigInt(await rpc.call('eth_getBalance', [address, 'latest'])); },
     async isContract(address) { const c = await rpc.call('eth_getCode', [address, 'latest']); return typeof c === 'string' && c !== '0x' && c !== '0x0'; },
     async chainId() { return BigInt(await rpc.call('eth_chainId')); },
     async gasPrice() { return BigInt(await rpc.call('eth_gasPrice')); },
     async nonce(address) { return BigInt(await rpc.call('eth_getTransactionCount', [address, 'pending'])); },
+    /** 已确认的 nonce：最新区块往前退"确认数"个区块时这个地址发过几笔（批量打款判断某个 nonce 是否已被别的交易用掉） */
+    async confirmedNonce(address) {
+      const h = await head();
+      const at = Math.max(0, h - confirmations);
+      return BigInt(await rpc.call('eth_getTransactionCount', [address, at === h ? 'latest' : hex(at)]));
+    },
+    /** 只读调用（eth_call，latest）：返回数据；回滚时抛出 RpcError，err.data 是回滚数据 */
+    async call(tx) { return rpc.call('eth_call', [tx, 'latest']); },
+    /** 地址上的合约代码（十六进制；没有代码是 0x） */
+    async getCode(address) { return rpc.call('eth_getCode', [address, 'latest']); },
     async estimateGas(tx) { return BigInt(await rpc.call('eth_estimateGas', [tx])); },
     async sendRaw(raw) { return rpc.call('eth_sendRawTransaction', [raw]); },
     /** 节点认不认识这笔交易（在交易池里或已上链）；连不上时抛出 */
+    /**
+     * 同一个批量请求里取最新区块号和"已确认"的 nonce（head − 确认数那个区块）：负载均衡时一个批量请求通常由同一台后端回答，
+     * head 用来和 txLookup 的 head 比——查交易的后端比查 nonce 的旧，就不能拿它的"查不到"当结论
+     */
+    async nonceSnapshot(address) {
+      const h = num(await rpc.call('eth_blockNumber'));
+      const at = Math.max(0, h - confirmations);
+      const [h2, n] = await rpc.batch([['eth_blockNumber', []], ['eth_getTransactionCount', [address, hex(at)]]]);
+      return { head: num(h2), nonce: BigInt(n) };
+    },
+    /** 同一个批量请求里取最新区块号、回执、交易（查不到的是 null） */
+    async txLookup(hash) {
+      const [h, receipt, tx] = await rpc.batch([['eth_blockNumber', []], ['eth_getTransactionReceipt', [hash]], ['eth_getTransactionByHash', [hash]]]);
+      return { head: num(h), receipt: receipt || null, tx: tx || null };
+    },
+    /** 按交易号查交易（在交易池里或已上链）；查不到 null，连不上抛出 */
+    async txByHash(hash) { return rpc.call('eth_getTransactionByHash', [hash]); },
     async txKnown(hash) { return (await rpc.call('eth_getTransactionByHash', [hash])) !== null; },
   };
 }

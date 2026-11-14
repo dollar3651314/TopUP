@@ -39,6 +39,25 @@ remappings = [
   "forge-std/=lib/forge-std/src/",
 ]
 
+# 批量打款合约 BatchPayout（第 3 批）的单测、模糊、不变量放在 test-payout/，单独一个 profile：FOUNDRY_PROFILE=payout forge test
+# 和 tron 一样分开：合约还没写时这里编译失败，不连带默认 profile 的归集合约测试；覆盖率用 script/check-coverage.sh 卡 100%
+[profile.payout]
+src = "src"
+test = "test-payout"
+script = "test-payout" # 不编译 script/：forge coverage 分析带中文注释的部署脚本会崩（forge 1.3.5 实测），打款测试也用不到脚本
+out = "out-payout"
+cache_path = "cache-payout"
+libs = ["lib"]
+solc_version = "0.8.20"
+evm_version = "paris"
+optimizer = true
+optimizer_runs = 1000
+remappings = [
+  "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+  "bitgo/=lib/eth-multisig-v4/contracts/",
+  "forge-std/=lib/forge-std/src/",
+]
+
 [fuzz]
 # 每个模糊测试至少 10,000 次
 runs = 10000

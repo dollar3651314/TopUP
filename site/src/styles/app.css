@@ -403,3 +403,42 @@ button.chain-choice .later-tag { margin-left: auto; }
 .status.st-bad { color: var(--danger); background: rgba(201, 42, 42, 0.12); font-weight: 700; }
 @media (prefers-color-scheme: dark) { .status.st-bad { background: rgba(255, 135, 135, 0.16); } }
 .link-btn.link-plain { color: var(--accent); }
+/* 第 3 批批量打款：上传卡片、逐行检查的行底色、签名四步、按链凑批卡片、等待时长、钱包设置每链一张卡 */
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.upload-card { text-align: center; border-style: dashed; align-items: center; }
+.upload-card label.btn { display: inline-flex; cursor: pointer; }
+tr.row-bad td { background: rgba(201, 42, 42, 0.06); }
+tr.row-warn td { background: rgba(245, 184, 61, 0.1); }
+.warn { color: #b35c00; font-weight: 600; }
+@media (prefers-color-scheme: dark) { .warn { color: #ffc078; } }
+.row-actions.spread { justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.block { display: block; }
+.stepper-4 { display: flex; gap: 8px; list-style: none; padding: 0; margin: 0; flex-wrap: wrap; }
+.stepper-4 li { flex: 1 1 120px; font-size: 0.85rem; color: var(--text-muted); border-top: 3px solid var(--border); padding-top: 6px; }
+.stepper-4 li.done { border-color: var(--accent); }
+.stepper-4 li.on { border-color: var(--accent); color: var(--text); font-weight: 700; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.plan-card .batch-amt small { font-size: 0.8rem; }
+tr[data-wait="warn"] td:first-child { box-shadow: inset 4px 0 0 #f08c00; }
+tr[data-wait="late"] td:first-child { box-shadow: inset 4px 0 0 var(--danger); }
+.wait-warn { color: #e8590c; font-weight: 600; }
+.wait-late { color: var(--danger); font-weight: 700; }
+.wallet-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; align-items: start; }
+.wallet-card .wl-sec { border-top: 1px solid var(--border); padding-top: 10px; display: grid; gap: 4px; }
+.wallet-card .mono { word-break: break-all; }
+.meter-row { width: 100%; height: 8px; accent-color: var(--accent); }
+.decoded-table .ok, .decoded-table .bad { white-space: nowrap; }
+.cell-2.cell-start { align-items: flex-start; justify-items: start; }
+/* 打款审核：超过单笔上限的行标红 */
+tr.row-over td { color: var(--danger); }
+/* 私钥输入框：普通文本框 + 遮盖显示（不用 type=password，浏览器不会提示"保存密码"） */
+.secret-input { -webkit-text-security: disc; text-security: disc; }
+/* 表格里较长的提示可以换行（手机上不用横着滑就能看完） */
+.pay-table td .cell-wrap, td .cell-wrap { white-space: normal; display: inline-block; min-width: 12em; max-width: 22em; }
+/* 超上限、挂起的行：只把文字标红，行里的按钮保持自己的颜色 */
+tr.row-over td .btn { color: inherit; }
+tr.row-over td .btn-primary { color: var(--accent-contrast); }
+/* 暗色下不可点的按钮：半透明看不清，改成实底灰色、文字清楚 */
+@media (prefers-color-scheme: dark) {
+  .btn[disabled], .btn:disabled { opacity: 1; background: #24364f; border-color: #35506f; color: #a3b3c6; cursor: not-allowed; }
+}

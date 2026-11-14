@@ -3,17 +3,19 @@
 //   ① 服务器给出待签名的交易原文 → ② 页面自己解码、按规则核对（server/pay/verify.js）
 //   ③ 管理员输入验证码（先交给服务器验证）→ ④ 页面用私钥或助记词签名，只把签名交给服务器
 // 私钥和助记词只在函数里用一次，签名后清空输入框；页面不写入浏览器存储，也不发给任何地址。
-import { mnemonicToSeedSync, validateMnemonic, generateMnemonic } from '@scure/bip39';
+import { mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english';
 import { HDKey } from '@scure/bip32';
 import wallets from '../../../config/wallets.json';
 import { checkStep } from '../../../server/pay/verify.js';
 import { signTxId, addressOfPrivateKey, keyForAddress } from '../../../server/pay/signing.js';
 import { decodeRaw } from '../../../server/pay/txcodec.js';
-import { describeFee, fmtUsdt, parseUsdt, shortAddr } from '../lib/money';
-import { copyBtn, field, fieldErr, fmtTime, h, mono, stat, status, table, toast } from './ui';
+import { describeFee, fmtUsdt, isTronAddress, parseUsdt, shortAddr } from '../lib/money';
+import { isChecksumAddress } from '../../../server/wallet/evm-payout-codec.js';
+import { copyBtn, field, fieldErr, fmtTime, h, mono, secretInput, stat, status, table, toast } from './ui';
 import { dialog, feeInputs, modeInputs, modeText, tronscan, minsAgo, TRONSCAN } from './admin-pay';
 import { mountOverview } from './admin-overview';
+import { renderPayoutReview, renderWalletCards } from './admin-payout';
 import { pickSweepChain, renderEvmSweep, renderRoutes, walletBadges, walletStatus, walletTodo, type WalletUi } from './admin-wallet';
 
 const root = document.getElementById('admin-root')!;
@@ -28,10 +30,10 @@ const usd = (v: unknown) => fmtUsdt(u(v));
 const ACCOUNT = "m/44'/195'/0'";
 const toolbar = (title: string, ...right: (HTMLElement | null)[]) => h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, title), h('div', { class: 'tool-actions' }, ...right));
 
-class WErr extends Error { constructor(public code: string, public field?: string) { super(code); } }
+class WErr extends Error { constructor(public code: string, public field?: string, public rows?: { line: number; code: string }[]) { super(code); } }
 const ERR: Record<string, string> = {
   internal_error: '服务器出错了，请稍后重试。如果一直出错，看"系统状态"或服务器日志。', http_500: '服务器出错了，请稍后重试。', http_502: '服务器暂时连不上，请稍后重试。', http_503: '服务暂时不可用，请稍后重试。', http_504: '服务器响应超时，请稍后重试。',
-  bad_code: '动态码不正确或已经用过，请等下一个动态码。', hot_wallet_insufficient: '热钱包的 USDT 不够，请先归集。', verify_required: '验证码已过期，请重新签名。', bad_signature: '签名和交易的付款地址不一致。',
+  bad_code: '动态码不正确或已经用过，请等下一个动态码。', not_approved: '只能签已审核的打款：先在"打款审核"里逐笔审核通过。', duplicate_txid: '这一批有两笔交易号重复，已被服务器拦下，请作废重凑。', plan_expired: '这一批交易原文快过期了：请作废重凑后再签。', hot_wallet_insufficient: '热钱包的 USDT 不够，请先归集。', verify_required: '验证码已过期，请重新签名。', bad_signature: '签名和交易的付款地址不一致。',
   invalid_state: '状态已经变化，请刷新后再试。', nothing_to_sweep: '选中的地址在链上已经没有 USDT。', sweep_in_progress: '有地址正在归集中，请等上一次完成。', cold_wallet_not_configured: '还没有配置冷钱包地址。',
   already_initialized: '已经初始化过了。', first_address_mismatch: '服务器算出的第 1 个地址和浏览器不一致，已停止。', private_key_not_allowed: '只能提交公钥。', invalid_fee: '手续费格式不对。', invalid_order_mode: '订单模式的设置超出范围。',
   invalid_address: 'TRON 地址格式不对。', not_configured: '收付款还没有配置好（数据库、TronGrid 等），请先在服务器上完成配置（看"系统状态"里哪一项没配置）。', unauthorized: '登录已过期，请重新登录。',
@@ -40,7 +42,7 @@ const errText = (e: unknown) => ERR[(e as WErr).code] || `操作失败（${(e as
 async function call(a: string, body?: unknown, qs = '') {
   const res = await fetch(`/api/wallet/?a=${a}${qs}`, body === undefined ? { credentials: 'same-origin' } : { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-topup-csrf': '1' }, body: JSON.stringify(body) });
   const d = await res.json().catch(() => ({}));
-  if (!res.ok) throw new WErr(d?.error?.code || `http_${res.status}`, d?.error?.field);
+  if (!res.ok) throw new WErr(d?.error?.code || `http_${res.status}`, d?.error?.field, d?.error?.rows);
   return d;
 }
 
@@ -69,7 +71,7 @@ async function counts() {
   // 三个数字分别读取：一个失败不影响其他两个
   const jobs: [string, string, () => Promise<number>][] = [
     ['merchants', '已开通的商户', async () => (await call('merchants')).merchants.filter((x: any) => x.status === 'active').length],
-    ['withdrawals', '待审核的提币', async () => (await call('withdrawals')).items.length],
+    ['withdrawals', '待审核的打款', async () => (await call('withdrawals')).items.length],
     ['anomalies', '未处理的异常到账', async () => (await call('anomalies')).items.filter((x: any) => !x.handled).length],
   ];
   await Promise.all([...jobs.map(async ([k, meaning, f]) => {
@@ -108,14 +110,20 @@ function signDialog(job: SignJob) {
     return h('li', {}, `${KIND[s.kind] || s.kind}：${what} `, r.ok ? h('span', { class: 'ok' }, '✓ 一致') : h('span', { class: 'bad' }, `✗ ${r.error}`));
   };
   const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' }) as HTMLInputElement;
-  const mn = h('textarea', { rows: '3', autocomplete: 'off', spellcheck: false, class: 'mono-input' }) as HTMLTextAreaElement;
-  const hot = h('input', { type: 'password', autocomplete: 'off', spellcheck: false, class: 'mono-input' }) as HTMLInputElement;
+  const mn = secretInput(true) as HTMLTextAreaElement;
+  const hot = secretInput() as HTMLInputElement;
+  // 打款：收款人是商户的客户（审核通过的列表）；归集：收款地址只能是写在代码里的热钱包或冷钱包
+  const payout = job.rows.every((r) => r.steps.every((s) => s.kind === 'withdraw'));
   const body = h('div', { class: 'stack' },
-    h('p', { class: 'hint muted m0' }, '下面每一行的内容，都是浏览器自己从交易原文里解码出来的，并按规则逐项核对（收款地址只能是写在代码里的热钱包或冷钱包）。'),
+    h('p', { class: 'hint muted m0' }, payout
+      ? '下面每一行都是浏览器自己从交易原文里解码出来的：付款地址必须是写在代码里的热钱包，收款地址和金额逐笔和审核通过的列表对比（收款人是商户的客户，以服务器给的审核列表为准）。'
+      : '下面每一行的内容，都是浏览器自己从交易原文里解码出来的，并按规则逐项核对（收款地址只能是写在代码里的热钱包或冷钱包）。'),
     table([...job.cols, '浏览器核对'], job.rows.map((r, i) => [...r.cells, h('ul', { class: 'plain-list' }, ...r.steps.map((s, j) => detail(s, i, j)))]), '—'),
-    bad.length ? h('p', { class: 'alert m0' }, '有交易没通过核对，页面已拦下，不能签名。请不要继续，并检查服务器是否被篡改。') : null,
+    bad.length ? h('p', { class: 'alert m0' }, '有交易没通过核对，页面已拦下，不能签名，请不要继续，把这个提示截图给研发。') : null,
+    payout ? h('p', { class: 'hint muted m0', 'data-sign-scope': '' }, '页面能拦下的：付款地址（只认写在代码里的热钱包）、USDT 合约、交易过期时间。收款人和金额是和服务器给的审核列表对比，以服务器为准；万一服务器被人改了，最多付出热钱包里的钱——热钱包余额上限就是兜底。') : null,
     h('dl', { class: 'kv kv-tight' }, ...job.summary.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, h('b', {}, v))])),
-    h('p', { class: 'hint muted m0' }, `热钱包：${RULES.hot || '（没有配置）'}${RULES.cold ? ` · 冷钱包：${RULES.cold}` : ''}。大额打款前，可以在 Tronscan 上再核对一次收款地址。`),
+    // 打款窗口只写付款的热钱包（冷钱包和打款无关）；归集窗口照旧写热钱包和冷钱包
+    h('p', { class: 'hint muted m0' }, payout ? `付款热钱包：${RULES.hot || '没有配置'}。大额打款前，可以在 Tronscan 上再核对一次收款地址。` : `热钱包：${RULES.hot || '（没有配置）'}${RULES.cold ? ` · 冷钱包：${RULES.cold}` : ''}。大额打款前，可以在 Tronscan 上再核对一次收款地址。`),
     field('ps-code', '验证器动态码（6 位）', code),
     job.needMnemonic ? field('ps-mn', '主助记词（只在本页面使用，签名后立即清除，不会发送给服务器）', mn) : null,
     field('ps-hot', '热钱包的私钥或助记词（64 位十六进制的私钥，或 TronLink 里这个钱包的 12/24 个单词；只在本页面使用，签名后立即清除，不会发送给服务器）', hot),
@@ -135,6 +143,7 @@ function signDialog(job: SignJob) {
       const kr = await keyForAddress(hotIn, RULES.hot);
       if (!kr.key) { fieldErr(hot, { format: '请输入 64 位十六进制的私钥，或 12/24 个单词的助记词', mnemonic: '助记词不正确（检查单词和顺序）', mismatch: '这个私钥对应的地址不是热钱包', not_found: '这组助记词里找不到热钱包地址（前 20 个账户都不是）' }[kr.error]); return false; }
       const hotKey = kr.key;
+      try {
       const acct = job.needMnemonic ? HDKey.fromMasterSeed(mnemonicToSeedSync(words)).derive(ACCOUNT) : null;
       // 签名前先把验证码交给服务器验证
       try { await call('sign-verify', { batch_id: job.batchId, code: code.value.trim() }); } catch (e) { fieldErr(code, errText(e)); return false; }
@@ -158,6 +167,7 @@ function signDialog(job: SignJob) {
       try { res = await call('sign-submit', { batch_id: job.batchId, signatures }); } catch (e) { say(errText(e)); return true; }
       job.onDone(res);
       return true;
+      } finally { hotKey.fill(0); hot.value = ''; mn.value = ''; } // 中途出错（动态码不对、私钥不匹配）也清空
     } finally { ok.disabled = false; }
   });
 }
@@ -212,17 +222,25 @@ function editMerchant(m: any) {
   const fin = feeInputs(m.fee_in, 'em-in', '收款手续费'), fout = feeInputs(m.fee_out, 'em-out', '付款手续费');
   const mode = modeInputs(m.order_mode, 'em-mode');
   const active = h('input', { type: 'checkbox', checked: m.status === 'active' }) as HTMLInputElement;
-  const wallets = h('textarea', { rows: '2', class: 'mono-input' }) as HTMLTextAreaElement; wallets.value = m.cashout_wallets.join('\n');
+  // 提现地址按链登记（P5）：每行"链 地址"，例如 bsc 0x…；只写 T 开头的地址当作 TRON
+  const wallets = h('textarea', { rows: '3', class: 'mono-input', placeholder: 'eth 0x…\nbsc 0x…\ntron T…' }) as HTMLTextAreaElement;
+  wallets.value = m.cashout_wallets.map((w: any) => (typeof w === 'string' ? `tron ${w}` : `${w.chain} ${w.address}`)).join('\n');
   const reEmail = h('input', { type: 'email', value: m.users[0]?.email || '' }) as HTMLInputElement;
   dialog(m.name, h('div', { class: 'stack' }, h('label', { class: 'check-row' }, active, '启用（停用后商户不能登录，API 返回 403，已分配的地址照常监控入账）'),
-    fin.box, fout.box, mode.box, field('em-w', '已登记的提现钱包（每行一个）', wallets),
+    fin.box, fout.box, mode.box, field('em-w', '已登记的提现钱包（每行一个："链 地址"，链是 eth、bsc 或 tron；同一串 0x 地址要两条链都能提就写两行）', wallets),
     h('div', { class: 'inline-form' }, field('em-re', '重新发送设置密码的邮件', reEmail), h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: async () => {
       try { await call('merchant-reinvite', { id: m.id, email: reEmail.value.trim() }); say('已重新发送'); } catch (e) { say(errText(e)); }
     } }, '发送'))), '保存', async () => {
     const i = fin.read(), o = fout.read(), md = mode.read(); if (!i || !o || !md) return false;
-    const ws = wallets.value.split('\n').map((x) => x.trim()).filter(Boolean);
+    const lines = wallets.value.split('\n').map((x) => x.trim()).filter(Boolean);
+    const ws = lines.map((x) => { const [a, b] = x.split(/\s+/); return b ? { chain: a.toLowerCase(), address: b } : /^T/.test(a) ? { chain: 'tron', address: a } : { chain: '', address: a }; });
+    const bad = ws.findIndex((w) => !['eth', 'bsc', 'tron'].includes(w.chain));
+    if (bad >= 0) { fieldErr(wallets, `第 ${bad + 1} 行要写成"链 地址"，链是 eth、bsc 或 tron`); return false; }
+    // 地址按链核对（和服务器同一套规则）：以太坊、BSC 要带校验和的 0x 地址，TRON 是 T 开头的 34 位；全 0 地址不收
+    const badAddr = ws.findIndex((w) => (w.chain === 'tron' ? !isTronAddress(w.address) || w.address === 'T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb' : !isChecksumAddress(w.address) || /^0x0{40}$/i.test(w.address)));
+    if (badAddr >= 0) { fieldErr(wallets, `第 ${badAddr + 1} 行的地址不对：${ws[badAddr].chain === 'tron' ? 'TRON 地址是 T 开头的 34 位' : '以太坊、BSC 地址要原样复制（0x 开头 42 位，大小写是校验，不能改），不能是全 0 地址'}`); return false; }
     try { await call('merchant-save', { id: m.id, fee_in: i, fee_out: o, order_mode: md, status: active.checked ? 'active' : 'disabled', cashout_wallets: ws }); }
-    catch (e) { fieldErr((e as WErr).field === 'cashout_wallets' ? wallets : reEmail, errText(e)); return false; }
+    catch (e) { const er = e as WErr; fieldErr(er.field === 'cashout_wallets' ? wallets : reEmail, er.rows?.[0] ? `第 ${er.rows[0].line} 行：${errText(e)}` : errText(e)); return false; }
     say('已保存。新的费率和订单模式从下一笔开始生效，已有记录不变。'); show('p-merchants');
   });
 }
@@ -251,53 +269,28 @@ async function customerDetail(x: any) {
   ), '关闭', null);
 }
 
-// ============ 提币审核 ============
+// ============ 打款审核 ============
 const wdSel = new Set<string>();
-let wdAll = false;
-const WD: Record<string, [string, string]> = { pending: ['submitted', '待审核'], rejected: ['rejected', '已驳回'], cancelled: ['expired', '已取消'], signing: ['invited', '已批准'], broadcast: ['in_progress', '已广播'], completed: ['approved', '已完成'], failed: ['needs_info', '失败'] };
 render.withdrawals = async (p) => {
-  const r = await call('withdrawals', undefined, wdAll ? '&all=1' : '');
-  const pend = r.items.filter((w: any) => w.status === 'pending');
-  for (const id of [...wdSel]) if (!pend.some((w: any) => w.id === id)) wdSel.delete(id);
-  const chosen = pend.filter((w: any) => wdSel.has(w.id));
-  const need = chosen.reduce((s: number, w: any) => s + u(w.amount), 0);
-  const hotUsdt = r.hot.usdt === null ? null : u(r.hot.usdt);
-  const short = hotUsdt !== null && need > hotUsdt;
-  const filters = h('div', { class: 'filters' },
-    h('button', { type: 'button', 'aria-pressed': String(!wdAll), onclick: () => { wdAll = false; render.withdrawals(p); } }, `待审核 ${wdAll ? '' : r.items.length}`),
-    h('button', { type: 'button', 'aria-pressed': String(wdAll), onclick: () => { wdAll = true; render.withdrawals(p); } }, '全部'));
-  p.replaceChildren(
-    toolbar('提币审核', h('span', { class: 'muted' }, `热钱包 ${hotUsdt === null ? '—' : fmtUsdt(hotUsdt)} USDT`)),
-    h('p', { class: 'hint muted' }, '每一笔提币都要人工审核（后台和 API 发起的都一样）。有新的提币申请时，系统给你发邮件，1 分钟内的多笔合并成一封。商户看到的处理时效：东八区 8:00–23:00 内 1 小时处理。'),
-    filters,
-    table(['', '编号', '提交时间', '商户', '类型 · 来源', '客户', '收款地址', '金额（手续费）', '状态'], r.items.map((w: any) => {
-      const isP = w.status === 'pending';
-      const cb = h('input', { type: 'checkbox', class: 'check', checked: isP && wdSel.has(w.id), disabled: !isP, 'aria-label': `选择 ${w.id}` }) as HTMLInputElement;
-      cb.addEventListener('change', () => { cb.checked ? wdSel.add(w.id) : wdSel.delete(w.id); render.withdrawals(p); });
-      const st = h('span', { class: 'status-cell' }, status(...(WD[w.status] || ['submitted', w.status])));
-      if (w.txid) st.append(h('a', { href: `${TRONSCAN}/#/transaction/${w.txid}`, target: '_blank', rel: 'noopener noreferrer', class: 'mono' }, w.txid.slice(0, 8) + '…'));
-      if (w.reason) st.append(h('span', { class: 'hint muted' }, w.reason));
-      return [cb, mono(w.id), sub(t(w.created_at), isP ? `已等待 ${minsAgo(w.created_at)}` : ''), w.merchant, `${w.kind === 'payout' ? '代付' : '商户提现'} · ${w.source === 'api' ? 'API' : '后台'}`, w.customer_id ? mono(w.customer_id) : '—', mono(shortAddr(w.to), w.to), sub(h('b', {}, usd(w.amount)), `手续费 ${usd(w.fee)}`), st];
-    }), wdAll ? '暂无提币' : '暂无待审核的提币'),
-    short ? h('p', { class: 'alert' }, `热钱包余额不足：已选 ${fmtUsdt(need)} USDT，热钱包只有 ${fmtUsdt(hotUsdt!)} USDT。请先归集，或少选几笔。`) : h('span'),
-    !r.items.length ? h('span') : h('div', { class: 'sumbar' }, h('span', {}, '已选 ', h('b', {}, String(chosen.length)), ' 笔 · 合计打出 ', h('b', {}, `${fmtUsdt(need)} USDT`)),
-      h('span', { class: 'sumbar-actions' },
-        h('button', { type: 'button', class: 'btn btn-outline btn-on-dark', disabled: !chosen.length, onclick: () => rejectWd(chosen, p) }, '驳回'),
-        h('button', { type: 'button', class: 'btn btn-primary', disabled: !chosen.length || short || !RULES.hot, onclick: () => planWd(chosen, p) }, `批准并签名（${chosen.length} 笔）`))),
-  );
+  // 第 3 批：打款审核（逐笔审 → 按链凑批 → 浏览器核对并签名），见 admin-payout.ts；TRON 的签名仍走下面的 planWd（N 笔普通转账）
+  await renderPayoutReview(wui('p-withdrawals'), p, async (_ids: string[], resume?: any) => {
+    if (resume) { openWdSign(resume, Object.fromEntries(resume.items.map((w: any) => [w.id, w])), p); return; }
+    let r;
+    try { r = await call('withdrawals', undefined, '&approved=tron'); } catch (e) { say(errText(e)); return; }
+    // 全部已审核的交给服务器，服务器按"每批上限、热钱包余额、每批 ≤ 20 笔"装这一批，装不下的留到下一轮
+    const chosen = r.items;
+    if (!chosen.length) { say('没有已审核待签名的 TRON 打款'); return; }
+    await planWd(chosen, p);
+  });
 };
-function rejectWd(chosen: any[], p: HTMLElement) {
-  const reason = h('textarea', { rows: '3' }) as HTMLTextAreaElement;
-  dialog(`驳回 ${chosen.length} 笔提币`, h('div', { class: 'stack' }, field('pr-reason', '驳回原因（商户能看到）', reason), h('p', { class: 'hint muted m0' }, '驳回后，冻结的金额退回商户的可用余额，并发回调通知商户。')), '驳回', async () => {
-    if (fieldErr(reason, reason.value.trim() ? null : '请填写驳回原因')) return false;
-    for (const w of chosen) { try { await call('withdraw-reject', { id: w.id, reason: reason.value.trim() }); } catch (e) { say(`${w.id}：${errText(e)}`); } }
-    wdSel.clear(); say('已驳回，冻结金额已退回'); render.withdrawals(p); counts();
-  }, true);
-}
 async function planWd(chosen: any[], p: HTMLElement) {
   let plan;
   try { plan = await call('withdraw-plan', { ids: chosen.map((w) => w.id) }); } catch (e) { say(errText(e)); return; }
-  const byId = Object.fromEntries(chosen.map((w) => [w.id, w]));
+  if (plan.left) say(`这一批 ${plan.count} 笔，剩下 ${plan.left} 笔超过这一批的上限，签完这一批后再签下一轮`);
+  openWdSign(plan, Object.fromEntries(chosen.map((w) => [w.id, w])), p);
+}
+/** TRON 打款签名窗口：新凑的批次（withdraw-plan）和没签完的批次（payout-resume）共用 */
+function openWdSign(plan: any, byId: Record<string, any>, p: HTMLElement) {
   // 核对用的期望值来自审核列表（收款地址、金额），页面显示的是解码出来的值
   const steps: Step[] = plan.steps.map((s: any) => ({ ...s, expect: { to: byId[s.withdrawal_id].to, amount: u(byId[s.withdrawal_id].amount) } }));
   signDialog({
@@ -306,7 +299,7 @@ async function planWd(chosen: any[], p: HTMLElement) {
     summary: [['合计打出', `${usd(plan.total)} USDT`], ['付款地址', `热钱包 ${shortAddr(RULES.hot)}`]],
     onDone: (r) => {
       const failed = r.results.filter((x: any) => x.status !== 'broadcast');
-      say(failed.length ? `${failed.length} 笔广播失败，冻结金额已退回：${failed.map((x: any) => x.error).join('；')}` : `${r.results.length} 笔已广播，链上确认后自动完成`);
+      say(failed.length ? `${failed.length} 笔广播时出错（${failed.map((x: any) => x.error).join('；')}）：可能已经发出去了，先不退回；交易 30 分钟后过期，过期后链上仍查不到才回到已审核` : `✓ 已提交，${r.results.length} 笔都已广播，链上确认后自动完成`);
       wdSel.clear(); render.withdrawals(p); counts();
     },
   });
@@ -398,47 +391,10 @@ render.recon = async (p) => {
 
 // ============ 钱包设置 ============
 render.wallet = async (p) => {
+  // P4 / Q-A1：每条链一张卡；TRON 的"主助记词"只留一行"旧地址 N 个，照常归集"。不再提供"初始化主助记词"（新系统也不提供，2026-11-14 定）
   const w = await call('wallet');
-  const acc = (x: any, name: string) => h('section', { class: 'card stack' }, h('h2', { class: 'h-sm m0' }, name),
-    x ? h('dl', { class: 'kv' }, h('dt', {}, '地址'), h('dd', {}, h('span', { class: 'copy-row' }, mono(x.address), copyBtn(() => x.address, '复制', '已复制', 'link-copy'), tronscan(x.address))),
-      h('dt', {}, 'USDT'), h('dd', {}, x.error ? '查询失败' : usd(x.usdt)), h('dt', {}, 'TRX'), h('dd', {}, x.error ? '查询失败' : usd(x.trx))) : h('p', { class: 'm0 muted' }, '没有配置（config/wallets.json）'));
-  p.replaceChildren(
-    toolbar('钱包设置', h('span', { class: 'muted' }, `网络：${netName(w.network)}`)),
-    h('section', { class: 'card stack' }, h('h2', { class: 'h-sm m0' }, '主助记词（收款地址）'),
-      w.initialized ? h('dl', { class: 'kv' }, h('dt', {}, '状态'), h('dd', {}, status('approved', '已初始化')), h('dt', {}, '推导路径'), h('dd', {}, mono("m/44'/195'/0'/0/序号")),
-        h('dt', {}, '公钥末 8 位'), h('dd', {}, mono(w.xpub_fingerprint)), h('dt', {}, '第 1 个地址（用来核对）'), h('dd', {}, mono(w.first_address)), h('dt', {}, '已分配地址'), h('dd', {}, `${w.customers} 个`))
-        : h('div', { class: 'stack' }, h('p', { class: 'm0' }, '还没有初始化。初始化后才能给客户分配收款地址。'), h('div', {}, h('button', { type: 'button', class: 'btn btn-primary', onclick: () => initWallet(p) }, '初始化主助记词'))),
-      h('p', { class: 'hint muted m0' }, '系统只保存公钥，无法动用任何收款地址里的钱。助记词请离线抄写两份，分开保存。')),
-    acc(w.hot, '热钱包'),
-    w.energy ? h('p', { class: 'hint muted' }, `热钱包可借出能量 ${Number(w.energy.left).toLocaleString('en')} / ${Number(w.energy.limit).toLocaleString('en')}，大约够 ${Math.floor(w.energy.left / w.energy.per_sweep)} 笔归集。质押 TRX、增加能量：在 TronLink 或 Tronscan 里操作。`) : h('span'),
-    acc(w.cold, '冷钱包'),
-    h('p', { class: 'note-box' }, '热钱包和冷钱包的地址写在代码仓库的配置文件 config/wallets.json 里，签名页面只允许把钱归集到这两个地址。修改地址要提交 PR，服务器改不了。'),
-  );
+  await renderWalletCards(wui('p-wallet'), p, { initialized: w.initialized, xpub_fingerprint: w.xpub_fingerprint, customers: w.customers });
 };
-function initWallet(p: HTMLElement) {
-  const words = generateMnemonic(wordlist, 256).split(' ');
-  const pick = [3, 11, 20];
-  dialog('初始化主助记词 · 第 1 步：抄写', h('div', { class: 'stack' },
-    h('p', { class: 'alert m0' }, '这 24 个单词只显示这一次。请用纸笔（或金属板）按顺序抄写，抄两份，分开保存。不要拍照、截图，不要存进任何云端（包括 iCloud 密码）。丢了它，收款地址里还没归集的钱就取不出来。'),
-    h('ol', { class: 'mnemonic' }, ...words.map((x) => h('li', {}, x)))), '我已抄写好', () => {
-    const inputs = pick.map(() => h('input', { autocomplete: 'off', spellcheck: false }) as HTMLInputElement);
-    const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' }) as HTMLInputElement;
-    setTimeout(() => dialog('初始化主助记词 · 第 2 步：确认', h('div', { class: 'stack' }, h('p', { class: 'm0' }, '为了确认抄对了，请填写下面几个位置的单词：'), ...inputs.map((inp, i) => field(`wi-${i}`, `第 ${pick[i]} 个单词`, inp)), field('wi-code', '验证器动态码（6 位）', code)), '确认并提交公钥', async () => {
-      let bad = false;
-      inputs.forEach((inp, i) => { bad = fieldErr(inp, inp.value.trim().toLowerCase() === words[pick[i] - 1] ? null : '不对，请对照抄写的内容') || bad; });
-      bad = fieldErr(code, /^\d{6}$/.test(code.value.trim()) ? null : '请输入 6 位动态码') || bad;
-      if (bad) return false;
-      // 浏览器只算出账户级公钥（xpub）和第 1 个地址交给服务器；助记词不离开这个页面
-      const acct = HDKey.fromMasterSeed(mnemonicToSeedSync(words.join(' '))).derive(ACCOUNT);
-      const first = addressOfPrivateKey(acct.deriveChild(0).deriveChild(0).privateKey!);
-      try { await call('wallet-init', { xpub: acct.publicExtendedKey, first_address: first, code: code.value.trim() }); }
-      catch (e) { fieldErr(code, errText(e)); return false; }
-      words.fill('');
-      setTimeout(() => dialog('初始化完成', h('div', { class: 'stack' }, h('p', { class: 'm0' }, '浏览器只把公钥交给了服务器，助记词已从页面清除。'),
-        h('dl', { class: 'kv' }, h('dt', {}, '第 1 个地址'), h('dd', {}, mono(first))), h('p', { class: 'hint muted m0' }, '建议用 TronLink 导入同一个助记词，确认第 1 个地址一致。')), '完成', () => { render.wallet(p); }), 0);
-    }), 0);
-  });
-}
 
 // ============ 系统状态 ============
 render.status = async (p) => {

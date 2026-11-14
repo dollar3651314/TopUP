@@ -63,6 +63,47 @@ export function toast(root: ParentNode, sel: string, msg: string) {
 }
 
 /** 通用对话框：onOk 返回 false 时不关闭（例如校验不通过） */
+/**
+ * 私钥、助记词输入框：普通文本框 + 遮盖显示（.secret-input），autocomplete=off——不用 type=password，浏览器就不会提示"保存密码"、也不会自动填。
+ * 带 data-secret：弹窗关掉、换内容时由 makeDialog 清空（签名失败、直接关窗也不会留在页面里）。
+ */
+export function secretInput(multiline = false): HTMLInputElement | HTMLTextAreaElement {
+  const attrs = { autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: false, 'data-secret': '', 'data-lpignore': 'true', 'data-1p-ignore': '', class: 'mono-input secret-input' };
+  const el = (multiline ? h('textarea', { rows: '3', ...attrs }) : h('input', { type: 'text', ...attrs })) as HTMLInputElement | HTMLTextAreaElement;
+  // 浏览器不支持 -webkit-text-security 时（推断：部分 Firefox 版本）：框里只显示圆点，真正的内容放在这里，读写 el.value 拿到的是真内容
+  if (typeof CSS !== 'undefined' && !CSS.supports('-webkit-text-security', 'disc')) maskWithDots(el);
+  return el;
+}
+/** 圆点遮盖：拦下每次输入（键入、粘贴、删除），自己维护真内容，框里显示同样多的圆点；仍是普通文本框，不会触发"保存密码" */
+function maskWithDots(el: HTMLInputElement | HTMLTextAreaElement) {
+  const proto = Object.getPrototypeOf(el);
+  const native = Object.getOwnPropertyDescriptor(proto, 'value')!;
+  let real = '';
+  const show = (caret: number) => { native.set!.call(el, '•'.repeat(real.length)); el.setSelectionRange(caret, caret); };
+  Object.defineProperty(el, 'value', { configurable: true, get: () => real, set: (v: string) => { real = String(v ?? ''); native.set!.call(el, '•'.repeat(real.length)); } });
+  // 输入法（拼音等）组字时拦不下，组字结束再把组好的字放进真内容，框里换回圆点
+  let compAt = [0, 0];
+  el.addEventListener('compositionstart', () => { compAt = [el.selectionStart ?? real.length, el.selectionEnd ?? real.length]; });
+  el.addEventListener('compositionend', (e: CompositionEvent) => { const add = e.data || ''; real = real.slice(0, compAt[0]) + add + real.slice(compAt[1]); show(compAt[0] + add.length); });
+  el.addEventListener('beforeinput', (e: InputEvent) => {
+    if (e.isComposing || e.inputType === 'insertCompositionText') return;
+    e.preventDefault();
+    const a = el.selectionStart ?? real.length, b = el.selectionEnd ?? real.length;
+    const t = e.inputType;
+    if (t.startsWith('insert')) { const add = e.data ?? e.dataTransfer?.getData('text/plain') ?? (t === 'insertLineBreak' ? '\n' : ''); real = real.slice(0, a) + add + real.slice(b); show(a + add.length); }
+    else if (t === 'deleteContentBackward') { const from = a === b ? Math.max(0, a - 1) : a; real = real.slice(0, from) + real.slice(b); show(from); }
+    else if (t === 'deleteContentForward') { const to = a === b ? Math.min(real.length, b + 1) : b; real = real.slice(0, a) + real.slice(to); show(a); }
+    else if (t.startsWith('delete')) { real = real.slice(0, a) + real.slice(b); show(a); }
+  });
+  // 不让复制、剪切出圆点以外的东西（真内容不进剪贴板）
+  el.addEventListener('copy', (e) => e.preventDefault());
+  el.addEventListener('cut', (e) => e.preventDefault());
+}
+/** 清空一块区域里所有私钥、助记词输入框 */
+export function wipeSecrets(scope: ParentNode) {
+  scope.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-secret]').forEach((el) => { el.value = ''; });
+}
+
 export function makeDialog(root: ParentNode, prefix: string) {
   const dlg = root.querySelector<HTMLDialogElement>(`[data-${prefix}dialog]`)!;
   const form = root.querySelector<HTMLFormElement>(`[data-${prefix}dialog-form]`)!;
@@ -72,6 +113,8 @@ export function makeDialog(root: ParentNode, prefix: string) {
   const cancel = form.querySelector<HTMLButtonElement>('button[value="cancel"]');
   const cancelText = cancel?.textContent || '';
   let handler: (() => boolean | void | Promise<boolean | void>) | null = null;
+  // 关窗（取消、Esc、签完）时清空私钥输入框
+  dlg.addEventListener('close', () => wipeSecrets(body));
   form.addEventListener('submit', async (e) => {
     const sub = (e as SubmitEvent).submitter as HTMLButtonElement | null;
     if (sub?.value !== 'ok' || !handler) return;
@@ -80,6 +123,7 @@ export function makeDialog(root: ParentNode, prefix: string) {
     if (r !== false) dlg.close();
   });
   return (t: string, content: Node, okText: string, onOk: typeof handler, danger = false, hideOk = false) => {
+    wipeSecrets(body); // 换下一步之前，上一步的私钥输入框先清空
     title.textContent = t; body.replaceChildren(content);
     ok.textContent = okText; ok.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`; ok.hidden = hideOk; ok.disabled = false;
     // 只看信息的弹窗（hideOk）：只留一个按钮，文字用 okText（例如"关闭"），不再出现意思重复的"取消"和"确定"

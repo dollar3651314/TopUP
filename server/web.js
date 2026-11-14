@@ -111,6 +111,11 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
       if (!ad?.fake) return Response.json({ error: 'chain_not_enabled' }, { status: 409 });
       return Response.json(ad.pay({ to: body.to, amount: Number(body.amount), time: body.time ? Number(body.time) : Date.now() }));
     }
+    if (path === '/__fake/evm/block/') {
+      const ad = d.layer?.adapters?.[body.chain];
+      if (!ad?.fake) return Response.json({ error: 'chain_not_enabled' }, { status: 409 });
+      return Response.json(ad.block(body.address, body.blocked !== false));
+    }
     if (path === '/__fake/tick/') return Response.json(await d.tick());
     if (path === '/__fake/daily/') return Response.json(await d.daily());
     if (path === '/__fake/cleanup/') return Response.json({ ok: true, ...(await (await app()).kyb.cleanup()) });

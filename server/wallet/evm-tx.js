@@ -38,6 +38,8 @@ const uintWord = (n) => BigInt(n).toString(16).padStart(64, '0');
 
 /** balanceOf(address) 的调用数据 */
 export const encodeBalanceOf = (addr) => '0x' + selector('balanceOf(address)') + word(addr);
+/** allowance(address owner, address spender) 的调用数据 */
+export const encodeAllowance = (owner, spender) => '0x' + selector('allowance(address,address)') + word(owner) + word(spender);
 
 /** SweepBatcher.sweep(address token, bytes32[] salts) 的调用数据 */
 export function encodeSweep(token, salts) {

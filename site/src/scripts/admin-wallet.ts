@@ -21,6 +21,7 @@ const ERR: Record<string, string> = {
   batch_state: '这批已经被确认、作废或取消了（可能是另一个窗口点的），已刷新。',
   batch_expired: '这批等确认超过 24 小时，已经作废；下一次凑批会重新列出这些地址。',
   sweep_not_sent: '没有提交，钱没动：节点暂时连不上，交易没有发出。这批仍是"待确认"，稍后再点一次即可。',
+  energy_and_trx_insufficient: 'TronSave 没响应、发起账户的 TRX 也不够烧：没提交，钱没动。给发起账户补 TRX 或给 TronSave 充值后再确认。',
   sweep_send_failed: '节点拒绝了这笔交易，这批已标为失败，地址放回待归集；下一次凑批会重新列出。',
   reason_required: '请填写原因。', bad_code: '动态码不正确或已经用过，请等下一个动态码。',
   operator_not_configured: '服务器还没有配置归集发起账户（SWEEP_OPERATOR_KEY），不能执行归集。',
@@ -28,6 +29,12 @@ const ERR: Record<string, string> = {
   wallet_not_configured: '钱包还没有配置好，看"系统状态"。', invalid_param: '有一项填得不对，请检查标红的地方。',
 };
 const err = (ui: WalletUi, e: any) => ERR[e?.code] || ui.errText(e);
+/** TRON 批次的能量一行：租到多少、花多少 TRX / 租失败已改烧 TRX */
+function energyLine(e: any): string {
+  if (!e || !e.mode) return '确认后才租';
+  const n = e.energy ? Number(e.energy).toLocaleString('en') : '—';
+  return e.mode === 'rented' ? `租到 ${n}${e.cost_trx ? `，花 ${e.cost_trx} TRX` : ''}` : `${e.reason ? '租失败，已改烧 TRX' : '烧 TRX'}（约 ${n}）`;
+}
 const BATCH_ST: Record<string, [string, string]> = {
   awaiting_approval: ['submitted', '待确认'], sending: ['in', '发送中'], sent: ['in', '链上确认中'], confirmed: ['approved', '已完成'],
   partial: ['submitted', '部分成功'], failed: ['needs_info', '失败'], expired: ['expired', '已作废'], cancelled: ['expired', '已取消'],
@@ -108,7 +115,7 @@ export async function renderEvmSweep(ui: WalletUi): Promise<HTMLElement> {
 
   // 2. 各链待归集地址
   const chainTabs = h('div', { class: 'seg', role: 'tablist' }, ...s.chains.map((c: any) => h('button', {
-    type: 'button', role: 'tab', 'aria-selected': String(sweepChain === c.chain), disabled: !c.enabled, class: sweepChain === c.chain ? 'on' : '', 'data-sweep-tab': c.chain,
+    type: 'button', role: 'tab', 'aria-selected': String(sweepChain === c.chain), disabled: !c.enabled, class: sweepChain === c.chain ? 'on' : '', 'data-sweep-tab': c.chain, 'data-chain-tab': c.chain,
     onclick: () => { sweepChain = c.chain; ui.rerender(); },
   }, CHAIN_NAME[c.chain], c.enabled && c.estimate ? h('span', { class: 'tab-count' }, String(c.estimate.address_count)) : null, c.not_in_this_batch ? laterTag() : !c.enabled ? ' （未开通）' : '')));
   const cur = on.find((c: any) => c.chain === sweepChain) || on[0];
@@ -125,8 +132,12 @@ export async function renderEvmSweep(ui: WalletUi): Promise<HTMLElement> {
       h('div', { class: 'stats' },
         stat('未归集合计（估算）', usd(cur.estimate.total_usdt), `USDT · ${cur.estimate.address_count} 个地址`),
         stat(`达到门槛（${usd(cur.threshold_usdt)}）`, String(cur.estimate.over_threshold), `个地址 · ${usd(cur.estimate.over_threshold_usdt)} USDT`),
-        h('div', { class: `stat${cur.operator?.low ? ' stat-bad' : ''}`, 'data-gas-card': cur.chain }, h('div', { class: 'k' }, '发起账户手续费币'), h('div', { class: 'v v-sm' }, gasText(cur.operator)),
-          h('div', { class: 's' }, '只付手续费，转不走钱 ', cur.operator?.configured ? h('button', { type: 'button', class: `link-btn${cur.operator.low ? '' : ' link-plain'}`, onclick: () => topUpGas(ui, cur) }, '补手续费') : null))),
+        h('div', { class: `stat${cur.operator?.low ? ' stat-bad' : ''}`, 'data-gas-card': cur.chain }, h('div', { class: 'k' }, cur.chain === 'tron' ? '发起账户 TRX' : '发起账户手续费币'), h('div', { class: 'v v-sm' }, gasText(cur.operator)),
+          h('div', { class: 's' }, cur.chain === 'tron' ? '租不到能量时烧 TRX 用 ' : '只付手续费，转不走钱 ', cur.operator?.configured ? h('button', { type: 'button', class: `link-btn${cur.operator.low ? '' : ' link-plain'}`, onclick: () => topUpGas(ui, cur) }, '补手续费') : null)),
+        // 第 2 批 TRON：发起账户能量、TronSave 预存余额
+        cur.chain === 'tron' ? stat('发起账户能量', cur.operator?.energy == null ? '—' : Number(cur.operator.energy).toLocaleString('en'), '每批确认时先租一次能量') : null,
+        cur.chain === 'tron' ? stat('TronSave 预存余额', cur.operator?.rental_prepaid_trx == null ? '—' : `${cur.operator.rental_prepaid_trx} TRX`, '充值由你自己在 TronSave 做；明细在"系统状态"') : null),
+      cur.chain === 'tron' ? h('p', { class: 'hint muted m0' }, 'TRON 每批最多 20 个地址（Nile 实测后再定）；第一次归集的地址要先部署，手续费高些。') : null,
       r ? table(['收款地址', '客户 · 商户', '待归集 USDT（估算）', '首次归集', '状态'], r.items.map((x: any) => [
         mono(shortAddr(x.address), x.address), h('span', { class: 'cell-2' }, mono(x.customer_id), h('span', { class: 'hint muted' }, x.merchant)), usd(x.pending_usdt),
         x.first_sweep ? '是（要先部署，手续费高些）' : '不是', stateOf(x),
@@ -170,7 +181,8 @@ function batchCard(ui: WalletUi, b: any) {
     h('div', { class: 'batch-head' }, chainTag(b.chain), h('b', { class: 'mono' }, b.id), batchSt(b.status)),
     h('div', { class: 'batch-amt' }, usd(b.total_usdt), h('small', {}, ' USDT')),
     kv([
-      ['地址', `${b.address_count} 个${skipped ? `（另有 ${skipped} 个跳过）` : ''}`],
+      ['地址', `${b.address_count} 个地址${b.chain === 'tron' && b.items?.length ? ` · ${b.items.filter((i: any) => i.deploy).length} 个要先部署` : ''}${skipped ? `（另有 ${skipped} 个跳过）` : ''}`],
+      ...(b.chain === 'tron' ? [['能量', h('span', { 'data-energy-line': '' }, b.status === 'awaiting_approval' && !b.energy?.mode ? '确认后才租（租不到改烧 TRX）' : energyLine(b.energy))] as [string, Node]] : []),
       ['手续费估算', feeLine(b)],
       ['去向', '冷钱包（写死在合约里）'],
       [waiting ? '等了' : '确认人', waiting ? h('span', { class: 'neg' }, ago(b.created_at)) : `${b.approved_by || '—'} · ${t(b.approved_at)}`],
@@ -244,6 +256,7 @@ function confirmBatch(ui: WalletUi, b: any) {
       h('li', { 'data-no-price': '' }, `手续费占比：${NO_PRICE_TEXT}`),
       h('li', {}, `凑批时间 ${t(b.created_at)}；${t(b.expires_at)} 前不确认就作废`)),
     b.split_of > 1 ? h('p', { class: 'hint muted m0' }, `超过每批上限，系统分成了 ${b.split_of} 批；每批一笔交易，分别确认。`) : null,
+    b.chain === 'tron' ? h('p', { class: 'info-box m0' }, '确认后先租能量，租不到按约定改烧 TRX，不再问你；TRX 也不够时不提交，钱不动。') : null,
     h('details', { open: true }, h('summary', {}, `这批的 ${b.address_count} 个地址`), itemsTable(b)),
     b.skipped?.length ? h('details', {}, h('summary', {}, `跳过的 ${b.skipped.length} 个地址和原因`), skippedTable(b)) : null,
     field('sw-reason', '原因（选填，记进审计）', reason), notice);
@@ -265,6 +278,10 @@ function confirmBatch(ui: WalletUi, b: any) {
         notice.replaceChildren(h('div', { class: 'warn-box', 'data-not-sent': '' }, h('b', {}, '没有提交，钱没动。'), ' 节点暂时连不上，交易没有发出；这批仍是"待确认"，稍后再点一次即可。'));
         notice.scrollIntoView?.({ block: 'nearest' });
         ui.say(ERR.sweep_not_sent);
+        return false;
+      }
+      if (e?.code === 'energy_and_trx_insufficient') {
+        notice.replaceChildren(h('div', { class: 'alert', 'data-not-sent': '' }, h('b', {}, '没提交，钱没动。'), ' TronSave 没响应、发起账户的 TRX 也不够烧。给发起账户补 TRX 或给 TronSave 充值后再确认。'));
         return false;
       }
       ui.say(err(ui, e));
@@ -433,7 +450,16 @@ export async function walletStatus(ui: WalletUi): Promise<HTMLElement> {
       c.config_error === 'onchain_mismatch' ? h('p', { class: 'alert m0' }, '链上批量合约的参数和 config/wallets.json 不一致，这条链已停用（不分配新地址、不凑批、到账暂停入账）。核对配置后走 PR 重新部署，重启服务后才会再核对、恢复。')
         : c.config_error ? h('p', { class: 'alert m0' }, '合约参数检查没通过（例如冷钱包等于批量合约），这条链先不开通。') : null,
       h('p', { class: 'hint muted m0' }, '只显示"是否已配置"，不显示具体值。')));
-  return h('div', { class: 'stack', 'data-wallet-status': '' }, top, h('h2', { class: 'h-sm m0' }, '每条链'), h('div', { class: 'batch-grid' }, ...cards),
+  const rental = r.chains.find((c: any) => c.chain === 'tron' && c.energy_rental)?.energy_rental;
+  const ORDER_ST: Record<string, string> = { filled: '租到了', timeout: '超时没租到（改烧 TRX）', burn: '改烧 TRX' };
+  const rentalBox = rental ? h('section', { class: 'card stack-sm', 'data-energy-rental': '' }, h('h2', { class: 'h-sm m0' }, 'TRON 能量租用（TronSave）'),
+    kv([
+      ['预存余额', rental.prepaid_trx === null ? '查不到' : h('span', rental.low ? { class: 'bad', 'data-low': '' } : {}, `${rental.prepaid_trx} TRX${rental.low ? '（不够租一批，请充值）' : ''}`)],
+      ['本月花费', `${rental.month_cost_trx ?? '0'} TRX`], ['本月改烧 TRX', `${rental.burn_count} 次`], ['租价', `每单位能量最多 ${rental.unit_price_sun} sun`],
+    ]),
+    table(['订单', '归集批次', '状态', '能量', '花费', '时间'], (rental.orders || []).map((o: any) => [o.order_id ? mono(o.order_id) : '—', mono(o.batch_id || '—'), ORDER_ST[o.status] || o.status, o.energy ? Number(o.energy).toLocaleString('en') : '—', o.cost_trx ? `${o.cost_trx} TRX` : '—', t(o.at)]), '本月还没有租能量的单。'),
+    h('p', { class: 'hint muted m0' }, '给 TronSave 充值由你自己在它的网站上做，TopUP 不碰你的钱。预存余额超过 1,000 TRX 会告警（平台的 API Key 在服务器上，余额就是最大损失）。')) : null;
+  return h('div', { class: 'stack', 'data-wallet-status': '' }, top, h('h2', { class: 'h-sm m0' }, '每条链'), h('div', { class: 'batch-grid' }, ...cards), rentalBox,
     h('section', { class: 'card stack-sm' }, h('h2', { class: 'h-sm m0' }, '钱包提供方'),
       h('ul', { class: 'wl-checks' }, ...r.providers.map((x: any) => h('li', { class: x.enabled ? 'y' : 'muted' }, `${PROVIDER_NAME[x.id] || x.id}：${x.enabled ? '在用' : '未开通（不告警）'}`)))));
 }
@@ -448,7 +474,7 @@ export async function walletTodoItems(ui: WalletUi): Promise<{ items: Todo[]; fa
   const items: Todo[] = [];
   const failed: string[] = [];
   const get = (a: string, name: string, qs = '') => ui.call(a, undefined, qs).catch(() => { failed.push(name); return null; });
-  const [s, c, w, probs, all] = await Promise.all([get('wallet-sweep', '归集'), get('wallet-chains', '每条链的状态'), get('withdrawals', '提币'), get('wallet-sweep-batches', '归集批次', '&status=partial,failed'), get('wallet-sweep-batches', '归集批次')]);
+  const [s, c, w, probs, all] = await Promise.all([get('wallet-sweep', '归集'), get('wallet-chains', '每条链的状态'), get('withdrawals', '打款'), get('wallet-sweep-batches', '归集批次', '&status=partial,failed'), get('wallet-sweep-batches', '归集批次')]);
   for (const ch of c?.chains || []) {
     if (ch.status === 'scan_stalled' || ch.status === 'onchain_mismatch' || ch.status === 'not_configured' && ch.rpc) items.push({ bad: true, since: null, text: `${CHAIN_NAME[ch.chain]}：${ch.status === 'scan_stalled' ? '扫块停了' : ch.status === 'onchain_mismatch' ? '合约参数和链上不一致，已停用' : '合约地址没配齐'}`, tab: 'p-status', label: '看系统状态' });
     if (ch.operator?.low) items.push({ bad: true, since: null, text: `${CHAIN_NAME[ch.chain]} 发起账户的 ${ch.operator.symbol} 不够付手续费`, sub: `现在有 ${gasText(ch.operator)}；钱都还在原地址`, tab: 'p-sweep', label: '去补手续费' });
@@ -460,7 +486,17 @@ export async function walletTodoItems(ui: WalletUi): Promise<{ items: Todo[]; fa
   for (const ch of s?.chains || []) for (const b of ch.batches || []) {
     if (b.status === 'awaiting_approval') items.push({ bad: false, since: b.created_at, text: `确认归集 ${b.id}（${CHAIN_NAME[b.chain]}，${usd(b.total_usdt)} USDT）`, sub: `${b.address_count} 个地址${b.split_of > 1 ? ` · 超过每批上限，系统分成了 ${b.split_of} 批` : ''}`, tab: 'p-sweep', label: '去确认' });
   }
-  for (const x of w?.items || []) if (x.status === 'pending') items.push({ bad: false, since: x.created_at, text: `审核提币 ${x.id}（${usd(x.amount)} USDT）`, tab: 'p-withdrawals', label: '去审核提币' });
+  // 待审核的打款：单笔一行；商户批量（同一个批次号）合成一行
+  const groups = new Map<string, { since: string; n: number; total: number }>();
+  for (const x of w?.items || []) {
+    if (x.status !== 'pending') continue;
+    if (!x.batch_no) { items.push({ bad: false, since: x.created_at, text: `审核打款 ${x.id}（${usd(x.amount)} USDT）`, tab: 'p-withdrawals', label: '去审核打款' }); continue; }
+    const g = groups.get(x.batch_no) || { since: x.created_at, n: 0, total: 0 };
+    g.n++; g.total += parseUsdt(String(x.amount ?? '0')) ?? 0;
+    if (Date.parse(x.created_at) < Date.parse(g.since)) g.since = x.created_at;
+    groups.set(x.batch_no, g);
+  }
+  for (const [no, g] of groups) items.push({ bad: false, since: g.since, text: `审核批量打款 ${no}（${g.n} 笔，${fmtUsdt(g.total)} USDT）`, tab: 'p-withdrawals', label: '去逐行审' });
   items.sort((a, b) => (a.bad !== b.bad ? (a.bad ? -1 : 1) : (Date.parse(a.since || '') || 0) - (Date.parse(b.since || '') || 0)));
   return { items, failed, sweep: s, chains: c };
 }
@@ -479,7 +515,7 @@ export async function walletTodo(ui: WalletUi): Promise<HTMLElement> {
     // 读取失败时大卡片不放按钮，"重试"只在下面表格那一行（一个按钮）
     const top = errRow ? hero('bad', '待处理读取失败', `${failed.join('、')}没读到，现在不知道还有没有别的事要做。点下面的"重试"；一直失败看"系统状态"。${items.length ? `已读到的 ${items.length} 件在下面。` : ''}`)
       : first ? hero(first.bad ? 'bad' : 'warn', `有 ${all.length} 件事要处理`, first.sub ? `${first.text} · ${first.sub}` : first.text, { label: first.label, onClick: () => (first.act ? first.act() : ui.go(first.tab)) })
-      : hero('ok', '现在没事要做', s?.next_slot ? `下一次凑归集批次在 ${t(s.next_slot)}；凑好了会发邮件给你，这里也会出现。` : '有新的提币、归集批次时会出现在这里。');
+      : hero('ok', '现在没事要做', s?.next_slot ? `下一次凑归集批次在 ${t(s.next_slot)}；凑好了会发邮件给你，这里也会出现。` : '有新的打款、归集批次时会出现在这里。');
     box.replaceChildren(top,
       h('div', { class: 'toolbar' }, h('h2', { class: 'h-sm m0' }, `待处理（${all.length}）`), h('span', { class: 'muted' }, '按等了多久排，出错的排最前')),
       table(['要做的事', '等了多久', ''], all.map((x) => [

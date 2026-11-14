@@ -9,6 +9,9 @@ import {
   nextSweepSlot, SWEEP_CHAINS, SWEEP_EXPIRE_HOURS, SWEEP_TIMES,
 } from './sweep.js';
 import { walletChainStatus } from './status.js';
+import { RENT_MAX_PRICE_SUN } from './energy.js';
+
+const TRON_TYPICAL_BATCH_ENERGY = 1_300_000; // 一批 20 个地址的典型能量（推断值，Nile 实测后再调），只用来判断预存余额够不够一批
 
 const usdt = (u) => fmtUsdt(Number(u)).replace(/,/g, '');
 /** 原生币最小单位 → 小数字符串：ETH、BNB 18 位（wei），TRX 6 位（sun） */
@@ -30,9 +33,17 @@ function batchOut(b, extra = {}) {
     items: b.items.map((i) => ({ address: i.address, amount_usdt: usdt(i.amount), deploy: i.deploy, status: i.status, reason: i.reason })),
     skipped: (b.skipped || []).map((s) => ({ address: s.address, amount_usdt: usdt(s.amount), reason: s.reason })),
     fee: b.feeEstimate?.native ? { native: native(b.feeEstimate.native, b.chain), symbol: NATIVE[b.chain], gas: b.feeEstimate.gas || null } : null,
+    // 第 2 批 TRON：这一批的能量（mode null = 还没确认、确认后才租；rented = 租到；burn = 租不到改烧 TRX）
+    ...(b.chain === 'tron' ? { energy: energyOut(b.feeEstimate) } : {}),
     tx_refs: b.txRefs, slot: b.slot || null, approved_by: b.approvedBy, approved_at: b.approvedAt, reason: b.reason, error: b.error,
     created_at: b.createdAt, expires_at: b.expiresAt, updated_at: b.updatedAt,
   };
+}
+
+/** TRON 批次的能量记录（发送时写进 fee_estimate：energy_mode、energy_used_estimate、rent_order_id、energy_reason；租价算出的花费 rent_cost_sun 有就给） */
+function energyOut(f = {}) {
+  if (!f?.energy_mode) return { mode: null, energy: f?.energy ?? null };
+  return { mode: f.energy_mode, energy: f.energy_used_estimate ?? null, order_id: f.rent_order_id ?? null, reason: f.energy_reason ?? null, cost_trx: f.rent_cost_sun ? native(f.rent_cost_sun, 'tron') : null };
 }
 
 /** values 里的金额是 USDT 字符串（页面填的），转成 0.000001 单位的整数字符串；不对时报出字段 */
@@ -81,7 +92,29 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
         out.low = (out.batches_left !== null && out.batches_left < LOW_GAS_BATCHES) || (needWei > 0n && BigInt(wei) < needWei);
       }
     } catch { out.gas = null; out.error = 'rpc'; }
+    // 第 2 批 TRON：发起账户现有能量、租能量平台的预存余额（没配平台为 null）
+    if (chain === 'tron') {
+      const a = layer?.adapters?.tron;
+      try { out.energy = a?.energyAvailable && out.address ? String(await a.energyAvailable(out.address)) : null; } catch { out.energy = null; }
+      try { out.rental_prepaid_trx = layer?.tronEnergy?.balance ? native(BigInt(await layer.tronEnergy.balance()), 'tron') : null; } catch { out.rental_prepaid_trx = null; }
+    }
     return out;
+  }
+
+  /** 系统状态"TRON 能量租用"：预存余额（不够一批标红）、本月花费、改烧次数、租价上限、本月每一单 */
+  async function energyRental() {
+    const rows = await db.query(`select id, fee_estimate f, updated_at from wallet_sweep_batches where chain = 'tron' and fee_estimate ? 'energy_mode'
+      and updated_at >= (date_trunc('month', now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai') order by updated_at desc limit 100`);
+    let prepaid = null;
+    try { prepaid = layer?.tronEnergy?.balance ? BigInt(await layer.tronEnergy.balance()) : null; } catch { prepaid = null; }
+    const cost = rows.reduce((s, r) => s + BigInt(r.f.rent_cost_sun || 0), 0n);
+    const price = BigInt(RENT_MAX_PRICE_SUN);
+    const oneBatch = BigInt(TRON_TYPICAL_BATCH_ENERGY) * price; // 一批典型归集要的租金（sun）
+    return {
+      configured: Boolean(layer?.tronEnergy), prepaid_trx: prepaid === null ? null : native(prepaid, 'tron'), month_cost_trx: native(cost, 'tron'),
+      burn_count: rows.filter((r) => r.f.energy_mode === 'burn').length, unit_price_sun: Number(price), low: prepaid !== null && prepaid < oneBatch,
+      orders: rows.filter((r) => r.f.rent_order_id || r.f.energy_mode).map((r) => ({ order_id: r.f.rent_order_id || null, batch_id: r.id, status: r.f.energy_mode === 'rented' ? 'filled' : r.f.energy_reason || 'burn', energy: r.f.energy_used_estimate ?? null, cost_trx: r.f.rent_cost_sun ? native(r.f.rent_cost_sun, 'tron') : null, at: new Date(r.updated_at).toISOString() })),
+    };
   }
 
   async function chainCards({ verify = false } = {}) {
@@ -101,6 +134,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
       card.config_error = layer?.errors?.[chain] ? (layer.errors[chain] === 'onchain_mismatch' ? 'onchain_mismatch' : 'invalid_config') : null;
       if (layer?.onchain?.[chain]?.fields) card.onchain_fields = layer.onchain[chain].fields; // 只给字段名，不给值
       card.operator = await operatorGas(chain);
+      if (chain === 'tron') card.energy_rental = await energyRental().catch(() => null);
       out.push(card);
     }
     return out;
