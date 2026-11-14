@@ -74,7 +74,9 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
   }, [base, a, body, qs] as const);
   const mcall = (a: string, body?: unknown, qs = '') => call(merchant, '/api/merchant/')(a, body, qs);
   const wcall = (a: string, body?: unknown, qs = '') => call(admin, '/api/wallet/')(a, body, qs);
-  const isWallet = (name: string) => (url: URL) => url.pathname === '/api/wallet/' && url.searchParams.get('a') === name;
+  // 同一个名字每次给同一个函数：page.unroute 按"同一个函数对象"认路由，每次新建一个函数的话 unroute 什么都不撤（前面用例的替身会一直留着）
+  const walletMatchers: Record<string, (url: URL) => boolean> = {};
+  const isWallet = (name: string) => (walletMatchers[name] ||= (url: URL) => url.pathname === '/api/wallet/' && url.searchParams.get('a') === name);
   const patchJson = (edit: (j: any) => void) => async (r: any) => {
     let res, j;
     try { res = await r.fetch(); j = await res.json(); } catch { await r.abort().catch(() => {}); return; }
@@ -417,7 +419,8 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
   });
 
   test('TC-PB14 处理时段（Q-B7）：东八区 23:00 以后商户提交，页面写"第二天 8:00 后处理"', async () => {
-    await merchant.route((u) => u.pathname === '/api/merchant/' && u.searchParams.get('a') === 'payout-batch-submit', patchJson((j) => { j.service = { open: false, next_open_at: '2026-11-15T00:00:00.000Z' }; }));
+    const isSubmit = (u: URL) => u.pathname === '/api/merchant/' && u.searchParams.get('a') === 'payout-batch-submit';
+    await merchant.route(isSubmit, patchJson((j) => { j.service = { open: false, next_open_at: '2026-11-15T00:00:00.000Z' }; }));
     await merchantTab('payout-batch');
     const p = merchant.locator('[data-mpanel="payout-batch"]');
     await p.locator('[data-mb-reset]').click().catch(() => {});
@@ -426,7 +429,7 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
     await p.locator('#mb-code').fill(await code(st.merchantSecret));
     await p.locator('[data-mb-submit]').click();
     await expect(p).toContainText('第二天 8:00 后处理');
-    await merchant.unroute((u) => u.pathname === '/api/merchant/' && u.searchParams.get('a') === 'payout-batch-submit');
+    await merchant.unroute(isSubmit);
   });
 
   test('TC-PB15 TRON 打款（Q16、Q-B2、A2）：测试环境直接烧 TRX（不租能量）、一次签 N 笔；部分成功的批次写明成功几笔、失败的回到已审核待签名', async () => {
@@ -547,5 +550,491 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
     await expect(s).toContainText('TS-2');
     await expect(s).toContainText('自己');
     await admin.unroute(isWallet('wallet-chains'));
+  });
+
+  // ================= 第 3 批验收小改（2026-11-14，研发按产品验收的黄灯改）=================
+  // 依据：研发提的需求 8 条（批次状态写清楚、确认作废的入口和核对信息、商户上传超单笔上限、已审核列表标题、不可点按钮的鼠标、
+  //   凑批提示的位置、钱包设置补齐原型、两个接口的新字段），第 3 批高保真原型"钱包设置"四种状态。
+  // 页面钩子（研发已加）：凑批卡里的提示 [data-plan-msg="<链>"]；批次明细里不能作废的原因 [data-void-why]；确认作废弹窗里的 nonce [data-void-nonce]、
+  //   区块浏览器链接 a[data-explorer="address|tx"]；钱包设置顶部 [data-wallet-hero]、冷钱包余额 [data-cold-balance="<链>"]、热钱包手续费币 [data-hot-gas="<链>"]、
+  //   发起账户手续费 [data-operator-gas="<链>"]、授权额度汇总 [data-allowance-summary-row="<链>"] 和行里的改额度 [data-allowance-row-edit="<链>"]。
+  // 批次的各种状态用浏览器拦截接口喂进去（真实接口造"nonce 被别的交易用掉"要真链）；TC-PB13 留下的那批真实的整批回滚另外核对一次。
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  const txh = (c: string) => '0x' + c.repeat(64);
+  const qaBatch = (id: string, chain: string, status: string, extra: Record<string, unknown> = {}) => ({ id, chain, status, count: 2, total: '30.00', tx_hash: txh('ab'), error: null, ok: 0, failed: status === 'failed' ? 2 : 0,
+    energy: null, items: [{ id: `${id}-1`, status: null, reason: null }, { id: `${id}-2`, status: null, reason: null }], rebroadcast_at: null, stuck_since: null, nonce: null, created_at: ago(90), updated_at: ago(5), ...extra });
+  const QA_BATCHES = [
+    qaBatch('QA-DROP', 'eth', 'failed', { error: 'dropped', nonce: '17' }),
+    qaBatch('QA-VOID', 'bsc', 'failed', { error: 'void_confirmed', nonce: '18' }),
+    qaBatch('QA-REVERT', 'eth', 'failed', { error: 'reverted', nonce: '19', tx_hash: txh('cd') }),
+    qaBatch('QA-REB', 'eth', 'broadcast', { rebroadcast_at: ago(10), nonce: '20' }),
+    qaBatch('QA-STUCK', 'bsc', 'broadcast', { stuck_since: ago(70), nonce: '42', tx_hash: txh('5e') }),
+    qaBatch('QA-BOTH', 'eth', 'broadcast', { stuck_since: ago(70), rebroadcast_at: ago(40), nonce: '7', tx_hash: txh('7a') }),
+  ];
+  const qaDetail = (b: any) => ({ ...b, resumable: false, voidable: false, withdrawals: [{ id: `${b.id}-1`, merchant: 'Payout E2E Ltd', to: rndEvm(), amount: '10.00', status: b.status === 'failed' ? 'approved' : 'broadcast', txid: null, reason: null, hold: null },
+    { id: `${b.id}-2`, merchant: 'Payout E2E Ltd', to: rndEvm(), amount: '20.00', status: b.status === 'failed' ? 'approved' : 'broadcast', txid: null, reason: null, hold: null }] });
+  /** 在页面上挂"批次列表 + 批次明细"的替身：列表在真实返回前面插 QA_BATCHES，明细只替换 QA_ 开头的 */
+  async function stubBatches(page: Page, batches = QA_BATCHES) {
+    await page.route(isWallet('withdrawals'), patchJson((j) => { j.batches = [...batches, ...j.batches]; }));
+    await page.route(isWallet('payout-tx-batch'), async (r) => {
+      const id = new URL(r.request().url()).searchParams.get('id') || '';
+      const b = batches.find((x) => x.id === id);
+      if (!b) return r.continue();
+      await r.fulfill({ json: qaDetail(b) });
+    });
+  }
+  async function unstubBatches(page: Page) { await page.unroute(isWallet('withdrawals')); await page.unroute(isWallet('payout-tx-batch')); }
+  const statusOfRow = (id: string) => admin.locator(`[data-panel="p-withdrawals"] [data-payout-batch="${id}"] .status`);
+  async function openBatch(id: string) {
+    await admin.locator(`[data-panel="p-withdrawals"] [data-payout-batch="${id}"]`).click();
+    await expect(dlg()).toBeVisible();
+    await expect(dlg()).toContainText(`签名批次 ${id}`); // 先确认打开的是这一批的明细
+  }
+  async function closeDialog() {
+    await admin.keyboard.press('Escape');
+    await expect(dlg()).not.toBeVisible();
+  }
+
+  test('TC-PB17 批次状态写清楚（列表和明细一致）：没上链（nonce 被别的交易用掉）/ 已确认作废 / 整批回滚（链上失败），三种互不混用', async () => {
+    await stubBatches(admin);
+    try {
+      await adminTab('p-withdrawals');
+      const want: [string, string, string[]][] = [['QA-DROP', '没上链', ['已确认作废', '整批回滚']], ['QA-VOID', '已确认作废', ['没上链', '整批回滚']], ['QA-REVERT', '整批回滚', ['没上链', '已确认作废']]];
+      for (const [id, text, not] of want) {
+        await expect(statusOfRow(id), `${id} 列表里的状态`).toHaveText(text);
+        await openBatch(id);
+        const st0 = dlg().locator('.status').first();
+        await expect(st0, `${id} 明细里的状态`).toHaveText(text);
+        for (const n of not) await expect(dlg(), `${id} 明细不能写成"${n}"`).not.toContainText(n);
+        // 三种都要告诉管理员：每笔回到已审核、商户余额没动
+        await expect(dlg()).toContainText('已审核');
+        await expect(dlg()).toContainText('余额没动');
+        await closeDialog();
+      }
+    } finally { await unstubBatches(admin); }
+    // 真实数据：TC-PB13 那一批（以太坊、收款人被拒、回执失败）仍然写"整批回滚"
+    const [real] = await sql(`select id from payout_tx_batches where chain = 'eth' and status = 'failed' and error = 'reverted' order by created_at desc limit 1`);
+    expect(real, '前提：TC-PB13 留下一批真实的整批回滚').toBeTruthy();
+    await adminTab('p-withdrawals');
+    await expect(statusOfRow(real.id)).toHaveText('整批回滚');
+  });
+
+  test('TC-PB18 确认作废的入口：只有"已重发"的批次按钮不可点并写原因；nonce 已被用掉（stuck_since）的可点，弹窗写出 nonce 和热钱包地址；本地构建不给区块浏览器链接', async () => {
+    await stubBatches(admin);
+    try {
+      await adminTab('p-withdrawals');
+      // 1）只有 rebroadcast_at：这笔随时可能上链 → 不可点，旁边写原因（按钮用 aria-describedby 指向原因）
+      await openBatch('QA-REB');
+      const reb = dlg().locator('[data-void-confirmed="QA-REB"]');
+      await expect(reb).toBeVisible();
+      await expect(reb).toBeDisabled();
+      const why = dlg().locator('[data-void-why]');
+      await expect(why).toBeVisible();
+      await expect(why).toContainText('nonce');
+      expect((await why.textContent())!.trim().length).toBeGreaterThan(8);
+      const whyId = await why.getAttribute('id');
+      expect(whyId, '原因要有 id，按钮用 aria-describedby 指向它（读屏能读到为什么不能点）').toBeTruthy();
+      await expect(reb).toHaveAttribute('aria-describedby', whyId!);
+      await reb.click({ force: true }); // 强行点也不会出确认作废的弹窗
+      await expect(dlg()).toContainText('签名批次 QA-REB');
+      await expect(dlg()).not.toContainText('确认作废 QA-REB');
+      await closeDialog();
+      // 2）有 stuck_since（nonce 已被用掉、节点还认得这笔）：可点 → 弹窗写出 nonce、热钱包地址
+      for (const [id, chain, nonce] of [['QA-STUCK', 'bsc', '42'], ['QA-BOTH', 'eth', '7']] as const) {
+        await openBatch(id);
+        const btn = dlg().locator(`[data-void-confirmed="${id}"]`);
+        await expect(btn, `${id}：nonce 已被用掉，可以确认作废`).toBeEnabled();
+        await expect(dlg().locator('[data-void-why]')).toHaveCount(0);
+        await btn.click();
+        await expect(dlg()).toContainText(`确认作废 ${id}`);
+        await expect(dlg().locator('[data-void-nonce]')).toHaveText(nonce);
+        const hot = WALLETS.evm[chain].hot as string;
+        expect((await dlg().textContent())!.toLowerCase(), `弹窗要写出 ${chain} 热钱包地址`).toContain(hot.toLowerCase());
+        await expect(dlg().locator('#vc-code')).toBeVisible(); // 还要动态码
+        // 本地构建没有区块浏览器：不能给出指向主网或测试网的链接
+        await expect(dlg().locator('a[data-explorer]')).toHaveCount(0);
+        await expect(dlg().locator('a[href*="etherscan"], a[href*="bscscan"]')).toHaveCount(0);
+        await closeDialog();
+      }
+    } finally { await unstubBatches(admin); }
+  });
+
+  test('TC-PB19 已审核待凑批的单：列表标题有挂起时写"其中 N 笔已挂起"并提示可以解除挂起，没挂起时不提挂起；空列表写 0 笔', async () => {
+    const appr = (id: string, hold: string | null) => ({ id, merchant: 'Payout E2E Ltd', chain: 'eth', to: rndEvm(), amount: '12.00', hold, batch_no: null, created_at: ago(20) });
+    const summary = () => admin.locator('[data-panel="p-withdrawals"] [data-approved-list] summary');
+    const cases: [any[], RegExp[], RegExp[]][] = [
+      [[appr('QA-A1', null), appr('QA-A2', null)], [/2 笔/, /驳回/], [/挂起/]],
+      [[appr('QA-A1', 'transfer_failed'), appr('QA-A2', null), appr('QA-A3', 'zero_address')], [/3 笔/, /其中 2 笔已挂起/, /解除挂起/, /驳回/], []],
+      [[], [/0 笔/], [/挂起/]],
+    ];
+    try {
+      for (const [list, has, hasNot] of cases) {
+        await admin.unroute(isWallet('withdrawals'));
+        await admin.route(isWallet('withdrawals'), patchJson((j) => { j.approved = list; }));
+        await admin.goto('/admin/');
+        await adminTab('p-withdrawals');
+        await expect(admin.locator('[data-panel="p-withdrawals"] [data-approved-list]')).toBeAttached();
+        for (const re of has) await expect(summary()).toContainText(re);
+        for (const re of hasNot) await expect(summary()).not.toContainText(re);
+        // 有挂起的时候列表默认展开（挂起的要尽快处理）
+        const open = await admin.locator('[data-panel="p-withdrawals"] [data-approved-list]').evaluate((d) => (d as HTMLDetailsElement).open);
+        expect(open, '有挂起的默认展开，没有的不展开').toBe(list.some((x) => x.hold));
+      }
+    } finally { await admin.unroute(isWallet('withdrawals')); }
+  });
+
+  test('TC-PB20 不可点的按钮鼠标是"禁止"（not-allowed），亮色、暗色都一样：凑批卡的签名按钮、不能确认作废的按钮、商户第 3 步余额不够的提交按钮', async () => {
+    const cursorOf = (l: ReturnType<Page['locator']>) => l.evaluate((e) => getComputedStyle(e).cursor);
+    try {
+      for (const scheme of ['light', 'dark'] as const) {
+        await admin.emulateMedia({ colorScheme: scheme });
+        await merchant.emulateMedia({ colorScheme: scheme });
+        await stubBatches(admin);
+        await admin.route(isWallet('withdrawals'), patchJson((j) => { for (const c of j.cards) { c.approved_count = 0; c.approved_total = '0'; } j.batches = [...QA_BATCHES, ...j.batches.filter((b: any) => b.status !== 'planned')]; }));
+        await admin.goto('/admin/');
+        await adminTab('p-withdrawals');
+        const sign = admin.locator('[data-panel="p-withdrawals"] [data-payout-sign="eth"]');
+        await expect(sign).toBeDisabled();
+        expect(await cursorOf(sign), `${scheme}：没有要签的时签名按钮`).toBe('not-allowed');
+        // 页面上所有不可点的按钮都一样
+        const all = await admin.locator('[data-panel="p-withdrawals"] button:disabled').evaluateAll((bs) => bs.filter((b) => (b as HTMLElement).offsetParent).map((b) => [b.textContent, getComputedStyle(b).cursor]));
+        expect(all.length).toBeGreaterThan(0);
+        for (const [t, c] of all) expect(c, `${scheme}：不可点的按钮"${t}"`).toBe('not-allowed');
+        await openBatch('QA-REB');
+        const reb = dlg().locator('[data-void-confirmed="QA-REB"]');
+        await expect(reb).toBeDisabled();
+        expect(await cursorOf(reb), `${scheme}：不能确认作废的按钮`).toBe('not-allowed');
+        await closeDialog();
+        await unstubBatches(admin);
+        // 商户：余额不够时第 3 步提交按钮禁用
+        await merchant.goto('/zh/merchant/');
+        await merchantTab('payout-batch');
+        const p = merchant.locator('[data-mpanel="payout-batch"]');
+        await p.locator('[data-mb-reset]').click().catch(() => {});
+        await p.locator('input[type=file][data-mb-file]').setInputFiles(csvFile([['bsc', rndEvm(), '99999']]));
+        await p.locator('[data-mb-next]').click();
+        const sub = p.locator('[data-mb-submit]');
+        await expect(sub).toBeDisabled();
+        expect(await cursorOf(sub), `${scheme}：商户提交按钮`).toBe('not-allowed');
+        await p.locator('[data-mb-reset]').click();
+      }
+    } finally {
+      await unstubBatches(admin).catch(() => {});
+      await admin.emulateMedia({ colorScheme: null }); await merchant.emulateMedia({ colorScheme: null });
+    }
+  });
+
+  test('TC-PB21 点签名后凑不出批、热钱包余额或授权额度不够：提示写在这条链的凑批卡里 [data-plan-msg]，1280×720 下不挡签名按钮', async () => {
+    await admin.setViewportSize({ width: 1280, height: 720 });
+    // 以太坊卡：2 笔已审核、没挡住（按钮可点）；点了以后服务器那边凑不出批 / 钱不够（用替身喂结果）
+    await admin.route(isWallet('withdrawals'), patchJson((j) => {
+      const c = j.cards.find((x: any) => x.chain === 'eth');
+      Object.assign(c, { approved_count: 2, approved_total: '300.00', blocked: null });
+      j.batches = j.batches.filter((b: any) => !(b.chain === 'eth' && b.status === 'planned'));
+    }));
+    const plans: ((r: any) => Promise<void>)[] = [
+      (r) => r.fulfill({ json: { chain: 'eth', batches: [], held: [{ id: 'QA-H1', reason: 'exceeds_hot_balance' }], cap: '0' } }),
+      (r) => r.fulfill({ status: 409, json: { error: { code: 'funds_short', message: 'funds_short' } } }),
+      (r) => r.fulfill({ json: { chain: 'eth', batches: [], held: [{ id: 'QA-H2', reason: 'exceeds_allowance' }], cap: '0' } }),
+    ];
+    const expectText = ['热钱包余额不够', '余额或授权额度不够', '授权额度不够'];
+    try {
+      for (let i = 0; i < plans.length; i++) {
+        let hit = 0;
+        await admin.route(isWallet('payout-plan'), (r) => { hit++; return plans[i](r); });
+        await admin.goto('/admin/');
+        await adminTab('p-withdrawals');
+        const card = admin.locator('[data-panel="p-withdrawals"] [data-payout-plan="eth"]');
+        const sign = card.locator('[data-payout-sign="eth"]');
+        await expect(sign).toBeEnabled();
+        await sign.click();
+        await expect.poll(() => hit, { message: '前提：点了签名、页面去凑批' }).toBe(1);
+        const msg = admin.locator('[data-plan-msg="eth"]');
+        await expect(msg).toContainText(expectText[i]);
+        await expect(card.locator('[data-plan-msg="eth"]'), '提示在以太坊这张卡里').toHaveCount(1);
+        await expect(admin.locator('[data-plan-msg="bsc"]')).not.toContainText(expectText[i]);
+        await expect(msg).toBeVisible();
+        // 不挡签名按钮：按钮滚到可见处后，按钮里的几个点（左中右、上中下；按钮是圆角胶囊形，不取四个角）点到的都是按钮本身（提示、浮层都没盖住）
+        const btn = admin.locator('[data-panel="p-withdrawals"] [data-payout-sign="eth"]');
+        await btn.scrollIntoViewIfNeeded();
+        const covered = await btn.evaluate((b) => {
+          const r = b.getBoundingClientRect();
+          const cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+          const pts = [[r.left + r.width * 0.2, cy], [cx, cy], [r.left + r.width * 0.8, cy], [cx, r.top + r.height * 0.25], [cx, r.top + r.height * 0.75]];
+          return pts.map(([x, y]) => { const e = document.elementFromPoint(x, y); return e && (e === b || b.contains(e)) ? null : (e ? `${e.tagName}.${e.className}` : 'outside'); }).filter(Boolean);
+        });
+        expect(covered, '签名按钮被盖住的点').toEqual([]);
+        // 提示和按钮在同一屏里都能看到
+        const [mb, bb] = [await msg.boundingBox(), await btn.boundingBox()];
+        expect(mb && bb).toBeTruthy();
+        expect(mb!.y + mb!.height <= bb!.y || bb!.y + bb!.height <= mb!.y, '提示和按钮不重叠').toBe(true);
+        await admin.unroute(isWallet('payout-plan'));
+      }
+    } finally {
+      await admin.unroute(isWallet('payout-plan')).catch(() => {});
+      await admin.unroute(isWallet('withdrawals'));
+    }
+  });
+
+  test('TC-PB22 商户上传含超单笔上限的行：汇总不算"没问题"、单独数出来并写明会被驳回；"只提交"那句写明其中几行会被驳回；金额和上限都带千分位', async () => {
+    const lim = (await wcall('payout-limits')).body;
+    const perItem = Number(String(lim.perItem).replace(/,/g, ''));
+    expect(perItem, '前提：单笔上限 ≥ 1,000（才看得出千分位）').toBeGreaterThanOrEqual(1000);
+    const fmt = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const over = perItem + 1000;
+    await merchantTab('payout-batch');
+    const p = merchant.locator('[data-mpanel="payout-batch"]');
+    const step2 = p.locator('[data-mb-step="2"]');
+    // 1）一行没问题、一行超上限、一行格式错
+    await p.locator('[data-mb-reset]').click().catch(() => {});
+    await p.locator('input[type=file][data-mb-file]').setInputFiles(csvFile([['bsc', rndEvm(), '1234.5'], ['bsc', rndEvm(), String(over)], ['btc', rndEvm(), '1']]));
+    await expect(step2).toBeVisible();
+    const sum = step2.locator('p b').first();
+    await expect(sum).toContainText('3 行');
+    await expect(sum).toContainText('1 行没问题');
+    await expect(sum).not.toContainText('2 行没问题');
+    await expect(sum).toContainText(/1 行超.*单笔上限/);
+    await expect(sum).toContainText('驳回');
+    await expect(sum).toContainText('1 行有问题');
+    // 超上限的那行：不是"✓ 没问题"，写明上限（千分位）和会被驳回；金额千分位
+    const row2 = p.locator('[data-row-line="2"]');
+    await expect(row2).not.toContainText('✓');
+    await expect(row2).toContainText(`${fmt(perItem)} USDT`);
+    await expect(row2).toContainText('驳回');
+    await expect(row2).toContainText(fmt(over));
+    await expect(p.locator('[data-row-line="1"]')).toContainText('1,234.50');
+    await expect(p.locator('[data-mb-over]')).toContainText(fmt(perItem));
+    await expect(p.locator('[data-mb-over]')).toContainText('驳回');
+    // "只提交格式没问题的行"：写明其中 1 行超上限、会被驳回
+    const only = p.locator('label.check-row').filter({ has: merchant.locator('#mb-only-valid') });
+    await expect(only).toContainText('2 行');
+    await expect(only).toContainText(/1 行超.*单笔上限/);
+    await expect(only).toContainText('驳回');
+    // 2）没有格式错、只有超上限：汇总照样不算没问题
+    await p.locator('[data-mb-reset]').click();
+    await p.locator('input[type=file][data-mb-file]').setInputFiles(csvFile([['bsc', rndEvm(), '10'], ['bsc', rndEvm(), String(over)]]));
+    await expect(step2).toBeVisible();
+    await expect(step2.locator('p b').first()).toContainText('1 行没问题');
+    await expect(step2.locator('p b').first()).toContainText(/1 行超.*单笔上限/);
+    await expect(step2.locator('p b').first()).not.toContainText('2 行没问题');
+    // 3）对照：都没超上限时，汇总不提单笔上限
+    await p.locator('[data-mb-reset]').click();
+    await p.locator('input[type=file][data-mb-file]').setInputFiles(csvFile([['bsc', rndEvm(), '10'], ['bsc', rndEvm(), '2500']]));
+    await expect(step2).toBeVisible();
+    await expect(step2.locator('p b').first()).toContainText('2 行没问题');
+    await expect(step2.locator('p b').first()).not.toContainText('单笔上限');
+    await expect(p.locator('[data-row-line="2"]')).toContainText('2,500.00');
+    await p.locator('[data-mb-reset]').click();
+  });
+
+  // ---------- 钱包设置（补齐原型）----------
+  const SYM: Record<string, string> = { eth: 'ETH', bsc: 'BNB', tron: 'TRX' };
+  const NAME: Record<string, string> = { eth: '以太坊', bsc: 'BSC', tron: 'TRON' };
+  /** 都正常的一份：三条链都配了地址、链上核对一致、热钱包 5,000 / 上限 10,000、授权额度 10,000、发起账户手续费够 */
+  const walletsOk = (j: any) => {
+    for (const c of j.cards) {
+      Object.assign(c, { cold: c.cold || rndEvm(), hot: c.hot || rndEvm(), low: false, hot_balance: '5000.00', hot_max: '10000.00', hot_low: '2000.00', cold_balance: '12345.67', hot_gas: '0.5', operator: c.operator || rndEvm(), error: undefined });
+      if (c.chain !== 'tron') Object.assign(c, { onchain: 'ok', payout_enabled: true, payout: c.payout || rndEvm(), allowance: '10000.00' });
+    }
+  };
+  const chainsOk = (j: any) => { for (const c of j.chains) c.operator = { configured: true, gas: '1.2', symbol: SYM[c.chain], batches_left: 20, low: false, address: rndEvm() }; };
+  async function walletPage(cards: (j: any) => void, chains: ((j: any) => void) | 'fail' = chainsOk) {
+    await admin.unroute(isWallet('payout-wallets')).catch(() => {});
+    await admin.unroute(isWallet('wallet-chains')).catch(() => {});
+    await admin.route(isWallet('payout-wallets'), patchJson((j) => { walletsOk(j); cards(j); }));
+    await admin.route(isWallet('wallet-chains'), chains === 'fail' ? (r) => r.fulfill({ status: 500, json: { error: { code: 'internal' } } }) : patchJson(chains));
+    await admin.goto('/admin/');
+    await adminTab('p-wallet');
+    await expect(admin.locator('[data-panel="p-wallet"] [data-wallet-card="eth"]')).toBeVisible();
+  }
+  async function unrouteWallet() { await admin.unroute(isWallet('payout-wallets')).catch(() => {}); await admin.unroute(isWallet('wallet-chains')).catch(() => {}); }
+  const card = (j: any, c: string) => j.cards.find((x: any) => x.chain === c);
+
+  test('TC-PB23 钱包设置顶部"待处理"的优先顺序：没配置 > 链上核对不一致 > 热钱包低于提醒线 > 发起账户手续费不够 > 授权额度低于 30% > 热钱包超上限 > 现在没事要做', async () => {
+    const hero = () => admin.locator('[data-panel="p-wallet"] [data-wallet-hero]');
+    // 从最低一级起，每次多加一种更靠前的情况（前面加的都还在）：顶部只显示最靠前的那一种
+    const steps: [string, (j: any) => void, ((j: any) => void) | null, RegExp[]][] = [
+      ['都正常', () => {}, null, [/现在没事要做/]],
+      ['TRON 热钱包超上限', (j) => { card(j, 'tron').hot_balance = '12000.00'; }, null, [/TRON/, /超过上限|超上限/]],
+      ['BSC 授权额度正好 30%（不算低于）', (j) => { card(j, 'bsc').allowance = '3000.00'; }, null, [/TRON/, /超过上限|超上限/]],
+      ['BSC 授权额度低于 30%', (j) => { card(j, 'bsc').allowance = '2999.99'; }, null, [/BSC/, /授权额度/]],
+      ['以太坊发起账户手续费不够', () => {}, (j) => { j.chains.find((x: any) => x.chain === 'eth').operator.low = true; }, [/以太坊/, /发起账户/, /手续费/]],
+      ['BSC 热钱包低于提醒线', (j) => { Object.assign(card(j, 'bsc'), { hot_balance: '1500.00', low: true }); }, null, [/BSC/, /热钱包/, /提醒线/]],
+      ['以太坊链上核对不一致', (j) => { card(j, 'eth').onchain = 'mismatch'; }, null, [/以太坊/, /核对不一致/]],
+      ['三条链都没配置地址', (j) => { for (const c of j.cards) Object.assign(c, { cold: null, hot: null }); }, null, [/没配置/]],
+    ];
+    const cardEdits: ((j: any) => void)[] = [], chainEdits: ((j: any) => void)[] = [];
+    try {
+      for (const [name, ce, he, want] of steps) {
+        cardEdits.push(ce); if (he) chainEdits.push(he);
+        await walletPage((j) => cardEdits.forEach((f) => f(j)), (j) => { chainsOk(j); chainEdits.forEach((f) => f(j)); });
+        await expect(hero(), name).toBeVisible();
+        for (const re of want) await expect(hero(), `${name}：顶部应写 ${re}`).toContainText(re);
+        await expect(admin.locator('[data-panel="p-wallet"] [data-wallet-hero]'), '顶部只有一条').toHaveCount(1);
+      }
+    } finally { await unrouteWallet(); }
+  });
+
+  test('TC-PB24 钱包设置：冷钱包 USDT 余额 [data-cold-balance]、热钱包手续费币 [data-hot-gas]、发起账户手续费 [data-operator-gas]；读不到的写"暂时查不到"', async () => {
+    try {
+      // 1）真实接口（本地替身链）：以太坊、BSC 冷钱包有 USDT 余额，热钱包手续费币是 ETH / BNB
+      await adminTab('p-wallet');
+      for (const c of ['eth', 'bsc']) {
+        await expect(admin.locator(`[data-cold-balance="${c}"]`)).toContainText(/USDT [\d,]+\.\d{2}/);
+        await expect(admin.locator(`[data-hot-gas="${c}"]`)).toContainText(SYM[c]);
+      }
+      // 2）都读到：千分位、币种
+      await walletPage(() => {});
+      for (const c of ['eth', 'bsc', 'tron']) {
+        await expect(admin.locator(`[data-cold-balance="${c}"]`)).toContainText('12,345.67');
+        await expect(admin.locator(`[data-hot-gas="${c}"]`)).toContainText(`0.5 ${SYM[c]}`);
+        await expect(admin.locator(`[data-operator-gas="${c}"]`)).toContainText(`1.2 ${SYM[c]}`);
+        await expect(admin.locator(`[data-operator-gas="${c}"]`)).toContainText('20');
+        for (const sel of ['data-cold-balance', 'data-hot-gas', 'data-operator-gas']) await expect(admin.locator(`[${sel}="${c}"]`)).not.toContainText('暂时查不到');
+      }
+      // 3）节点出错：接口给 null → 每一处都写"暂时查不到"
+      await walletPage((j) => { for (const c of j.cards) Object.assign(c, { cold_balance: null, hot_gas: null }); }, (j) => { chainsOk(j); for (const c of j.chains) c.operator.gas = null; });
+      for (const c of ['eth', 'bsc', 'tron']) {
+        for (const sel of ['data-cold-balance', 'data-hot-gas', 'data-operator-gas']) await expect(admin.locator(`[${sel}="${c}"]`), `${sel}=${c}`).toContainText('暂时查不到');
+        await expect(admin.locator(`[data-wallet-card="${c}"]`)).not.toContainText('null');
+        await expect(admin.locator(`[data-wallet-card="${c}"]`)).not.toContainText('undefined');
+      }
+      // 4）发起账户的手续费整份读不到（系统状态那份数据出错）：页面照常出来，发起账户手续费写"暂时查不到"
+      await walletPage(() => {}, 'fail');
+      await expect(admin.locator('[data-panel="p-wallet"] [data-wallet-hero]')).toBeVisible();
+      for (const c of ['eth', 'bsc', 'tron']) {
+        await expect(admin.locator(`[data-cold-balance="${c}"]`)).toContainText('12,345.67');
+        await expect(admin.locator(`[data-operator-gas="${c}"]`), `读不到发起账户手续费时 ${c} 也要写"暂时查不到"`).toContainText('暂时查不到');
+      }
+    } finally { await unrouteWallet(); }
+  });
+
+  test('TC-PB25 钱包设置的授权额度汇总：以太坊、BSC、TRON 3 行；以太坊写两笔、BSC 一笔、TRON 不用授权；行里的"改额度"能打开改额度流程；没开通 / 读不到的写清楚', async () => {
+    try {
+      await walletPage((j) => { card(j, 'bsc').allowance = '2500.00'; });
+      const rows = admin.locator('[data-panel="p-wallet"] [data-allowance-summary-row]');
+      await expect(rows).toHaveCount(3);
+      expect(await rows.evaluateAll((rs) => rs.map((r) => r.getAttribute('data-allowance-summary-row')))).toEqual(['eth', 'bsc', 'tron']);
+      const row = (c: string) => admin.locator(`[data-allowance-summary-row="${c}"]`);
+      await expect(row('eth')).toContainText('10,000.00');
+      await expect(row('eth')).toContainText('两笔');
+      await expect(row('bsc')).toContainText('2,500.00');
+      await expect(row('bsc')).toContainText('一笔');
+      await expect(row('tron')).toContainText('不用授权');
+      await expect(row('tron').locator('button')).toHaveCount(0);
+      for (const c of ['eth', 'bsc']) {
+        await row(c).locator(`[data-allowance-row-edit="${c}"]`).click();
+        await expect(dlg()).toBeVisible();
+        await expect(dlg().locator('#al-amount'), `${c}：打开改额度流程（填新额度）`).toBeVisible();
+        await expect(dlg()).toContainText(NAME[c]);
+        await closeDialog();
+      }
+      // 没开通批量打款：没有"改额度"，写"没开通"；开通了但链上读不到：写"暂时查不到"
+      await walletPage((j) => { Object.assign(card(j, 'bsc'), { payout_enabled: false, allowance: null }); card(j, 'eth').allowance = null; });
+      await expect(row('bsc')).toContainText('没开通');
+      await expect(row('bsc').locator('[data-allowance-row-edit]')).toHaveCount(0);
+      await expect(row('eth')).toContainText('暂时查不到');
+      await expect(row('eth').locator('[data-allowance-row-edit="eth"]')).toBeVisible();
+    } finally { await unrouteWallet(); }
+  });
+
+  test('TC-PB26 接口：payout-tx-batch 以太坊批次带 nonce、TRON 批次 nonce 为 null；payout-wallets 每条链有 cold_balance、hot_gas（真实接口、本地替身链）', async () => {
+    const [eth] = await sql(`select id from payout_tx_batches where chain = 'eth' and tx_hash is not null order by created_at desc limit 1`);
+    expect(eth, '前提：前面的用例签过以太坊批次').toBeTruthy();
+    const d = await wcall('payout-tx-batch', undefined, `&id=${encodeURIComponent(eth.id)}`);
+    expect(d.status).toBe(200);
+    expect(d.body.nonce, '以太坊批次要有 nonce').not.toBeNull();
+    expect(String(d.body.nonce)).toMatch(/^\d+$/);
+    const [tron] = await sql(`select id from payout_tx_batches where chain = 'tron' order by created_at desc limit 1`);
+    if (tron) { // 本地 TRON 打款批次（第 2 批页面那组用例）：有就核对
+      const t = await wcall('payout-tx-batch', undefined, `&id=${encodeURIComponent(tron.id)}`);
+      expect(t.status).toBe(200);
+      expect('nonce' in t.body).toBe(true);
+      expect(t.body.nonce).toBeNull();
+    }
+    const w = await wcall('payout-wallets');
+    expect(w.status).toBe(200);
+    for (const c of ['eth', 'bsc']) {
+      const x = w.body.cards.find((k: any) => k.chain === c);
+      expect(x.cold_balance, `${c}.cold_balance`).toMatch(/^\d+\.\d{2}$/);
+      expect(x.hot_gas, `${c}.hot_gas`).toMatch(/^\d+(\.\d+)?$/);
+    }
+    const t = w.body.cards.find((k: any) => k.chain === 'tron');
+    expect('cold_balance' in t && 'hot_gas' in t, 'TRON 卡也有这两个字段').toBe(true);
+  });
+});
+
+// ============ 测试环境构建（APP_ENV=staging）：确认作废弹窗的区块浏览器链接指向测试网 ============
+// 8100 端口：测试环境构建的页面 + 本地服务器（e2e/stack.mjs）。批次用浏览器拦截接口喂进去。
+// 热钱包地址取构建时的 config/wallets.json staging.evm.<链>.hot；那里还没填时没有地址链接（弹窗写"没有配置"）。
+test.describe('TC-PBS 测试环境构建的确认作废弹窗', () => {
+  test.setTimeout(120_000);
+  test.use({ actionTimeout: 15_000 });
+  const S = 'http://127.0.0.1:8100';
+  const SW = JSON.parse(readFileSync(new URL('../../config/wallets.json', import.meta.url), 'utf8')).staging;
+  const EXP: Record<string, string> = { eth: 'https://sepolia.etherscan.io', bsc: 'https://testnet.bscscan.com' };
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  const isW = (name: string) => (url: URL) => url.pathname === '/api/wallet/' && url.searchParams.get('a') === name;
+
+  test('TC-PBS01 测试环境：以太坊链接到 sepolia.etherscan.io、BSC 链接到 testnet.bscscan.com 的交易页（tx）和热钱包地址页（address），新窗口打开', async ({ browser }) => {
+    const ctx = await browser.newContext({ baseURL: S });
+    const page = await ctx.newPage();
+    try {
+      await page.goto('/admin/');
+      await expect(page.locator('[data-staging-banner]'), '前提：测试环境构建').toBeVisible();
+      await expect(page.locator('#admin-root')).toHaveAttribute('data-wallet-env', 'staging');
+      // 初始化后台并登录（这个实例只给本用例用）
+      const pw = 'e2e-staging-payout-admin-pw';
+      await page.fill('#s-token', KYB_ENV.ADMIN_SETUP_TOKEN); await page.fill('#s-pw', pw); await page.fill('#s-pw2', pw);
+      await page.click('[data-setup] button[type="submit"]');
+      await expect(page.locator('[data-setup2]')).toBeVisible();
+      const secret = (await page.locator('[data-secret]').textContent())!.replace(/\s/g, '');
+      await page.fill('#s-otp', totpCode(secret, Date.now()));
+      await page.click('[data-setup2] button[type="submit"]');
+      await expect(page.locator('[data-view="login"]')).toBeVisible();
+      await page.fill('#a-pw', pw); await page.fill('#a-otp', await code(secret));
+      await page.click('[data-login] button[type="submit"]');
+      await expect(page.locator('[data-view="app"]')).toBeVisible();
+      const hash = { eth: '0x' + '1f'.repeat(32), bsc: '0x' + '2e'.repeat(32) } as Record<string, string>;
+      const batches = ['eth', 'bsc'].map((c) => ({ id: `QA-STG-${c}`, chain: c, status: 'broadcast', count: 1, total: '10.00', tx_hash: hash[c], error: null, ok: 0, failed: 0, energy: null,
+        items: [{ id: `QA-STG-${c}-1`, status: null, reason: null }], rebroadcast_at: null, stuck_since: ago(70), nonce: c === 'eth' ? '3' : '9', created_at: ago(90), updated_at: ago(5) }));
+      await page.route(isW('withdrawals'), async (r) => {
+        let res, j;
+        try { res = await r.fetch(); j = await res.json(); } catch { await r.abort().catch(() => {}); return; }
+        j.batches = [...batches, ...(j.batches || [])];
+        await r.fulfill({ response: res, json: j }).catch(() => {});
+      });
+      await page.route(isW('payout-tx-batch'), (r) => {
+        const b = batches.find((x) => x.id === new URL(r.request().url()).searchParams.get('id'));
+        return b ? r.fulfill({ json: { ...b, resumable: false, voidable: false, withdrawals: [{ id: `${b.id}-1`, merchant: 'Staging QA', to: '0x' + '3c'.repeat(20), amount: '10.00', status: 'broadcast', txid: null, reason: null, hold: null }] } }) : r.continue();
+      });
+      await page.click('[data-tab="p-withdrawals"]');
+      await expect(page.locator('[data-panel="p-withdrawals"]')).toBeVisible();
+      const d = page.locator('[data-pdialog]');
+      for (const c of ['eth', 'bsc']) {
+        await page.locator(`[data-payout-batch="QA-STG-${c}"]`).click();
+        await expect(d).toContainText(`签名批次 QA-STG-${c}`);
+        await d.locator(`[data-void-confirmed="QA-STG-${c}"]`).click();
+        await expect(d).toContainText(`确认作废 QA-STG-${c}`);
+        await expect(d.locator('[data-void-nonce]')).toHaveText(c === 'eth' ? '3' : '9');
+        const tx = d.locator('a[data-explorer="tx"]');
+        await expect(tx).toHaveAttribute('href', `${EXP[c]}/tx/${hash[c]}`);
+        await expect(tx).toHaveAttribute('target', '_blank');
+        await expect(tx).toHaveAttribute('rel', /noopener/);
+        const hot = SW?.evm?.[c]?.hot || '';
+        if (hot) {
+          await expect(d.locator('a[data-explorer="address"]')).toHaveAttribute('href', `${EXP[c]}/address/${hot}`);
+          await expect(d).toContainText(hot);
+        } else {
+          // config/wallets.json 的 staging 热钱包还没填：不能拼出一个空地址的链接，写明没有配置
+          await expect(d.locator('a[data-explorer="address"]')).toHaveCount(0);
+          await expect(d).toContainText('没有配置');
+        }
+        // 不能指到主网
+        await expect(d.locator('a[href^="https://etherscan.io"], a[href^="https://bscscan.com"]')).toHaveCount(0);
+        await page.keyboard.press('Escape');
+        await expect(d).not.toBeVisible();
+      }
+    } finally { await ctx.close(); }
   });
 });
