@@ -1,9 +1,8 @@
-# 测试环境（staging）的自动检查：staging 分支每次更新后，等测试服务器部署这个提交，再执行 e2e/smoke-staging.sh。
+# 测试环境（staging）检查的手动入口：在 Actions 页面手动运行，等测试服务器部署 staging 的最新提交，再执行 e2e/smoke-staging.sh。
+# 合并到 staging 后的自动检查在 ci.yml 的 staging-smoke（镜像推送之后才开始等，不会在 CI 还没跑完时就超时）。
 # 测试环境的地址放在仓库的 Actions Secrets（STAGING_URL），不写在仓库里、日志里自动遮盖；没有配置时跳过。
 name: staging-check
 on:
-  push:
-    branches: [staging]
   workflow_dispatch:
 permissions:
   contents: read

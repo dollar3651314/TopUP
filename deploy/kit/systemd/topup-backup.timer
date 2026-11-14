@@ -1,0 +1,11 @@
+# 每天备份：每天 UTC 19:40（东八区 03:40），和 worker 的每日任务（UTC 19:15）错开
+[Unit]
+Description=TopUP 每天备份
+
+[Timer]
+OnCalendar=*-*-* 19:40:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

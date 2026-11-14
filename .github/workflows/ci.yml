@@ -183,3 +183,44 @@ jobs:
           if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
             echo "有检查失败或被取消"; exit 1
           fi
+
+  # 合并到 staging 且上面的检查全部通过后：构建测试环境的镜像，推到 GitHub 镜像仓库（标签 = 完整提交号，并移动 staging 标签）。
+  # 测试服务器每分钟自己来拉（deploy/kit/topup.sh update），GitHub 不需要、也不能登录服务器。PR 上不运行。
+  image:
+    needs: [ci-ok]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: 构建并推送镜像（APP_ENV=staging）
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/topup"
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --build-arg APP_ENV=staging --build-arg GIT_COMMIT="$GITHUB_SHA" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$image:$GITHUB_SHA" -t "$image:staging" .
+          docker push -q "$image:$GITHUB_SHA"
+          docker push -q "$image:staging"
+          echo "已推送 $image:$GITHUB_SHA（staging 标签已移动）" >> "$GITHUB_STEP_SUMMARY"
+
+  # 镜像推送后：等测试服务器换成这个提交（健康检查返回的 commit），再跑测试环境冒烟检查（e2e/smoke-staging.sh）。
+  # 地址在仓库密钥 STAGING_URL（不写在仓库里、日志里自动遮盖）；没有配置时跳过。手动重跑用 staging-check.yml。
+  staging-smoke:
+    needs: [image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STAGING_URL: ${{ secrets.STAGING_URL }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: 测试环境检查
+        run: |
+          if [ -z "$STAGING_URL" ]; then echo "::warning::仓库密钥 STAGING_URL 还没有配置，跳过"; exit 0; fi
+          bash e2e/smoke-staging.sh "$STAGING_URL" "${GITHUB_SHA::7}"

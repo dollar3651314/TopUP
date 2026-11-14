@@ -1,0 +1,10 @@
+# 每天备份（deploy/kit/topup.sh backup），由 topup-backup.timer 触发
+[Unit]
+Description=TopUP 每天备份
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/topup/deploy/kit/topup.sh backup
+TimeoutStartSec=30min

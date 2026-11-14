@@ -24,6 +24,9 @@ RUN npm ci --omit=dev --no-audit --no-fund
 COPY server ./server
 COPY config ./config
 COPY --from=site /app/site/dist ./site/dist
+# 服务器的部署工具包（deploy/ 和环境变量清单）：服务器从这个镜像里取出，保证工具包和应用是同一个提交
+COPY deploy /topup-kit
+COPY .env.example /topup-kit/kit/app.env.example
 RUN mkdir -p /data/blobs && chown node:node /data/blobs
 USER node
 EXPOSE 8080

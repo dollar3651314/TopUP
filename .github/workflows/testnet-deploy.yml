@@ -1,0 +1,92 @@
+# 测试网合约部署（scripts/testnet/README.md）：Sepolia、BSC 测试网部署实现合约 / 工厂 / SweepBatcher（+ 测试 USDT、BatchPayout），
+# Nile 部署 ForwarderTron / ForwarderFactoryTron / SweepBatcherTron（+ 测试 USDT），部署完用服务器自己的代码核对，地址清单写进运行摘要和产物。
+# 只连测试网（脚本会拒绝主网）。部署账户私钥放在 GitHub 环境 "testnet" 的环境密钥 TOPUP_TESTNET_DEPLOYER_KEY 里，只有管理员能填；
+# 环境 "testnet" 设了"需要审批"，每次运行都要管理员在 GitHub 上点批准，批准前拿不到密钥、不会上链。
+# 触发：在 Actions 页面手动运行（这个文件进了默认分支之后才有按钮），或推送到 testnet-run/ 开头的分支（不用先进默认分支）。
+# 参数：手动运行时页面上填；没填的（以及推送触发时）用环境 "testnet" 的环境变量（TESTNET_EVM_PARENT 等，见 README），都是公开地址。
+# 不改 config/wallets.json：结果里的地址由管理员自己填进 staging 一节、开 PR、自己合并。
+name: testnet-deploy
+on:
+  workflow_dispatch:
+    inputs:
+      chains:
+        description: 部署哪几条链
+        type: choice
+        options: ['eth,bsc,tron', 'eth,bsc', 'tron', 'eth', 'bsc']
+        default: 'eth,bsc,tron'
+      evm_parent:
+        description: ETH/BSC 冷钱包 parent（0x 地址；空着用环境变量 TESTNET_EVM_PARENT）
+        required: false
+      evm_operator:
+        description: ETH/BSC 归集发起账户（sudo topup gen-operator 显示的 0x 地址；空着用 TESTNET_EVM_OPERATOR）
+        required: false
+      tron_parent:
+        description: TRON 冷钱包 parent（T 地址；空着用 TESTNET_TRON_PARENT）
+        required: false
+      tron_operator:
+        description: TRON 归集发起账户（T 地址；空着用 TESTNET_TRON_OPERATOR）
+        required: false
+      evm_start_nonce:
+        description: 部署账户在两条 EVM 链上的起始 nonce（新账户是 0；两条链必须一样，地址才相同）
+        required: false
+        default: '0'
+      test_usdt:
+        description: 每条链部署一个测试 USDT
+        type: boolean
+        default: true
+      payout_payer:
+        description: 批量打款热钱包（0x 地址；填了才部署 BatchPayout，第 3 批合并后才有；空着用 TESTNET_PAYOUT_PAYER）
+        required: false
+  push:
+    branches: ['testnet-run/**']
+permissions:
+  contents: read
+concurrency:
+  group: testnet-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: testnet
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          submodules: recursive
+          # 不把 GITHUB_TOKEN 留在 .git/config 里（后面步骤的代码拿不到它）
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1（v1.9.2）
+        with:
+          version: v1.5.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: 编译合约（forge build）
+        run: cd contracts && forge build
+      # 参数都经过环境变量传给脚本（不拼进命令行），私钥只给这一步
+      - name: 部署并核对
+        env:
+          TOPUP_TESTNET_DEPLOYER_KEY: ${{ secrets.TOPUP_TESTNET_DEPLOYER_KEY }}
+          TESTNET_ETH_RPC_URL: ${{ secrets.TESTNET_ETH_RPC_URL }}
+          TESTNET_BSC_RPC_URL: ${{ secrets.TESTNET_BSC_RPC_URL }}
+          TRONGRID_API_KEY: ${{ secrets.TRONGRID_API_KEY }}
+          TESTNET_CHAINS: ${{ inputs.chains || vars.TESTNET_CHAINS || 'eth,bsc,tron' }}
+          EVM_PARENT: ${{ inputs.evm_parent || vars.TESTNET_EVM_PARENT }}
+          EVM_OPERATOR: ${{ inputs.evm_operator || vars.TESTNET_EVM_OPERATOR }}
+          TRON_PARENT: ${{ inputs.tron_parent || vars.TESTNET_TRON_PARENT }}
+          TRON_OPERATOR: ${{ inputs.tron_operator || vars.TESTNET_TRON_OPERATOR }}
+          EVM_START_NONCE: ${{ inputs.evm_start_nonce || vars.TESTNET_EVM_START_NONCE || '0' }}
+          TESTNET_USDT: ${{ (github.event_name != 'workflow_dispatch' || inputs.test_usdt) && '1' || '0' }}
+          PAYOUT_PAYER: ${{ inputs.payout_payer || vars.TESTNET_PAYOUT_PAYER }}
+          OUT_DIR: testnet-deploy
+        run: node scripts/testnet/deploy.mjs
+      - name: 保存地址清单（只有公开地址和交易号）
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5（v5.0.0）
+        with:
+          name: testnet-deploy
+          path: testnet-deploy/
+          if-no-files-found: ignore
+          retention-days: 90
