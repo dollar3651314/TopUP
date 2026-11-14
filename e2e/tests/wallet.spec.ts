@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { readJsonl, decodeQP, MAILS, KYB_ENV, TMP } from '../stack.mjs';
 // @ts-ignore 与后端同一份 TOTP 实现
 import { totpCode, totpStep } from '../../server/kyb/totp.js';
-import { legacyTron } from './legacy-tron';
+import { legacyTron, legacyMnemonic } from './legacy-tron';
 
 // 钱包第 1 批页面端到端（以太坊、BSC 合约钱包；正式构建、真实接口，8096 端口的独立实例）：
 // 归集（凑批 → 确认三步 → 链上确认；BSC 超每批上限拆批；超每地址上限跳过；确认失败的提示；部分成功、失败）、
@@ -89,18 +89,10 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await admin.click('[data-login] button[type="submit"]');
     await expect(admin.locator('[data-view="app"]')).toBeVisible();
     await actx.storageState({ path: ASTATE });
-    // 初始化 TRON 主助记词：按 K1 新建客户不再需要它（不初始化也不该 503，单元测试 test/wallet-k1.test.js 守着）；
-    // 这里照样初始化，免得 K1 还没实现时后面所有准备步骤一起失败
-    await admin.click('[data-tab="p-wallet"]');
-    await admin.click('text=初始化主助记词');
-    const words = await admin.locator('.mnemonic li').allTextContents();
+    // TRON 主助记词：按 K1 新建客户不再需要它（不初始化也不该 503，单元测试 test/wallet-k1.test.js 守着）；
+    // 后面的旧地址（第 0 批）用例要用，按 Q-A1 后台不再提供初始化，这里造"旧系统早已初始化"的旧数据（服务器只有公钥）
+    const { words } = await legacyMnemonic(admin, B);
     expect(words).toHaveLength(24);
-    await adminOk(admin);
-    for (const [i, n] of [3, 11, 20].entries()) await admin.fill(`#wi-${i}`, words[n - 1]);
-    await admin.fill('#wi-code', await code(st.adminSecret));
-    await adminOk(admin);
-    await expect(admin.locator('[data-pdialog]')).toContainText('初始化完成');
-    await adminOk(admin);
     const r = await wcall('merchant-open', { name: 'Wallet E2E Ltd', email: M_EMAIL, fee_in: { ppm: 10000, fixed: 0, min: 0 }, fee_out: { ppm: 0, fixed: 2000000, min: 0 }, order_mode: { enabled: true, low: 900000, high: 1100000, ttlMin: 30, lookbackH: 24 } });
     expect(r.status).toBe(200);
     await expect.poll(() => mailsTo(M_EMAIL).length).toBeGreaterThan(0);

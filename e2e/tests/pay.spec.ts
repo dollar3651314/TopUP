@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { readJsonl, decodeQP, MAILS, KYB_ENV, DATA_PAY, TMP } from '../stack.mjs';
 // @ts-ignore 与后端同一份 TOTP 实现
 import { totpCode, totpStep } from '../../server/kyb/totp.js';
-import { legacyTron } from './legacy-tron';
+import { legacyTron, legacyMnemonic } from './legacy-tron';
 
 // 收付款端到端（正式构建、真实接口；数据库是内嵌 Postgres，链上用 TronGrid 替身）：
 // 后台初始化 → 钱包初始化（浏览器生成助记词，只提交公钥）→ 开通商户 → 商户设置密码和验证码 → 登录
@@ -84,7 +84,7 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
   });
   test.afterAll(async () => { await actx.close(); await mctx.close(); });
 
-  test('TC-P01 后台初始化并登录；钱包初始化：浏览器生成助记词，只提交公钥', async () => {
+  test('TC-P01 后台初始化并登录；钱包设置：旧地址的主助记词（第 0 批，服务器只有公钥）照常可用，没有"初始化主助记词"', async () => {
     const errs = cspErrors(admin);
     await admin.goto('/admin/');
     await admin.fill('#s-token', KYB_ENV.ADMIN_SETUP_TOKEN); await admin.fill('#s-pw', ADMIN_PW); await admin.fill('#s-pw2', ADMIN_PW);
@@ -97,18 +97,19 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
     await admin.fill('#a-pw', ADMIN_PW); await admin.fill('#a-otp', await code(adminSecret));
     await admin.click('[data-login] button[type="submit"]');
     await expect(admin.locator('[data-view="app"]')).toBeVisible();
+    // Q-A1：后台不再提供"初始化主助记词"。旧地址（第 0 批）的主助记词在旧系统里早已初始化：
+    // 测试进程生成助记词、只把账户级公钥写进旧数据（服务器只有公钥），后面 TC-P06 归集旧地址时在页面里输入助记词签名
+    const legacy = await legacyMnemonic(admin, B);
+    words = legacy.words;
+    expect(words).toHaveLength(24);
     await admin.click('[data-tab="p-wallet"]');
-    await admin.click('text=初始化主助记词');
-    const lis = admin.locator('.mnemonic li');
-    await expect(lis).toHaveCount(24);
-    words = await lis.allTextContents();
-    await adminOk(admin);
-    for (const [i, n] of [3, 11, 20].entries()) await admin.fill(`#wi-${i}`, words[n - 1]);
-    await admin.fill('#wi-code', await code(adminSecret));
-    await adminOk(admin);
-    await expect(admin.locator('[data-pdialog]')).toContainText('初始化完成');
-    await adminOk(admin);
-    await expect(admin.locator('[data-panel="p-wallet"]')).toContainText('已初始化');
+    const wpanel = admin.locator('[data-panel="p-wallet"]');
+    await expect(wpanel.locator('[data-wallet-card="tron"] [data-legacy-addresses]')).toContainText('照常归集');
+    await expect(wpanel).not.toContainText('初始化主助记词');
+    // 服务器认的是这份旧公钥：第 1 个地址和测试自己用助记词推出来的一致
+    const w = await admin.evaluate(async () => (await fetch('/api/wallet/?a=wallet')).json());
+    expect(w.initialized).toBe(true);
+    expect(w.first_address).toBe(legacy.firstAddress);
     // 导航上的数字：没有数据时也显示 0，不出现空圆圈
     for (const k of ['merchants', 'withdrawals', 'anomalies']) await expect(admin.locator(`[data-pcount="${k}"]`)).toHaveText(/^\d+$/);
     expect(errs).toEqual([]);
@@ -239,7 +240,10 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
 
   test('TC-P05 提币：商户提交 → 后台浏览器核对并签名 → 链上确认后完成', async () => {
     await merchant.click('[data-mtab="withdraw"]');
-    await merchant.fill('#mw-to', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'); await merchant.fill('#mw-amt', '50'); await merchant.fill('#mw-cust', 'buyer_1');
+    // 第 3 批：先选"代付"，再选链（TRON），收款地址填在代付的地址框
+    await merchant.locator('input[name="wd-kind"][value="payout"]').check();
+    await merchant.selectOption('#mw-chain', 'tron');
+    await merchant.fill('#mw-pay-to', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'); await merchant.fill('#mw-amt', '50'); await merchant.fill('#mw-cust', 'buyer_1');
     await merchant.fill('#mw-code', await code(merchantSecret));
     await merchant.click('.wd-form button[type="submit"]');
     await expect(merchant.locator('[data-mpanel="withdraw"]')).toContainText('待审核');
@@ -249,8 +253,13 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
     const hot = JSON.parse(readFileSync(new URL('../../config/wallets.json', import.meta.url), 'utf8')).local.hot;
     await fake(admin, 'tron/account', { address: hot, account: { activated: true, trx: 100 * U, trc20: { TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf: 1000 * U } } });
     await admin.click('[data-tab="p-withdrawals"]');
-    await admin.locator('[data-panel="p-withdrawals"] tbody input[type=checkbox]').first().check();
-    await admin.click('[data-panel="p-withdrawals"] .sumbar .btn-primary');
+    // 第 3 批：先逐笔审核（打开这一笔 → 通过），再到 TRON 卡片"核对并签名"
+    await admin.locator('[data-panel="p-withdrawals"] [data-payout-row]').first().click();
+    await expect(admin.locator('[data-pdialog]')).toContainText('50.00 USDT');
+    await adminOk(admin);
+    await expect(admin.locator('[data-pdialog]')).not.toBeVisible();
+    await expect(admin.locator('[data-panel="p-withdrawals"] [data-payout-row]')).toHaveCount(0);
+    await admin.click('[data-panel="p-withdrawals"] [data-payout-sign="tron"]');
     await expect(admin.locator('[data-pdialog]')).toContainText('✓ 一致');
     await admin.fill('#ps-code', await code(adminSecret));
     await admin.fill('#ps-hot', '22'.repeat(32)); // 不是热钱包的私钥：页面拦下
