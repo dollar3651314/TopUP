@@ -429,3 +429,7 @@ tr[data-wait="late"] td:first-child { box-shadow: inset 4px 0 0 var(--danger); }
 .meter-row { width: 100%; height: 8px; accent-color: var(--accent); }
 .decoded-table .ok, .decoded-table .bad { white-space: nowrap; }
 .cell-2.cell-start { align-items: flex-start; justify-items: start; }
+/* 打款审核：超过单笔上限的行标红 */
+tr.row-over td { color: var(--danger); }
+/* 私钥输入框：普通文本框 + 遮盖显示（不用 type=password，浏览器不会提示"保存密码"） */
+.secret-input { -webkit-text-security: disc; text-security: disc; }

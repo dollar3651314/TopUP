@@ -474,7 +474,7 @@ export async function walletTodoItems(ui: WalletUi): Promise<{ items: Todo[]; fa
   const items: Todo[] = [];
   const failed: string[] = [];
   const get = (a: string, name: string, qs = '') => ui.call(a, undefined, qs).catch(() => { failed.push(name); return null; });
-  const [s, c, w, probs, all] = await Promise.all([get('wallet-sweep', '归集'), get('wallet-chains', '每条链的状态'), get('withdrawals', '提币'), get('wallet-sweep-batches', '归集批次', '&status=partial,failed'), get('wallet-sweep-batches', '归集批次')]);
+  const [s, c, w, probs, all] = await Promise.all([get('wallet-sweep', '归集'), get('wallet-chains', '每条链的状态'), get('withdrawals', '打款'), get('wallet-sweep-batches', '归集批次', '&status=partial,failed'), get('wallet-sweep-batches', '归集批次')]);
   for (const ch of c?.chains || []) {
     if (ch.status === 'scan_stalled' || ch.status === 'onchain_mismatch' || ch.status === 'not_configured' && ch.rpc) items.push({ bad: true, since: null, text: `${CHAIN_NAME[ch.chain]}：${ch.status === 'scan_stalled' ? '扫块停了' : ch.status === 'onchain_mismatch' ? '合约参数和链上不一致，已停用' : '合约地址没配齐'}`, tab: 'p-status', label: '看系统状态' });
     if (ch.operator?.low) items.push({ bad: true, since: null, text: `${CHAIN_NAME[ch.chain]} 发起账户的 ${ch.operator.symbol} 不够付手续费`, sub: `现在有 ${gasText(ch.operator)}；钱都还在原地址`, tab: 'p-sweep', label: '去补手续费' });
@@ -486,7 +486,17 @@ export async function walletTodoItems(ui: WalletUi): Promise<{ items: Todo[]; fa
   for (const ch of s?.chains || []) for (const b of ch.batches || []) {
     if (b.status === 'awaiting_approval') items.push({ bad: false, since: b.created_at, text: `确认归集 ${b.id}（${CHAIN_NAME[b.chain]}，${usd(b.total_usdt)} USDT）`, sub: `${b.address_count} 个地址${b.split_of > 1 ? ` · 超过每批上限，系统分成了 ${b.split_of} 批` : ''}`, tab: 'p-sweep', label: '去确认' });
   }
-  for (const x of w?.items || []) if (x.status === 'pending') items.push({ bad: false, since: x.created_at, text: `审核提币 ${x.id}（${usd(x.amount)} USDT）`, tab: 'p-withdrawals', label: '去审核提币' });
+  // 待审核的打款：单笔一行；商户批量（同一个批次号）合成一行
+  const groups = new Map<string, { since: string; n: number; total: number }>();
+  for (const x of w?.items || []) {
+    if (x.status !== 'pending') continue;
+    if (!x.batch_no) { items.push({ bad: false, since: x.created_at, text: `审核打款 ${x.id}（${usd(x.amount)} USDT）`, tab: 'p-withdrawals', label: '去审核打款' }); continue; }
+    const g = groups.get(x.batch_no) || { since: x.created_at, n: 0, total: 0 };
+    g.n++; g.total += parseUsdt(String(x.amount ?? '0')) ?? 0;
+    if (Date.parse(x.created_at) < Date.parse(g.since)) g.since = x.created_at;
+    groups.set(x.batch_no, g);
+  }
+  for (const [no, g] of groups) items.push({ bad: false, since: g.since, text: `审核批量打款 ${no}（${g.n} 笔，${fmtUsdt(g.total)} USDT）`, tab: 'p-withdrawals', label: '去逐行审' });
   items.sort((a, b) => (a.bad !== b.bad ? (a.bad ? -1 : 1) : (Date.parse(a.since || '') || 0) - (Date.parse(b.since || '') || 0)));
   return { items, failed, sweep: s, chains: c };
 }
@@ -505,7 +515,7 @@ export async function walletTodo(ui: WalletUi): Promise<HTMLElement> {
     // 读取失败时大卡片不放按钮，"重试"只在下面表格那一行（一个按钮）
     const top = errRow ? hero('bad', '待处理读取失败', `${failed.join('、')}没读到，现在不知道还有没有别的事要做。点下面的"重试"；一直失败看"系统状态"。${items.length ? `已读到的 ${items.length} 件在下面。` : ''}`)
       : first ? hero(first.bad ? 'bad' : 'warn', `有 ${all.length} 件事要处理`, first.sub ? `${first.text} · ${first.sub}` : first.text, { label: first.label, onClick: () => (first.act ? first.act() : ui.go(first.tab)) })
-      : hero('ok', '现在没事要做', s?.next_slot ? `下一次凑归集批次在 ${t(s.next_slot)}；凑好了会发邮件给你，这里也会出现。` : '有新的提币、归集批次时会出现在这里。');
+      : hero('ok', '现在没事要做', s?.next_slot ? `下一次凑归集批次在 ${t(s.next_slot)}；凑好了会发邮件给你，这里也会出现。` : '有新的打款、归集批次时会出现在这里。');
     box.replaceChildren(top,
       h('div', { class: 'toolbar' }, h('h2', { class: 'h-sm m0' }, `待处理（${all.length}）`), h('span', { class: 'muted' }, '按等了多久排，出错的排最前')),
       table(['要做的事', '等了多久', ''], all.map((x) => [

@@ -14,7 +14,7 @@ export interface OverviewData {
     collected_total: Amt; deposit_count: Num; owed_total: Amt; owed_available: Amt; owed_frozen: Amt;
     assets_total: Amt; unswept_total: Amt; hot_usdt: Amt; cold_usdt: Amt; cold_configured: boolean;
     profit_total: Amt; profit_now: Amt; profit_after_sweep: Amt; income_fee_in: Amt; income_fee_out: Amt; income_dust: Amt;
-    by_chain: Record<string, Partial<{ hot_usdt: Amt; cold_usdt: Amt }>>;
+    by_chain: Record<string, Partial<{ hot_usdt: Amt; cold_usdt: Amt; hot_enabled: boolean }>>;
   }>;
   todo: Partial<{ withdrawals_count: Num; withdrawals_amount: Amt; kyb_pending: Num; merchants_to_open: Num; anomalies: Num; callbacks_failed: Num }>;
   sweep: Partial<{ unswept_total: Amt; address_count: Num; over_threshold: Num; over_threshold_total: Amt; threshold: Amt; hot_trx: Amt; energy_left: Num; energy_per_sweep: Num; month_sweep_trx: Amt;
@@ -83,7 +83,7 @@ function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, Par
     h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, '概览'), h('div', { class: 'tool-actions' },
       statusLine ? h('span', { class: 'muted', 'data-ov-status': '' }, statusLine) : null,
       h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-ov-refresh': '', disabled: loading, onclick: refresh }, loading ? '加载中…' : '刷新'))),
-    h('p', { class: 'hint muted' }, '金额单位都是 USDT，三条链（TRON、以太坊、BSC）合在一起算。热钱包和冷钱包的余额实时查询链上，客户地址里没归集的钱按账本计算。以太坊、BSC 第 1 批只有冷钱包（归集直接进冷钱包），没有热钱包。'),
+    h('p', { class: 'hint muted' }, '金额单位都是 USDT，三条链（TRON、以太坊、BSC）合在一起算。热钱包和冷钱包的余额实时查询链上，客户地址里没归集的钱按账本计算。以太坊、BSC 归集直接进冷钱包；开通了批量打款的链，热钱包余额也算进平台资产。'),
 
     // ① 资金
     h('h2', { class: 'h-sm' }, '资金'),
@@ -105,7 +105,7 @@ function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, Par
     // ② 待处理
     h('h2', { class: 'h-sm' }, '待处理'),
     h('div', { class: 'todo-grid' },
-      link('笔提币待审核', 'p-withdrawals', t.withdrawals_count, t.withdrawals_count ? `${usd(t.withdrawals_amount)} USDT` : ''),
+      link('笔打款待审核', 'p-withdrawals', t.withdrawals_count, t.withdrawals_count ? `${usd(t.withdrawals_amount)} USDT` : ''),
       link('份开户申请待审核', 'apps', t.kyb_pending),
       link('个商户待开通收付款', 'p-merchants', t.merchants_to_open),
       link('条异常到账未处理', 'p-anomalies', t.anomalies),
@@ -143,15 +143,16 @@ function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, Par
   );
 }
 
-/** 资金按链拆开：未归集 + 热钱包 + 冷钱包（以太坊、BSC 没有热钱包） */
+/** 资金按链拆开：未归集 + 热钱包 + 冷钱包（以太坊、BSC 的热钱包只有开通了批量打款才有） */
 function fundsByChain(d: OverviewData) {
   const f = d.funds, s = d.sweep;
   const rows = CHAINS.map((c) => {
     const w = f.by_chain?.[c], u = s.by_chain?.[c];
-    const hot = c === 'tron' ? units(w?.hot_usdt) : 0, cold = units(w?.cold_usdt), uns = units(u?.unswept_total);
+    const hotOff = c !== 'tron' && w?.hot_enabled !== true;
+    const hot = hotOff ? 0 : units(w?.hot_usdt), cold = units(w?.cold_usdt), uns = units(u?.unswept_total);
     const off = c !== 'tron' && u?.enabled === false;
     const sum = hot !== null && cold !== null && uns !== null ? hot + cold + uns : null;
-    return [chainTag(c), uns === null ? '—' : fmtUsdt(uns), c === 'tron' ? (hot === null ? '—' : fmtUsdt(hot)) : h('span', { class: 'muted' }, '没有（第 1 批）'),
+    return [chainTag(c), uns === null ? '—' : fmtUsdt(uns), hotOff ? h('span', { class: 'muted' }, '没开通打款') : hot === null ? '—' : fmtUsdt(hot),
       off ? h('span', { class: 'muted' }, '未开通') : cold === null ? '—' : fmtUsdt(cold), sum === null ? '—' : h('b', {}, fmtUsdt(sum))];
   });
   // 显示"—"的地方写原因：哪条链的哪个余额暂时查不到（数据都回来以后才判断，加载中不算）
@@ -160,7 +161,7 @@ function fundsByChain(d: OverviewData) {
     const w = f.by_chain[c], u = s.by_chain?.[c];
     if (c !== 'tron' && u?.enabled === false) continue;
     if (!w) continue; // 没开通的链
-    if (c === 'tron' && units(w.hot_usdt) === null) why.push('TRON 热钱包余额暂时查不到');
+    if ((c === 'tron' || w.hot_enabled) && units(w.hot_usdt) === null) why.push(`${CHAIN_NAME[c]} 热钱包余额暂时查不到`);
     if (units(w.cold_usdt) === null) why.push(`${CHAIN_NAME[c]} 冷钱包余额暂时查不到`);
   }
   return h('details', { class: 'funds-chains', open: true, 'data-funds-chains': '' }, h('summary', {}, '平台资产按链拆开（USDT）'),

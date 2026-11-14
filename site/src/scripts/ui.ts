@@ -63,6 +63,19 @@ export function toast(root: ParentNode, sel: string, msg: string) {
 }
 
 /** 通用对话框：onOk 返回 false 时不关闭（例如校验不通过） */
+/**
+ * 私钥、助记词输入框：普通文本框 + 遮盖显示（.secret-input），autocomplete=off——不用 type=password，浏览器就不会提示"保存密码"、也不会自动填。
+ * 带 data-secret：弹窗关掉、换内容时由 makeDialog 清空（签名失败、直接关窗也不会留在页面里）。
+ */
+export function secretInput(multiline = false): HTMLInputElement | HTMLTextAreaElement {
+  const attrs = { autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: false, 'data-secret': '', 'data-lpignore': 'true', 'data-1p-ignore': '', class: 'mono-input secret-input' };
+  return (multiline ? h('textarea', { rows: '3', ...attrs }) : h('input', { type: 'text', ...attrs })) as HTMLInputElement | HTMLTextAreaElement;
+}
+/** 清空一块区域里所有私钥、助记词输入框 */
+export function wipeSecrets(scope: ParentNode) {
+  scope.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-secret]').forEach((el) => { el.value = ''; });
+}
+
 export function makeDialog(root: ParentNode, prefix: string) {
   const dlg = root.querySelector<HTMLDialogElement>(`[data-${prefix}dialog]`)!;
   const form = root.querySelector<HTMLFormElement>(`[data-${prefix}dialog-form]`)!;
@@ -72,6 +85,8 @@ export function makeDialog(root: ParentNode, prefix: string) {
   const cancel = form.querySelector<HTMLButtonElement>('button[value="cancel"]');
   const cancelText = cancel?.textContent || '';
   let handler: (() => boolean | void | Promise<boolean | void>) | null = null;
+  // 关窗（取消、Esc、签完）时清空私钥输入框
+  dlg.addEventListener('close', () => wipeSecrets(body));
   form.addEventListener('submit', async (e) => {
     const sub = (e as SubmitEvent).submitter as HTMLButtonElement | null;
     if (sub?.value !== 'ok' || !handler) return;
@@ -80,6 +95,7 @@ export function makeDialog(root: ParentNode, prefix: string) {
     if (r !== false) dlg.close();
   });
   return (t: string, content: Node, okText: string, onOk: typeof handler, danger = false, hideOk = false) => {
+    wipeSecrets(body); // 换下一步之前，上一步的私钥输入框先清空
     title.textContent = t; body.replaceChildren(content);
     ok.textContent = okText; ok.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`; ok.hidden = hideOk; ok.disabled = false;
     // 只看信息的弹窗（hideOk）：只留一个按钮，文字用 okText（例如"关闭"），不再出现意思重复的"取消"和"确定"

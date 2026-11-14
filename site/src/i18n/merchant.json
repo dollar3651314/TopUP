@@ -68,7 +68,7 @@
     "overview": {
       "title": "Overview",
       "available": "Available balance",
-      "frozen": "Frozen (withdrawals under review)",
+      "frozen": "Frozen (payouts under review)",
       "frozenSub": "{n} pending",
       "today": "Received today",
       "todaySub": "{n} payments · fees {fee}",
@@ -247,6 +247,7 @@
         "web": "Dashboard",
         "api": "API"
       },
+      "sourceBatch": "Batch {no}",
       "cancel": "Cancel",
       "cancelConfirm": "Cancel this withdrawal? The frozen amount returns to your available balance.",
       "cancelled": "Withdrawal cancelled. {amount} USDT unfrozen.",
@@ -426,6 +427,7 @@
       "chainsBody": "Each customer gets one permanent address per chain, generated when it makes a deposit on that chain. The Ethereum and BSC addresses are the same string (same contracts on both chains), but tell the payer which network to use."
     },
     "errors": {
+      "batch_item_cancel": "This item belongs to a batch payout: cancel it from Batch payouts (only the items not yet reviewed are cancelled).",
       "locked": "Too many wrong attempts. Sign-in is locked for 15 minutes.",
       "bad_code": "The authenticator code is wrong or already used. Wait for the next code.",
       "insufficient_balance": "Insufficient balance: amount + fee exceeds your available balance.",
@@ -625,7 +627,7 @@
     "overview": {
       "title": "概览",
       "available": "可用余额",
-      "frozen": "冻结中（提币审核中）",
+      "frozen": "冻结中（打款审核中）",
       "frozenSub": "{n} 笔待处理",
       "today": "今日收款",
       "todaySub": "{n} 笔 · 手续费 {fee}",
@@ -804,6 +806,7 @@
         "web": "后台",
         "api": "API"
       },
+      "sourceBatch": "批量 {no}",
       "cancel": "取消",
       "cancelConfirm": "确定取消这笔提币？冻结的金额会退回可用余额。",
       "cancelled": "已取消，{amount} USDT 已解冻。",
@@ -983,6 +986,7 @@
       "chainsBody": "每个客户每条链一个永久地址，在客户发起充值时按链生成。以太坊和 BSC 的地址是同一串（同一套合约在两条链上地址相同），但付款时要按付款人用的网络告诉他。"
     },
     "errors": {
+      "batch_item_cancel": "这笔属于批量打款：请到「批量打款」里整批取消（只取消还没审核的部分）。",
       "locked": "连续输错次数过多，已锁定 15 分钟。",
       "bad_code": "动态码不正确或已经用过，请等下一个动态码。",
       "insufficient_balance": "余额不足：金额加手续费超过了可用余额。",

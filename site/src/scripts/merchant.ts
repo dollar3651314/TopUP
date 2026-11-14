@@ -485,7 +485,8 @@ render.withdraw = async (p) => {
     const cash = kindCash.checked, ch = chainSel.value;
     const a = parseUsdt(amt.value);
     const cid = custIn.value.trim();
-    const okAddr = (v: string) => (ch === 'tron' ? isTronAddress(v) : isChecksumAddress(v.trim()));
+    // 和服务器（server/pay/core.js 的 chainAddress）同一套规则：全 0 地址付不出去，不收
+    const okAddr = (v: string) => (ch === 'tron' ? isTronAddress(v) && v.trim() !== 'T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb' : isChecksumAddress(v.trim()) && !/^0x0{40}$/i.test(v.trim()));
     let bad = cash ? !regOf(ch).length : fieldErr(payTo, okAddr(payTo.value) ? null : tpl(cw.errAddressChain, { net: netName(ch) }));
     if (!cash) bad = fieldErr(custIn, !cid || CUST_RE.test(cid) ? null : c.orders.create.errCustomer) || bad;
     const f = a ? calcFee(a, me.fee_out) : 0;
@@ -512,9 +513,10 @@ render.withdraw = async (p) => {
     h('h2', { class: 'h-sm' }, cw.history),
     table([cc.time, cc.id, cw.chainCol, cc.kind, cc.customer, cc.to, cc.amount, cc.fee, cc.source, cc.status], list.map((w: Wd) => {
       const st = h('span', { class: 'status-cell' }, wdBadge(w.status));
-      if (w.status === 'pending') st.append(h('button', { type: 'button', class: 'link-btn', onclick: () => cancelWd(w, p) }, cw.cancel));
+      // 批量打款里的单只能看：要取消就在"批量打款"里整批取消还没审核的部分
+      if (w.status === 'pending' && !w.batch_no) st.append(h('button', { type: 'button', class: 'link-btn', onclick: () => cancelWd(w, p) }, cw.cancel));
       if (w.reason) st.append(h('span', { class: 'hint muted' }, `${cw.reason}：${w.reason}`));
-      return [t(w.created_at), mono(w.withdrawal_no), chainTag(w.chain || 'tron'), cw.kinds[w.kind], w.customer_id ? mono(w.customer_id) : '—', mono(shortAddr(w.to), w.to), usd(w.amount), usd(w.fee), cw.sources[w.source], st];
+      return [t(w.created_at), mono(w.withdrawal_no), chainTag(w.chain || 'tron'), cw.kinds[w.kind], w.customer_id ? mono(w.customer_id) : '—', mono(shortAddr(w.to), w.to), usd(w.amount), usd(w.fee), w.batch_no ? tpl(cw.sourceBatch, { no: w.batch_no }) : cw.sources[w.source], st];
     }), c.common.none, { page: pg(list) }),
   );
 };
