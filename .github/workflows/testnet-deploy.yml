@@ -50,13 +50,15 @@ jobs:
     timeout-minutes: 40
     environment: testnet
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
         with:
           submodules: recursive
-      - uses: foundry-rs/foundry-toolchain@v1
+          # 不把 GITHUB_TOKEN 留在 .git/config 里（后面步骤的代码拿不到它）
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1（v1.9.2）
         with:
           version: v1.5.1
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
         with:
           node-version: 26
           cache: npm
@@ -82,7 +84,7 @@ jobs:
         run: node scripts/testnet/deploy.mjs
       - name: 保存地址清单（只有公开地址和交易号）
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5（v5.0.0）
         with:
           name: testnet-deploy
           path: testnet-deploy/

@@ -25,6 +25,8 @@ flowchart LR
 镜像里带着 `deploy/`（`/topup-kit`），服务器每次更新版本时从镜像里取出部署工具包，工具包和应用永远是同一个提交。
 
 ## 2. 命令
+第一次部署之前（只做一次）：第一次合并到 `staging`、CI 的 image 推送成功之后，把镜像包设成公开——GitHub 头像 → Your profile → Packages → `topup` → Package settings → Danger Zone → Change visibility → Public。服务器不登录 GitHub，是匿名拉镜像；包是私有的话第一步就拉不到。镜像里只有公开仓库的代码，没有密钥。（未验证：GitHub 文档说第一次推送的包默认私有，从公开仓库推送时会不会自动公开没有核实；包页面已经显示 Public 就跳过这一步。）
+
 第一次部署是一条命令（管理员在云控制台的"远程连接"终端里粘贴，镜像名和域名换成实际的）：
 
 ```bash
@@ -89,4 +91,4 @@ Nginx 用 `$remote_addr` 覆盖 `X-Real-IP` 和 `X-Forwarded-For`；web 设 `TRU
 docker build --build-arg APP_ENV=staging -t topup-drill-base .
 sudo bash e2e/deploy-drill.sh topup-drill-base
 ```
-在临时目录里跑 10 个场景（外加发起账户生成、初始化口令）：第一次部署（另一个项目占着 80、443）、重复运行、经 Nginx 访问和真实 IP、填密钥（名字和值写错）、自动更新成功、新版本起不来自动换回、手动回滚和重试、备份和恢复演练、每 5 分钟检查、内存不够和 stop / start。演练模式不装软件、不碰 systemd、证书自签名，所以这三样要在第一次真实部署时逐步确认。
+在临时目录里跑 11 个场景（外加发起账户生成、初始化口令）：第一次部署（另一个项目占着 80、443）、重复运行、经 Nginx 访问和真实 IP、填密钥（名字和值写错）、自动更新成功、新版本起不来自动换回、手动回滚和重试、备份和恢复演练、每 5 分钟检查、内存不够和 stop / start、新版本"没活"（web 初始化失败；新 worker 不扫链而旧 worker 的扫链时间还新鲜）也要换回。演练模式不装软件、不碰 systemd、证书自签名，所以这三样要在第一次真实部署时逐步确认。

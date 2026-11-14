@@ -179,6 +179,22 @@ out=$(TOPUP_DRILL_MEM_MB=900 T start 2>&1); check "可用内存 900 MB：不启�
 out=$(T start 2>&1); check "start：健康检查通过，版本 = v2" "grep -q 'TopUP 已启动' <<< \"\$out\" && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\"' > /dev/null"
 docker stats --no-stream --format '    {{.Name}} {{.MemUsage}}' $(docker ps -q --filter label=com.docker.compose.project=topup)
 
+echo "== 场景 11：新版本\"没活\"也要换回（web 初始化失败；新 worker 不扫链但旧 worker 的扫链时间还新鲜）"
+# vA：web 的数据库地址指向不存在的端口（db / storage / secret 照样是 true，健康检查里没有 wallet），worker 正常
+# vB：worker 容器在运行但不启动 worker（旧 worker 留下的扫链时间还在 5 分钟内）
+vA=$(printf 'a%.0s' $(seq 40)); vB=$(printf 'b%.0s' $(seq 40))
+mk "$vA" 'CMD ["sh", "-c", "DATABASE_URL=postgres://topup:x@127.0.0.1:1/topup exec node server/web.js"]'
+mk "$vB" 'ENTRYPOINT ["sh", "-c", "case \"$*\" in *worker.js*) echo worker-disabled; exec sleep 3600;; esac; exec \"$@\"", "sh"]
+CMD ["node", "server/web.js"]'
+kitimg "$vA"; kitimg "$vB"
+h() { curl -s http://127.0.0.1:18080/api/health/; }
+fresh() { for i in $(seq 1 30); do h | jq -e '.worker.ok == true and .worker.age_s <= 20' > /dev/null && return 0; sleep 2; done; return 1; }
+fresh; stage "$vB"; TOPUP_WAIT_S=90 T update > "$WORK/s11b.txt" 2>&1; rc=$?
+check "vB（新 worker 不扫链）：判为没活，换回 v2，记进 state/skip" "[ $rc != 0 ] && h | jq -e '.commit == \"${v2:0:7}\"' > /dev/null && [ \"\$(cat '$TOPUP_DIR/state/skip')\" = '$vB' ]"
+T retry > /dev/null 2>&1; fresh; stage "$vA"; TOPUP_WAIT_S=90 T update > "$WORK/s11a.txt" 2>&1; rc=$?
+check "vA（web 收付款初始化失败）：判为没活，换回 v2，记进 state/skip" "[ $rc != 0 ] && h | jq -e '.commit == \"${v2:0:7}\"' > /dev/null && [ \"\$(cat '$TOPUP_DIR/state/skip')\" = '$vA' ]"
+T retry > /dev/null 2>&1; stage "$v2"
+
 echo
 echo "演练结果：通过 $pass，失败 $fail"
 [ "$fail" = 0 ]
