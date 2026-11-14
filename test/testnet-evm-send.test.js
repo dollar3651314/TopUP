@@ -2,7 +2,7 @@
 // 每笔核对回执（失败立即停、写清楚）、对齐 nonce。节点用替身（记录每次调用），不连真实网络。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { gasLimitFor, preflight, sendAll, alignNonce, pickGasPrice, waitReceipt, TX_GAS_CAP } from '../scripts/testnet/evm-send.mjs';
+import { gasLimitFor, preflight, sendAll, alignNonce, pickGasPrice, waitReceipt, TX_GAS_CAP, ALIGN_MAX } from '../scripts/testnet/evm-send.mjs';
 import { addressOfKey } from '../server/wallet/evm-tx.js';
 
 const KEY = '0x' + '11'.repeat(32);
@@ -10,7 +10,7 @@ const FROM = addressOfKey(KEY);
 const hex = (n) => '0x' + BigInt(n).toString(16);
 
 /** 节点替身：nonce 随发出的交易增加；receipts 按发出顺序给回执（函数，拿到 gas limit） */
-function fakeNode({ nonce = 0, balance = 10n ** 18n, estimate = () => 100_000, simulate = null, receipts = [], gasPrice = 10n ** 9n } = {}) {
+function fakeNode({ nonce = 0, balance = 10n ** 18n, estimate = () => 100_000, simulate = null, receipts = [], gasPrice = 10n ** 9n, sendError = null, wrongHash = false } = {}) {
   const calls = [];
   const sent = [];
   const state = { nonce };
@@ -43,7 +43,9 @@ function fakeNode({ nonce = 0, balance = 10n ** 18n, estimate = () => 100_000, s
   // eth_sendRawTransaction 返回交易号：用 keccak(raw)，和 signLegacyTx 算的一致
   const wrapped = async (method, params) => {
     if (method === 'eth_sendRawTransaction') {
+      if (sendError) { calls.push(method); throw new Error(sendError); }
       await rpc(method, params);
+      if (wrongHash) return '0x' + '00'.repeat(32);
       const { keccakHex } = await import('../server/wallet/evm-tx.js');
       return keccakHex(Buffer.from(params[0].slice(2), 'hex'));
     }
@@ -113,12 +115,12 @@ test('回执 status 0（gas 用光）：立即停，后面的不发，错误写�
 
 test('合约地址和 forge 算的不一样、nonce 被别的交易占了、迟迟不上链：都停下', async () => {
   const mism = fakeNode({ receipts: [{ status: '0x1', gasUsed: '0x1', blockNumber: '0x1', contractAddress: '0x' + 'cd'.repeat(20) }] });
-  await assert.rejects(sendAll(mism.rpc, { key: KEY, from: FROM, chainId: 1, gasPrice: 1n, txs: [createTx(0)], wait: fastWait }), /和 forge 算的 .* 不一样/);
+  await assert.rejects(sendAll(mism.rpc, { key: KEY, from: FROM, chainId: 11155111, gasPrice: 1n, txs: [createTx(0)], wait: fastWait }), /和 forge 算的 .* 不一样/);
   const busy = fakeNode({ nonce: 5 });
-  await assert.rejects(sendAll(busy.rpc, { key: KEY, from: FROM, chainId: 1, gasPrice: 1n, txs: [createTx(4)], wait: fastWait }), /nonce 是 5，不是 4/);
+  await assert.rejects(sendAll(busy.rpc, { key: KEY, from: FROM, chainId: 11155111, gasPrice: 1n, txs: [createTx(4)], wait: fastWait }), /nonce 是 5，不是 4/);
   assert.equal(busy.sent.length, 0);
   const slow = fakeNode({ receipts: [null] });
-  await assert.rejects(sendAll(slow.rpc, { key: KEY, from: FROM, chainId: 1, gasPrice: 1n, txs: [createTx(0, 'X', null), createTx(1)], wait: fastWait }), /还没有上链。已停止/);
+  await assert.rejects(sendAll(slow.rpc, { key: KEY, from: FROM, chainId: 11155111, gasPrice: 1n, txs: [createTx(0, 'X', null), createTx(1)], wait: fastWait }), /还没有上链。已停止/);
   assert.equal(slow.sent.length, 1);
   assert.equal(await waitReceipt(async () => null, '0x', fastWait), null);
 });
@@ -132,4 +134,38 @@ test('对齐 nonce：小于起始 nonce 时给自己转 0 推上去；已经超�
   assert.equal(await alignNonce(n.rpc, { key: KEY, from: FROM, chainId: 97, target: 1, gasPrice: 1n, wait: fastWait }), 0);
   await assert.rejects(alignNonce(fakeNode({ nonce: 2 }).rpc, { key: KEY, from: FROM, chainId: 97, target: 1, gasPrice: 1n, wait: fastWait }), /nonce 已经是 2，大于起始 nonce 1/);
   await assert.rejects(alignNonce(fakeNode({ nonce: 0, balance: 1n }).rpc, { key: KEY, from: FROM, chainId: 97, target: 3, gasPrice: 1n, wait: fastWait }), /部署账户只有/);
+});
+
+test('主网（链 ID 1、56）：sendAll、alignNonce 自己拒绝，一笔都不发', async () => {
+  for (const chainId of [1, 56]) {
+    const n = fakeNode();
+    await assert.rejects(sendAll(n.rpc, { key: KEY, from: FROM, chainId, gasPrice: 1n, txs: [createTx(0)], wait: fastWait }), /是主网/);
+    await assert.rejects(alignNonce(n.rpc, { key: KEY, from: FROM, chainId, target: 1, gasPrice: 1n, wait: fastWait }), /是主网/);
+    assert.equal(n.sent.length, 0);
+    assert.equal(n.calls.length, 0);
+  }
+});
+
+test(`对齐 nonce：一次最多 ${ALIGN_MAX} 笔，超过就停（一笔不发）`, async () => {
+  const n = fakeNode({ nonce: 0, estimate: () => 21_000 });
+  await assert.rejects(alignNonce(n.rpc, { key: KEY, from: FROM, chainId: 97, target: ALIGN_MAX + 1, gasPrice: 1n, wait: fastWait }), /超过一次最多 10 笔/);
+  assert.equal(n.sent.length, 0);
+  const ok = fakeNode({ nonce: 0, estimate: () => 21_000 });
+  assert.equal(await alignNonce(ok.rpc, { key: KEY, from: FROM, chainId: 97, target: ALIGN_MAX, gasPrice: 1n, wait: fastWait }), ALIGN_MAX);
+});
+
+test('发送出错、节点返回的交易号不对：这笔也记下来（本地交易号、nonce）再停', async () => {
+  const recs = [];
+  const n = fakeNode({ nonce: 3, sendError: 'connection reset' });
+  await assert.rejects(sendAll(n.rpc, { key: KEY, from: FROM, chainId: 11155111, gasPrice: 1n, txs: [createTx(3), createTx(4)], onTx: (t) => recs.push(t), wait: fastWait }), /发送出错（connection reset），本地算的交易号 0x[0-9a-f]{64}/);
+  assert.equal(recs.length, 1);
+  assert.equal(recs[0].status, 'send-error');
+  assert.equal(recs[0].nonce, 3);
+  assert.match(recs[0].hash, /^0x[0-9a-f]{64}$/);
+  const recs2 = [];
+  const w = fakeNode({ wrongHash: true });
+  await assert.rejects(sendAll(w.rpc, { key: KEY, from: FROM, chainId: 11155111, gasPrice: 1n, txs: [createTx(0), createTx(1)], onTx: (t) => recs2.push(t), wait: fastWait }), /交易号 0x0{64} 和本地算的 0x[0-9a-f]{64} 不一样/);
+  assert.equal(recs2.length, 1);
+  assert.equal(recs2[0].status, 'hash-mismatch');
+  assert.equal(w.sent.length, 1);
 });

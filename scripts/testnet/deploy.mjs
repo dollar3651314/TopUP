@@ -58,9 +58,31 @@ function key() {
   return k.toLowerCase();
 }
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ''; } };
+
+/**
+ * 遮盖表：私钥（十六进制、十进制）、两个节点地址（可能带 key）、TronGrid key。节点地址还把路径和参数里 8 位以上的每一段单独遮盖
+ * （地址被规范化、截断后也遮得住）。forge 的输出、错误信息、deployment.json、summary.md、运行摘要写出前都过一遍。
+ */
+function secretList(k = '') {
+  const list = [];
+  if (k) list.push(k, BigInt('0x' + k).toString(10));
+  for (const u of [env.TESTNET_ETH_RPC_URL, env.TESTNET_BSC_RPC_URL, env.TESTNET_TRON_NODE]) {
+    if (!u || isLocalHost(u)) continue;
+    list.push(u);
+    for (const part of String(u).split(/[/?&=#:@]+/)) if (part.length >= 8 && !/^(https?|localhost)$/i.test(part) && !/\.(com|io|org|net|xyz|dev)$/i.test(part)) list.push(part);
+  }
+  if (env.TRONGRID_API_KEY) list.push(env.TRONGRID_API_KEY);
+  return [...new Set(list.map(String).filter((x) => x.length >= 6))].sort((a, b) => b.length - a.length);
+}
+function maskSecrets(text, k = '') {
+  let t = String(text);
+  if (k) t = t.replace(/0x([0-9a-f]{64})/gi, (m, h) => (h.toLowerCase() === k ? '<已遮盖>' : m));
+  for (const x of secretList(k)) t = t.split(x).join('<已遮盖>');
+  return t;
+}
 const isLocalHost = (u) => ['127.0.0.1', 'localhost', '::1'].includes(hostOf(u));
 
-/** JSON-RPC（10 秒超时，连接错误和 429 / 5xx 退避重试 3 次）；地址里可能有 key，错误信息里不带地址 */
+/** JSON-RPC（10 秒超时，连接错误和 429 / 5xx 退避重试 3 次）；地址里可能有 key：fetch 自己的错误信息（例如"Failed to parse URL from <地址>"）不往外带，只带类别 */
 async function rpc(url, method, params = []) {
   let last;
   for (let i = 0; i <= 3; i++) {
@@ -68,15 +90,23 @@ async function rpc(url, method, params = []) {
       const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(10_000) });
       if (res.status === 429 || res.status >= 500) throw Object.assign(new Error(`HTTP ${res.status}`), { retry: true });
       const j = await res.json();
-      if (j.error) throw new Error(`${method}: ${j.error.message || JSON.stringify(j.error)}`);
+      if (j.error) throw Object.assign(new Error(`${method}: ${j.error.message || JSON.stringify(j.error)}`), { rpcError: true });
       return j.result;
     } catch (e) {
-      last = e;
+      last = e.rpcError || e.retry ? e : new Error(fetchErrorText(e));
+      last.retry = e.retry; last.name = e.name; last.cause = e.cause;
       if (!(e.retry || e.name === 'TimeoutError' || e.cause) || i === 3) break;
       await new Promise((r) => setTimeout(r, 1000 * 2 ** i));
     }
   }
-  throw new Error(`节点请求失败（${method}）：${last?.message}`);
+  throw new Error(maskSecrets(`节点请求失败（${method}）：${last?.message}`));
+}
+/** fetch 抛出的错误 → 不含地址的说明 */
+function fetchErrorText(e) {
+  if (e.name === 'TimeoutError') return '超时（10 秒）';
+  if (/parse URL|Invalid URL/i.test(String(e.message)) || e.code === 'ERR_INVALID_URL') return '节点地址格式不对（要以 https:// 开头的完整地址）';
+  const code = e.cause?.code || e.code || '';
+  return `连接失败${code ? `（${String(code).replace(/[^A-Z0-9_]/gi, '')}）` : ''}`;
 }
 
 /**
@@ -86,14 +116,13 @@ async function rpc(url, method, params = []) {
  */
 function forge(c, script, extraEnv, k) {
   const args = ['script', script, '--rpc-url', c.rpc];
-  const secrets = [k, BigInt('0x' + k).toString(10), ...(c.rpc && !isLocalHost(c.rpc) ? [c.rpc] : [])];
   return new Promise((resolve, reject) => {
     // 空着的参数不传（forge 的 vm.envOr 遇到空字符串会报解析错误，而不是用默认值）
     // 私钥只给部署脚本（核对脚本不需要）
     const childEnv = Object.fromEntries(Object.entries({ ...env, ...extraEnv, TOPUP_TESTNET_DEPLOYER_KEY: script.startsWith('script/DeployTestnet') ? '0x' + k : '' }).filter(([, v]) => v !== '' && v !== undefined));
     const p = spawn('forge', args, { cwd: join(ROOT, 'contracts'), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
     let text = '';
-    const mask = (s) => secrets.reduce((t, x) => t.split(x).join('<已遮盖>'), String(s).replace(/0x([0-9a-f]{64})/gi, (m, h) => (h.toLowerCase() === k ? '<已遮盖>' : m)));
+    const mask = (s) => maskSecrets(s, k);
     // 按行输出（一个值不会被切在两块数据之间漏掉遮盖）
     let buf = { out: '', err: '' };
     const feed = (which, d, w) => { buf[which] += d; const lines = buf[which].split('\n'); buf[which] = lines.pop(); for (const l of lines) { const m = mask(l); text += m + '\n'; w.write(m + '\n'); } };
@@ -297,7 +326,7 @@ function summary() {
     lines.push(`## ${c.name}${c.chainId ? `（链 ID ${c.chainId}）` : c.network ? `（${c.network}）` : ''}`, '');
     lines.push(`- 部署账户 ${c.deployer}${c.startNonce !== undefined ? `（起始 nonce ${c.startNonce}）` : ''}`, `- 发起账户 ${c.operator}；所有者交给 ${c.owner}（等它调用 acceptOwnership 接受）`);
     lines.push(`- 用户 1 的充值地址 ${c.user1}；服务器钱包层核对：${c.serverCheck || '未通过'}`);
-    const txs = (c.txs || []).map((t) => ({ ...t, label: (t.label || t.name || 'tx') + (t.status && t.status !== 'ok' ? `【${t.status === 'failed' ? '链上失败' : t.status === 'pending' ? '未上链' : t.status}】` : '') }));
+    const txs = (c.txs || []).map((t) => ({ ...t, label: (t.label || t.name || 'tx') + (t.status && t.status !== 'ok' ? `【${{ failed: '链上失败', pending: '未上链', 'send-error': '发送出错', 'hash-mismatch': '交易号不符', mismatch: '合约地址不符' }[t.status] || t.status}】` : '') }));
     if (txs.length) lines.push(`- 交易（${txs.length} 笔）：${txs.map((t) => (c.explorer ? `[${t.label}](${c.explorer}/${chain === 'tron' ? '#/transaction' : 'tx'}/${(t.hash || t.txId || '').replace(/^0x/, chain === 'tron' ? '' : '0x')})` : `${t.label} ${t.hash || t.txId}`)).join('、')}`);
     if (c.preflight) lines.push(`- 节点模拟：${c.preflight.simulated ? `gas ${c.preflight.gas.map((g) => g.toLocaleString('en-US')).join(' + ')}` : '节点不支持 eth_simulateV1，逐笔估算'}；gas 价格 ${c.preflight.gasPrice} wei`);
     lines.push('');
@@ -307,8 +336,10 @@ function summary() {
   return lines.join('\n') + '\n';
 }
 
+let KEY_FOR_MASK = '';
 async function main() {
   const k = key();
+  KEY_FOR_MASK = k;
   for (const c of CHAINS) if (!['eth', 'bsc', 'tron'].includes(c)) fail(`不认识的链：${c}（只能是 eth、bsc、tron）`);
   mkdirSync(OUT, { recursive: true });
   let error = null;
@@ -316,13 +347,15 @@ async function main() {
     for (const chain of CHAINS) if (chain === 'tron') await deployTron(k); else await deployEvm(chain, k);
   } catch (e) { error = e; }
   // 失败时也写出已经部署了的部分（公开信息），方便查和重新部署
-  if (error) out.error = error.message;
-  writeFileSync(join(OUT, 'deployment.json'), JSON.stringify(out, null, 2) + '\n');
-  const md = summary() + (error ? `\n**失败**：${error.message}\n` : '');
+  // 写出前整份过一遍遮盖表（私钥、节点地址、TronGrid key）
+  const msg = error ? maskSecrets(error.message, k) : '';
+  if (error) out.error = msg;
+  writeFileSync(join(OUT, 'deployment.json'), maskSecrets(JSON.stringify(out, null, 2), k) + '\n');
+  const md = maskSecrets(summary() + (error ? `\n**失败**：${msg}\n` : ''), k);
   writeFileSync(join(OUT, 'summary.md'), md);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, md);
-  if (error) { console.error(`\n失败：${error.message}`); process.exit(1); }
+  if (error) { console.error(`\n失败：${msg}`); process.exit(1); }
   log(`\n全部通过。结果在 ${join(OUT, 'deployment.json')}、${join(OUT, 'summary.md')}`);
 }
 
-main().catch((e) => { console.error(`失败：${e.message}`); process.exit(1); });
+main().catch((e) => { console.error(`失败：${maskSecrets(e.message, KEY_FOR_MASK)}`); process.exit(1); });

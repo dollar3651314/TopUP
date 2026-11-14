@@ -6,6 +6,15 @@
 //      ③ 每一笔发出后等回执，status 不是 1、合约地址和 forge 算的不一样都立即停，写清楚是哪一笔、gas 用了多少、下次起始 nonce 填几。
 import { signLegacyTx } from '../../server/wallet/evm-tx.js';
 
+/** 一次运行最多发几笔"对齐 nonce"的 0 值转账（再多就是填错了起始 nonce，停下来人工确认） */
+export const ALIGN_MAX = 10;
+
+/** 主网（以太坊 1、BSC 56）一律拒绝：不依赖调用方有没有先查过 */
+export function refuseMainnet(chainId) {
+  const id = Number(chainId);
+  if (id === 1 || id === 56) throw new Error(`链 ID ${id} 是主网，测试网部署脚本拒绝发交易`);
+}
+
 /** 单笔交易 gas 上限（EIP-7825，Sepolia 2025-10 起；BSC 也按这个算，宁可保守） */
 export const TX_GAS_CAP = 16_777_216;
 /** 节点估算的 gas × 1.25（再不超过单笔上限） */
@@ -95,9 +104,20 @@ async function sendOne(rpc, { key, from, chainId, gasPrice, tx, step, total, exp
   const est = num(await rpc('eth_estimateGas', [call, 'latest']));
   const gas = gasLimitFor(est, label);
   const { raw, hash } = signLegacyTx({ nonce: tx.nonce, gasPrice, gas, to: tx.to || '0x', value: tx.value || 0, data: tx.data, chainId }, key);
-  const sent = await rpc('eth_sendRawTransaction', [raw]);
-  if (lower(sent) !== lower(hash)) throw new Error(`${label}：节点返回的交易号 ${sent} 和本地算的 ${hash} 不一样。已停止`);
   const rec = { step, label: tx.label, nonce: tx.nonce, hash, gasEstimate: est, gasLimit: gas, gasPrice: String(gasPrice), status: 'sent' };
+  // 发送出错或节点返回的交易号不对：这笔可能已经进了节点的交易池，也要记下来（本地算的交易号、nonce）方便追查
+  let sent;
+  try {
+    sent = await rpc('eth_sendRawTransaction', [raw]);
+  } catch (e) {
+    rec.status = 'send-error';
+    return { rec, error: `${label}：发送出错（${e.message}），本地算的交易号 ${hash}。已停止；它可能已经进了节点的交易池，先查部署账户的 nonce 和这个交易号` };
+  }
+  if (lower(sent) !== lower(hash)) {
+    rec.status = 'hash-mismatch';
+    rec.nodeHash = sent;
+    return { rec, error: `${label}：节点返回的交易号 ${sent} 和本地算的 ${hash} 不一样。已停止` };
+  }
   const link = explorer ? `（${explorer}/tx/${hash}）` : '';
   const receipt = await waitReceipt(rpc, hash, wait);
   if (!receipt) {
@@ -122,6 +142,7 @@ async function sendOne(rpc, { key, from, chainId, gasPrice, tx, step, total, exp
 
 /** 按顺序发出全部交易，每笔核对回执；onTx 每笔发完（成功或失败）都会被调用（调用方把记录写进结果文件）。失败抛错 */
 export async function sendAll(rpc, { key, from, chainId, gasPrice, txs, explorer = '', onTx = () => {}, log = () => {}, wait }) {
+  refuseMainnet(chainId);
   for (let i = 0; i < txs.length; i++) {
     const { rec, error } = await sendOne(rpc, { key, from, chainId, gasPrice, tx: txs[i], step: i + 1, total: txs.length, explorer, wait });
     onTx(rec);
@@ -136,12 +157,14 @@ export async function sendAll(rpc, { key, from, chainId, gasPrice, txs, explorer
  * 现在的 nonce 已经超过 target 时报错（nonce 不能往回退，只能换一个起始 nonce 两条链重新部署）。
  */
 export async function alignNonce(rpc, { key, from, chainId, target, gasPrice, explorer = '', onTx = () => {}, log = () => {}, wait, unit = 'ETH' }) {
+  refuseMainnet(chainId);
   const latest = num(await rpc('eth_getTransactionCount', [from, 'latest']));
   const pending = num(await rpc('eth_getTransactionCount', [from, 'pending']));
   if (pending !== latest) throw new Error(`部署账户有还没上链的交易（nonce ${latest} 到 ${pending - 1}），等它们上链后再运行`);
   if (latest > target) throw new Error(`部署账户的 nonce 已经是 ${latest}，大于起始 nonce ${target}：nonce 不能往回退，起始 nonce 填 ${latest} 或更大，两条链都按这个值重新部署`);
   if (latest === target) return 0;
   const n = target - latest;
+  if (n > ALIGN_MAX) throw new Error(`对齐 nonce 要从 ${latest} 推到 ${target}，得发 ${n} 笔，超过一次最多 ${ALIGN_MAX} 笔：先确认起始 nonce 没填错（一笔都没有发）`);
   const est = num(await rpc('eth_estimateGas', [{ from, to: from, value: '0x0' }, 'latest']));
   const gas = gasLimitFor(est, '对齐 nonce 的转账');
   const balance = BigInt(await rpc('eth_getBalance', [from, 'latest']));

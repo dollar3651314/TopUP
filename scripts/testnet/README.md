@@ -29,7 +29,8 @@ flowchart LR
   3. 每笔发出后等回执（最多 10 分钟）：status 不是 1、合约地址和 forge 算的不一样、10 分钟没上链，都**立即停**，错误里写清楚第几笔、用了多少 gas、交易链接、部署账户现在的 nonce；已经发出的交易也写进 `deployment.json`。
   4. 全部上链后用 `contracts/script/VerifyDeployment.s.sol` 连链只读核对一遍（字节码、参数、发起账户、所有者、用户 1 的地址），再做下面的服务器钱包层核对。
   - 2026-11-14 在 Sepolia 上按链上规则模拟整套 7 笔（含测试 USDT、BatchPayout）：gas 合计约 2,833 万（ForwarderV4 1,392 万、工厂 183 万、SweepBatcher 449 万、两次 transferOwnership 各 13 万、测试 USDT 378 万、BatchPayout 405 万），按 × 1.25 的 gas limit 合计约 3,479 万；gas 价格 1 gwei 时最多要约 0.035 ETH。
-- 安全措施：只连测试网（ETH / BSC 按链 ID，主网 1、56 直接拒绝；TRON 先查 0 号区块，只准 Nile）；parent 不能是部署账户；私钥只从环境变量读，不进命令行参数，forge 不开调用轨迹（失败时轨迹会把私钥打成十进制），输出里出现的私钥和节点地址一律遮盖。
+- 发送部分自己也拒绝主网链 ID（1、56），不依赖前面的检查；"对齐 nonce"一次最多 10 笔；发送出错或节点返回的交易号不对时，这笔（本地算的交易号、nonce）也写进 `deployment.json`。
+- 安全措施：只连测试网（ETH / BSC 按链 ID，主网 1、56 直接拒绝；TRON 先查 0 号区块，只准 Nile）；parent 不能是部署账户；私钥只从环境变量读，不进命令行参数，forge 不开调用轨迹（失败时轨迹会把私钥打成十进制），输出里出现的私钥和节点地址一律遮盖；错误信息、`deployment.json`、`summary.md`、运行摘要写出前也整份过一遍同一张遮盖表（私钥十六进制和十进制、两个节点地址以及地址里 8 位以上的每一段、TronGrid key），节点地址格式不对时错误里只写"格式不对"、不带地址。
 
 ## 2. 管理员在 GitHub 上配置（只做一次）
 
