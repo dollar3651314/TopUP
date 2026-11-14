@@ -164,7 +164,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
         steps.push({ kind: 'withdraw', stage: 1, withdrawal_id: w.id, owner: hot, expect: { to: w.to_address, amount: w.amount }, ...withExpiry(tx) });
       }
       const id = await saveBatch('withdraw', { steps, payout_batch: ptId });
-      return { batch_id: id, payout_batch: ptId, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total, count: pick.size, left, cap: Number(p.cap), by: p.by };
+      return { batch_id: id, payout_batch: ptId, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total, count: pick.size, left };
     },
 
     // ---------- 归集 ----------
