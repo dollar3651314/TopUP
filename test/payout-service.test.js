@@ -44,6 +44,8 @@ function node({ decimals, hotBalance, allowance }) {
     const body = JSON.parse(init.body);
     const one = (x) => (x.method === 'eth_call' && String(x.params?.[0]?.data || '').startsWith('0x' + ALLOWANCE) ? { jsonrpc: '2.0', id: x.id, result: '0x' + s.allowance.toString(16).padStart(64, '0') } : null);
     const all = [].concat(body);
+    // 测试用：广播时节点连不上（只影响 eth_sendRawTransaction）
+    if (f.sendDown && all.some((x) => x.method === 'eth_sendRawTransaction')) throw new TypeError('fetch failed');
     if (all.every(one)) { const out = all.map(one); return new Response(JSON.stringify(Array.isArray(body) ? out : out[0])); }
     return inner(url, init);
   };
@@ -167,4 +169,19 @@ test('改授权额度：原因 + 动态码 + 审计；以太坊当前不是 0 �
   assert.equal(pb.steps.length, 1);
   assert.equal(String(decodeApproveCall(decodeUnsignedLegacyTx(pb.steps[0].rawHex).data).amount), String(10_000n * BigInt(U) * bsc.scale));
   await assert.rejects(bsc.svc.allowancePlan('tron', { amount: 1, reason: 'x', code: '123456', actor: 'admin' }), (e) => e.code === 'not_applicable' || e.code === 'chain_not_enabled');
+});
+
+test('改授权额度：新额度超过热钱包上限 422 exceeds_hot_max（等于上限可以）；广播时节点连不上 503，这一步不算完成，节点恢复后同一笔重交能成功', async () => {
+  const eth = await setup({ chain: 'eth', allowance: 0 });
+  await assert.rejects(eth.svc.allowancePlan('eth', { amount: 10_000 * U + 1, reason: '超上限', code: '123456', actor: 'admin' }), (e) => e.code === 'exceeds_hot_max' && e.status === 422);
+  const p = await eth.svc.allowancePlan('eth', { amount: 10_000 * U, reason: '补到上限', code: '123456', actor: 'admin' });
+  assert.equal(p.steps.length, 1);
+  const sig = sign(p.steps[0].rawHex, eth.hotKey);
+  eth.f.sendDown = true;
+  await assert.rejects(eth.svc.allowanceSubmit('eth', { rawHex: p.steps[0].rawHex, sigHex: sig, actor: 'admin' }), (e) => e.status === 503, '广播时节点连不上应该 503');
+  eth.f.sendDown = false;
+  const ok = await eth.svc.allowanceSubmit('eth', { rawHex: p.steps[0].rawHex, sigHex: sig, actor: 'admin' });
+  assert.equal(ok.left, 0, '节点恢复后同一笔重交成功（上一次没被记成完成）');
+  const done = await eth.db.query(`select count(*)::int n from pay_audit where action = 'payout.allowance_signed'`);
+  assert.equal(done[0].n, 1, '连不上那次不记"已签"');
 });

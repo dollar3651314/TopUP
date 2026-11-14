@@ -102,6 +102,22 @@ test('开发者文档：每个接口实际返回的字段、类型和文档一�
   const w = check('POST', 'withdrawals/', await call('POST', 'withdrawals/', { kind: 'payout', customer_id: 'c1', to: TO, amount: '10', merchant_ref: 'R-1' }));
   check('GET', 'withdrawals/', await call('GET', `withdrawals/?withdrawal_no=${w.withdrawal_no}`));
   check('POST', 'withdrawals/cancel/', await call('POST', 'withdrawals/cancel/', { withdrawal_no: w.withdrawal_no }));
+  // 批量打款（第 3 批）：两条链各一笔（TRON 带客户和备注、以太坊不带），提交后再按批次号查
+  const BATCH_ITEM = /\[\{ ([a-z_, ]+) \}\]/.exec(OBJECTS.PayoutBatch.find((f) => f[0] === 'items')[2][0])[1].split(', ');
+  const checkBatchItems = (where, out) => {
+    assert.equal(out.items.length, 2, `${where} 应该有 2 笔`);
+    for (const it of out.items) {
+      assert.deepEqual(Object.keys(it).sort(), [...BATCH_ITEM].sort(), `${where} items[] 的字段和文档写的不一致`);
+      for (const k of ['amount', 'fee']) assert.ok(typeof it[k] === 'string' && AMOUNT.test(it[k]), `${where} items[].${k} 应该是金额字符串，实际是 ${JSON.stringify(it[k])}`);
+    }
+  };
+  const pb = check('POST', 'payouts/batch/', await call('POST', 'payouts/batch/', { items: [
+    { chain: 'tron', to: TO, amount: '5', customer_id: 'c1', merchant_ref: 'PB-R-1' },
+    { chain: 'eth', to: '0x52908400098527886E0F7030069857D2E4169EE7', amount: '6.5' },
+  ] }));
+  checkBatchItems('POST payouts/batch/', pb);
+  checkObject('POST payouts/batch/ service', [['open', 'boolean'], ...(pb.service.open ? [] : [['next_open_at', 'time']])], pb.service);
+  checkBatchItems('GET payouts/batch/', check('GET', 'payouts/batch/', await call('GET', `payouts/batch/?batch_no=${pb.batch_no}`)));
   assert.deepEqual([...seen].sort(), ENDPOINTS.map((e) => `${e.method} ${e.path}`).sort(), '有接口没有被检查到');
 
   // 回调：检查实际发出去的请求体（外层和每种事件的 data）

@@ -33,11 +33,13 @@ const STATE = resolve(TMP, 'payout-e2e.json');
 const ASTATE = resolve(TMP, 'payout-e2e-admin.json'), MSTATE = resolve(TMP, 'payout-e2e-merchant.json');
 type St = { adminSecret: string; merchantSecret: string; batch: string; cashout: string; mid: string };
 const st: St = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : { adminSecret: '', merchantSecret: '', batch: '', cashout: '', mid: '' };
-const save = () => writeFileSync(STATE, JSON.stringify(st));
+const save = () => writeFileSync(STATE, JSON.stringify({ ...st, lastStep }));
 const WALLETS = JSON.parse(readFileSync(new URL('../../config/wallets.json', import.meta.url), 'utf8')).local;
 const rndEvm = () => '0x' + Array.from({ length: 40 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
 
-const lastStep: Record<string, number> = {};
+// 用过的动态码时间步也存进状态文件：一个用例失败后 Playwright 会换一个新的 worker 进程，只放内存里会丢，
+// 下一个用例就可能拿到同一个 30 秒里已经用过的动态码（bad_code）
+const lastStep: Record<string, number> = existsSync(STATE) ? (JSON.parse(readFileSync(STATE, 'utf8')).lastStep || {}) : {};
 async function code(secret: string) {
   for (;;) {
     for (const off of [0, 30_000]) {
@@ -427,9 +429,10 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
     await merchant.unroute((u) => u.pathname === '/api/merchant/' && u.searchParams.get('a') === 'payout-batch-submit');
   });
 
-  test('TC-PB15 TRON 打款（Q16、Q-B2）：签名时先租能量、一次签 N 笔；部分成功的批次写明成功几笔、失败的回到已审核待签名', async () => {
+  test('TC-PB15 TRON 打款（Q16、Q-B2、A2）：测试环境直接烧 TRX（不租能量）、一次签 N 笔；部分成功的批次写明成功几笔、失败的回到已审核待签名', async () => {
     await admin.route(isWallet('withdrawals'), patchJson((j) => {
-      j.batches = [{ id: 'PB-TRON-1', chain: 'tron', status: 'partial', count: 3, ok: 2, failed: 1, energy: { mode: 'rented', energy: '195000', cost_trx: '13.5' },
+      // A2（2026-11-14）：TRON 打款直接烧 TRX，后端给的就是 { mode: 'burn' }
+      j.batches = [{ id: 'PB-TRON-1', chain: 'tron', status: 'partial', count: 3, ok: 2, failed: 1, energy: { mode: 'burn' },
         items: [{ id: 'WD-T1', status: 'completed' }, { id: 'WD-T2', status: 'approved', reason: 'OUT_OF_ENERGY' }, { id: 'WD-T3', status: 'completed' }] }];
     }));
     await adminTab('p-withdrawals');
@@ -437,8 +440,35 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
     await expect(b).toContainText('部分成功');
     await expect(b).toContainText('2 笔成功');
     await expect(b).toContainText('回到已审核');
-    await expect(b).toContainText('能量');
+    await expect(b).toContainText('直接烧 TRX');
+    for (const rent of ['确认后才租', '租到', '先租能量']) await expect(b).not.toContainText(rent); // 不说会租能量（"不租能量"这样的说明可以有）
+    // TRON 凑批卡片也写明直接烧 TRX，不提租能量
+    const card = admin.locator('[data-panel="p-withdrawals"] [data-payout-plan="tron"]');
+    await expect(card).toContainText('直接烧 TRX');
+    for (const rent of ['确认后才租', '租到', '先租能量']) await expect(card).not.toContainText(rent);
     await admin.unroute(isWallet('withdrawals'));
+  });
+
+  test('TC-PB16 批量取消口径（2026-11-14 定）：批量打款只能整批取消还没审核的部分——提币记录里批次中的单笔没有"取消"按钮，普通单笔提币照旧有', async () => {
+    // 新建一批（2 笔）和一笔普通提币，都还没审核
+    const sheet = ['chain,to,amount', `bsc,${rndEvm()},4`, `bsc,${rndEvm()},4`].join('\n');
+    const sub = await mcall('payout-batch-submit', { csv: sheet, code: await code(st.merchantSecret) });
+    expect(sub.status, JSON.stringify(sub.body)).toBe(200);
+    const batchIds: string[] = sub.body.accepted.map((x: any) => x.withdrawal_no);
+    const single = (await mcall('withdraw', { kind: 'payout', chain: 'bsc', to: rndEvm(), amount: '2', code: await code(st.merchantSecret) })).body.withdrawal_no;
+    try {
+      await merchantTab('withdraw');
+      const p = merchant.locator('[data-mpanel="withdraw"]');
+      const row = (id: string) => p.locator('tbody tr', { hasText: id });
+      // 先确认到了要检查的状态：三行都在、都是待审核
+      for (const id of [...batchIds, single]) await expect(row(id)).toContainText('待审核');
+      await expect(row(single).getByRole('button', { name: '取消' })).toHaveCount(1); // 对照：普通单笔照旧能取消
+      for (const id of batchIds) await expect(row(id).getByRole('button', { name: '取消' })).toHaveCount(0);
+    } finally {
+      // 收尾（失败时也做）：整批取消、单笔取消，不留下待审核的单影响后面的用例；放在打款用例最后，不打乱前面用例看到的提币记录顺序
+      expect((await mcall('payout-batch-cancel', { batch_no: sub.body.batch_no })).body.cancelled).toBe(2);
+      expect((await mcall('withdraw-cancel', { withdrawal_no: single })).status).toBe(200);
+    }
   });
 
   // ---------- 第 2 批 TRON 页面（本地不开通 TRON 合约钱包：拦截接口喂数据，测页面怎么画） ----------

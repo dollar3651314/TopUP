@@ -45,6 +45,15 @@ test('提币：浏览器核对 → 验证码 → 签名 → 广播 → 链上确
   const c = await legacyTronCustomer(db, 'm1', 'u1');
   await core.recordDeposit(db, { txid: 'a'.repeat(64), logIndex: 0, block: 1, to: c.address, amount: 500 * U, time: new Date() });
   const w = await core.requestWithdrawal(db, m, { kind: 'payout', to: COLD, amount: 100 * U, source: 'web' });
+  // 第 3 批：TRON 只凑已审核的单；待审核的直接凑批 409 not_approved（不能绕过逐笔审核：登记地址、第一次付的地址、上限）
+  tron.accounts.set(HOT, { activated: true, trx: 100 * U, trc20: { [tron.contract]: 1000 * U } });
+  const notYet = await call('withdraw-plan', { ids: [w.withdrawal_no] });
+  assert.equal(notYet.status, 409);
+  assert.equal(notYet.body.error.code, 'not_approved');
+  assert.equal((await core.withdrawalView(db, w.withdrawal_no)).status, 'pending', '凑批被拒后这一笔仍是待审核（没有顺带审核通过）');
+  const appr = await call('payout-approve', { ids: [w.withdrawal_no] });
+  assert.equal(appr.status, 200);
+  assert.deepEqual(appr.body.approved, [w.withdrawal_no]);
   tron.accounts.set(HOT, { activated: true, trx: 100 * U, trc20: { [tron.contract]: 50 * U } });
   assert.equal((await call('withdraw-plan', { ids: [w.withdrawal_no] })).body.error.code, 'hot_wallet_insufficient');
   tron.accounts.set(HOT, { activated: true, trx: 100 * U, trc20: { [tron.contract]: 1000 * U } });

@@ -225,3 +225,38 @@ test('开放 API：500 笔可以（请求体超过 32 KB 也要收），501 笔 
   assert.equal(got.body.items[0].status, 'pending');
   assert.equal((await s.call(s.credB, 'GET', `payouts/batch/?batch_no=${ok.body.batch_no}`)).status, 404, '商户隔离');
 });
+
+// 批量取消口径（2026-11-14 定）：批量打款只能整批取消还没审核的部分；批次里的单笔不能单独取消（商户后台、开放 API 都一样）。
+// 被拒：409 batch_item_cancel（研发 2026-11-14 报来的错误码）；这一笔仍是待审核、余额和冻结都没动、批次里其余的也没动。
+test('批量取消口径：批量打款里的单笔不能单独取消：商户后台 withdraw-cancel、开放 API withdrawals/cancel/ 都拒绝；整批取消照旧可以', async () => {
+  const s = await setup({ fund: 1_000 });
+  const r = await s.call('payout-batch-submit', { csv: csv([['eth', evm(), '10'], ['tron', TRON_A, '5']]), code: s.code() });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const [one, two] = r.body.accepted.map((x) => x.withdrawal_no);
+  const money = async () => JSON.stringify(await s.db.query(`select available, frozen from balances where merchant_id = 'm1'`));
+  const before = await money();
+  const c = await s.call('withdraw-cancel', { withdrawal_no: one });
+  assert.equal(c.status, 409, `批次里的单笔应该 409 被拒，实际：${JSON.stringify(c.body)}`);
+  assert.equal(c.body.error.code, 'batch_item_cancel');
+  const st = await s.db.query('select id, status from withdrawals where id = any($1::text[]) order by batch_line', [[one, two]]);
+  assert.deepEqual(st.map((x) => x.status), ['pending', 'pending'], '这一笔和批次里其余的都还是待审核');
+  assert.equal(await money(), before, '余额、冻结都没动');
+  // 普通单笔提币照旧可以取消（不是一刀切）
+  const w = await s.call('withdraw', { kind: 'payout', chain: 'tron', to: TRON_A, amount: '3', code: s.code() });
+  assert.equal(w.status, 200, JSON.stringify(w.body));
+  assert.equal((await s.call('withdraw-cancel', { withdrawal_no: w.body.withdrawal_no })).status, 200);
+  // 整批取消照旧可以
+  const all = await s.call('payout-batch-cancel', { batch_no: r.body.batch_no });
+  assert.deepEqual([all.body.cancelled, all.body.kept], [2, 0]);
+
+  const a = await apiSetup();
+  const b = await a.call(a.cred, 'POST', 'payouts/batch/', { items: [{ chain: 'eth', to: evm(), amount: '10' }, { chain: 'tron', to: TRON_A, amount: '5' }] });
+  assert.equal(b.status, 200, JSON.stringify(b.body));
+  const beforeA = JSON.stringify(await a.db.query(`select available, frozen from balances where merchant_id = 'ma'`));
+  const x = await a.call(a.cred, 'POST', 'withdrawals/cancel/', { withdrawal_no: b.body.items[0].withdrawal_no });
+  assert.equal(x.status, 409, `开放 API 取消批次里的单笔应该 409 被拒，实际：${JSON.stringify(x.body)}`);
+  assert.equal(x.body.error.code, 'batch_item_cancel');
+  const g = await a.call(a.cred, 'GET', `payouts/batch/?batch_no=${b.body.batch_no}`);
+  assert.deepEqual(g.body.items.map((i) => i.status), ['pending', 'pending']);
+  assert.equal(JSON.stringify(await a.db.query(`select available, frozen from balances where merchant_id = 'ma'`)), beforeA);
+});
