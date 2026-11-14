@@ -14,7 +14,7 @@ const topicOf = (addr) => '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(
 const addrOfTopic = (t) => toChecksumAddress('0x' + t.slice(-40));
 
 export class RpcError extends Error {
-  constructor(message, { code = 'rpc_error', rpcCode } = {}) { super(message); this.code = code; this.rpcCode = rpcCode; }
+  constructor(message, { code = 'rpc_error', rpcCode, data } = {}) { super(message); this.code = code; this.rpcCode = rpcCode; if (data !== undefined) this.data = data; }
 }
 
 /** 最小的 JSON-RPC 客户端：单个或批量请求，超时，HTTP / JSON-RPC 错误都抛出 RpcError（错误信息不含节点地址，节点地址里可能有 API Key） */
@@ -32,7 +32,8 @@ export function createRpc({ rpcUrl, fetchImpl = fetch, timeoutMs = 10_000, label
   }
   const unwrap = (r, method) => {
     if (!r || typeof r !== 'object') throw new RpcError(`${label}: ${method}: empty response`);
-    if (r.error) throw new RpcError(`${label}: ${method}: ${r.error.message || 'error'}`, { rpcCode: r.error.code });
+    // data：合约回滚时节点带回的回滚数据（自定义错误的选择器 + 参数），批量打款用它找出是哪一笔
+    if (r.error) throw new RpcError(`${label}: ${method}: ${r.error.message || 'error'}`, { rpcCode: r.error.code, data: typeof r.error.data === 'string' ? r.error.data : r.error.data?.data });
     return r.result;
   };
   return {
@@ -131,6 +132,16 @@ export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decim
     async chainId() { return BigInt(await rpc.call('eth_chainId')); },
     async gasPrice() { return BigInt(await rpc.call('eth_gasPrice')); },
     async nonce(address) { return BigInt(await rpc.call('eth_getTransactionCount', [address, 'pending'])); },
+    /** 已确认的 nonce：最新区块往前退"确认数"个区块时这个地址发过几笔（批量打款判断某个 nonce 是否已被别的交易用掉） */
+    async confirmedNonce(address) {
+      const h = await head();
+      const at = Math.max(0, h - confirmations);
+      return BigInt(await rpc.call('eth_getTransactionCount', [address, at === h ? 'latest' : hex(at)]));
+    },
+    /** 只读调用（eth_call，latest）：返回数据；回滚时抛出 RpcError，err.data 是回滚数据 */
+    async call(tx) { return rpc.call('eth_call', [tx, 'latest']); },
+    /** 地址上的合约代码（十六进制；没有代码是 0x） */
+    async getCode(address) { return rpc.call('eth_getCode', [address, 'latest']); },
     async estimateGas(tx) { return BigInt(await rpc.call('eth_estimateGas', [tx])); },
     async sendRaw(raw) { return rpc.call('eth_sendRawTransaction', [raw]); },
     /** 节点认不认识这笔交易（在交易池里或已上链）；连不上时抛出 */

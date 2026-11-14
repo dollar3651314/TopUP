@@ -361,6 +361,12 @@ create table if not exists payout_tx_batches (
   updated_at timestamptz not null default now()
 );
 create index if not exists payout_tx_batches_status on payout_tx_batches (chain, status, created_at);
+-- 以太坊、BSC：签名后存下已签名原文和 nonce（30 分钟没上链时重发、按 nonce 判断是否已作废）；上次重发的时间
+alter table payout_tx_batches add column if not exists signed_raw text;
+alter table payout_tx_batches add column if not exists nonce text;
+alter table payout_tx_batches add column if not exists rebroadcast_at timestamptz;
+-- 挂起：已审核的单收款地址转不了（链上回滚解出是这一笔、收款地址是 0），不再进批，等管理员驳回
+alter table withdrawals add column if not exists hold_reason text;
 `;
 
 /**

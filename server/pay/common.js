@@ -43,6 +43,7 @@ export function parseAmount(v, field = 'amount') {
 
 const MESSAGES = {
   invalid_signature: 'Missing or invalid signature', timestamp_expired: 'Timestamp is more than 5 minutes from server time', ip_not_allowed: 'Request IP is not whitelisted for withdrawals',
+  batch_item_cancel: 'This withdrawal belongs to a batch payout; cancel the batch instead (only its not-yet-reviewed items)',
   merchant_disabled: 'Account disabled', not_found: 'Not found', invalid_param: 'Invalid or missing parameter', insufficient_balance: 'Amount + fee exceeds available balance',
   duplicate_merchant_order_no: 'merchant_order_no already used', idempotency_conflict: 'Idempotency-Key reused with a different request', order_mode_disabled: 'Order mode is not enabled for this account',
   idempotency_key_required: 'Idempotency-Key header is required', rate_limited: 'Too many requests', wallet_not_initialized: 'Service not ready', invalid_address: 'Invalid TRON address',

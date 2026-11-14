@@ -29,7 +29,8 @@ export function payoutChains(layer, evm = {}) {
     const e = evm[chain] || {};
     const adapter = layer?.adapters?.[chain];
     if (!adapter || !layer.enabledChains.includes(chain) || !isEvmAddress(e.hot || '') || !isEvmAddress(e.payout || '')) continue;
-    out[chain] = { adapter, token: layer.config[chain].usdt, contract: e.payout, hot: e.hot, decimals: layer.config[chain].decimals };
+    // safe：冷钱包（多签 Safe），BatchPayout 的 owner 必须是它（启动时核对）
+    out[chain] = { adapter, token: layer.config[chain].usdt, contract: e.payout, hot: e.hot, decimals: layer.config[chain].decimals, safe: e.parent || null };
   }
   return out;
 }
@@ -68,7 +69,9 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   const listApproved = kyb.listApproved || (async () => []);
   // 以太坊、BSC 批量打款：服务器上没有热钱包私钥，只出交易原文、收签名、广播、按回执记账
   const pchains = payoutChains(layer, wallets.evm || {});
-  const payoutSvc = Object.keys(pchains).length ? createPayoutService({ db, chains: pchains, verifyCode: (c) => gate.verifyAdminCode(c), notify }) : null;
+  const payoutSvc = Object.keys(pchains).length ? createPayoutService({ db, chains: pchains, verifyCode: (c) => gate.verifyAdminCode(c), notify, verifyContracts: true }) : null;
+  // 启动时核对 BatchPayout（热钱包是 payer、代码哈希、owner 是冷钱包 Safe）：不一致停用这条链的打款并告警；连不上的每轮再核对
+  if (payoutSvc) await payoutSvc.verify().catch((e) => console.error(`[payout] onchain check: ${e.message}`));
   const pendingKyb = kyb.pendingKyb || (async () => 0);
   return {
     db, tron, keys, ops, wallets, layer,
@@ -79,7 +82,10 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
     tick: () => runTick({
       db, tron, getTarget, notify, adminUrl: `${origin}/admin/`,
       scanEvm: () => scanEvm(db, { layer, notify }),
-      confirmPayouts: payoutSvc ? () => payoutSvc.confirm() : null,
+      confirmPayouts: payoutSvc ? async () => {
+        if (Object.keys(pchains).some((ch) => payoutSvc.onchain[ch]?.result !== 'ok' && payoutSvc.onchain[ch]?.result !== 'mismatch')) await payoutSvc.verify().catch(() => {});
+        return payoutSvc.confirm();
+      } : null,
       // 归集：TRON 第 0 批的浏览器签名批次；ETH、BSC 合约钱包确认已发出的批次、到点凑批（东八区 10:00、20:00）
       confirmSweeps: async () => {
         const tronSweeps = await sweepProgress(db, tron, { notify });

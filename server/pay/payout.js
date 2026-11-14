@@ -38,9 +38,11 @@ export async function updatePayoutLimits(db, { actor, reason, values = {}, code,
     if (!Number.isSafeInteger(v) || v <= 0) throw new PayError('invalid_param', 422, k);
     next[k] = v;
   }
-  if (next.perItem > next.perBatch) throw new PayError('invalid_param', 422, 'perItem');
-  if (next.perBatch > next.perDay) throw new PayError('invalid_param', 422, 'perBatch');
-  if (next.hotLow > next.hotMax) throw new PayError('invalid_param', 422, 'hotLow');
+  // 哪条约束不满足写在 rows[0].rule（页面据此说清楚）
+  const rule = (field, r) => Object.assign(new PayError('invalid_param', 422, field), { rows: [{ rule: r }] });
+  if (next.perItem > next.perBatch) throw rule('perItem', 'per_item_le_per_batch');
+  if (next.perBatch > next.perDay) throw rule('perBatch', 'per_batch_le_per_day');
+  if (next.hotLow > next.hotMax) throw rule('hotLow', 'hot_low_le_hot_max');
   const toUsdt = (o) => Object.fromEntries(LIMIT_KEYS.map((k) => [k, usdt(o[k])]));
   await db.tx(async (t) => {
     await setMeta(t, META_LIMITS, next);
@@ -112,11 +114,16 @@ async function approveOne(t, id, { actor, now, limits, today }) {
   await wdCallback(t, id);
   return null;
 }
+/** 审核要按"每天上限"算今天已通过的合计：两个审核同时进来会各算各的、合起来超上限，所以事务里先拿一把审核锁（事务结束自动释放） */
+const APPROVE_LOCK = 7_310_331; // pg_advisory_xact_lock 的键，只给打款审核用
+async function lockApprovals(t) { await t.query('select pg_advisory_xact_lock($1)', [APPROVE_LOCK]); }
+
 /** Q-B3 单笔一单一审：pending → approved；超单笔上限 exceeds_per_item_limit、超每天上限 exceeds_daily_limit 的留在 pending */
 export async function approvePayouts(db, { ids = [], actor, now = Date.now() }) {
   const list = [...new Set(ids.map(String))];
   if (!list.length || list.length > MAX_ITEMS_PER_REQUEST) throw new PayError('invalid_param', 422, 'ids');
   return db.tx(async (t) => {
+    await lockApprovals(t);
     const limits = await getPayoutLimits(t);
     const today = { v: await approvedToday(t, now) };
     const approved = [], refused = [];
@@ -133,6 +140,29 @@ async function rejectOne(t, id, reason, actor, action = 'withdrawal.reject') {
   await post(t, w.merchant_id, 'unfreeze', w.amount + w.fee, -(w.amount + w.fee), id, w.customer_id);
   await audit(t, actor, action, id, { reason });
   await wdCallback(t, id);
+}
+
+/**
+ * 已审核、还没凑进批次的单驳回（例如挂起的、收款地址转不了的）：退冻结、回调、记审计；原因必填（商户能看到）。
+ * 已经凑进批次（signing / broadcast）的不能驳回：先作废那一批（没签名的），或等链上结果。
+ */
+export async function rejectApprovedPayout(db, { id, reason, actor }) {
+  const why = String(reason || '').trim();
+  if (!why) throw new PayError('reason_required', 422, 'reason');
+  return db.tx(async (t) => {
+    const [w] = await t.query(`update withdrawals set status = 'rejected', reason = $2, hold_reason = null, updated_at = now() where id = $1 and status = 'approved' and batch_id is null returning *`, [String(id || ''), why.slice(0, 500)]);
+    if (!w) throw new PayError('invalid_state', 409);
+    await post(t, w.merchant_id, 'unfreeze', w.amount + w.fee, -(w.amount + w.fee), w.id, w.customer_id);
+    await audit(t, actor, 'payout.reject_approved', w.id, { reason: why.slice(0, 500), amount: usdt(w.amount), chain: w.chain, hold: w.hold_reason || null });
+    await wdCallback(t, w.id);
+    return withdrawalView(t, w.id);
+  });
+}
+/** 挂起一笔已审核的单（收款地址转不了）：状态不变（对外仍是已审核），不再进批，等管理员驳回 */
+export async function holdPayout(db, id, reason, actor = 'system') {
+  const [w] = await db.query(`update withdrawals set hold_reason = $2, updated_at = now() where id = $1 and status in ('approved', 'signing', 'broadcast') returning id, chain, amount`, [String(id), String(reason).slice(0, 60)]);
+  if (w) await audit(db, actor, 'payout.hold', w.id, { reason, chain: w.chain, amount: usdt(w.amount) });
+  return Boolean(w);
 }
 
 // ---------- 商户批量 ----------
@@ -168,6 +198,7 @@ export async function reviewPayoutBatch(db, { batchNo, approve = [], reason = ''
   return db.tx(async (t) => {
     const [b] = await t.query('select batch_no from payout_batches where batch_no = $1', [String(batchNo || '')]);
     if (!b) throw new PayError('not_found', 404);
+    await lockApprovals(t);
     const pend = await t.query(`select id from withdrawals where batch_ref = $1 and status = 'pending' order by batch_line, created_at, id for update`, [b.batch_no]);
     if (!pend.length) throw new PayError('invalid_state', 409);
     for (const id of ok) if (!pend.some((p) => p.id === id)) throw new PayError('invalid_param', 422, 'approve');
@@ -288,14 +319,14 @@ export async function createPayoutTxBatch(db, { chain, ids, actor = 'system', id
   const list = [...new Set((ids || []).map(String))];
   if (!list.length || list.length > MAX_ITEMS_PER_TX[chain]) throw new PayError('invalid_param', 422, 'ids');
   return db.tx(async (t) => {
-    const rows = await t.query(`select id, chain, status, batch_id, amount from withdrawals where id = any($1::text[]) for update`, [list]);
+    const rows = await t.query(`select id, chain, status, batch_id, amount, hold_reason from withdrawals where id = any($1::text[]) for update`, [list]);
     if (rows.length !== list.length) throw new PayError('not_found', 404);
     if (rows.some((r) => r.chain !== chain)) throw new PayError('chain_mismatch', 422, 'ids');
-    if (rows.some((r) => r.status !== 'approved' || r.batch_id)) throw new PayError('invalid_state', 409);
+    if (rows.some((r) => r.status !== 'approved' || r.batch_id || r.hold_reason)) throw new PayError('invalid_state', 409);
     const bid = id || newTxBatchId(chain);
     const sum = total ?? rows.reduce((s, r) => s + Number(r.amount), 0);
-    await t.query(`insert into payout_tx_batches (id, chain, status, item_ids, total, batch_hex, raw_hex, expect, created_by) values ($1, $2, 'planned', $3::jsonb, $4, $5, $6, $7::jsonb, $8)`,
-      [bid, chain, JSON.stringify(list), sum, extra.batchHex || null, extra.rawHex || null, extra.expect ? JSON.stringify(extra.expect) : null, actor]);
+    await t.query(`insert into payout_tx_batches (id, chain, status, item_ids, total, batch_hex, raw_hex, expect, created_by, nonce) values ($1, $2, 'planned', $3::jsonb, $4, $5, $6, $7::jsonb, $8, $9)`,
+      [bid, chain, JSON.stringify(list), sum, extra.batchHex || null, extra.rawHex || null, extra.expect ? JSON.stringify(extra.expect) : null, actor, extra.nonce ?? null]);
     await t.query(`update withdrawals set status = 'signing', batch_id = $2, updated_at = now() where id = any($1::text[])`, [list, bid]);
     return bid;
   });

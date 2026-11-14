@@ -48,14 +48,30 @@ export async function scan(db, tron, { now = Date.now(), budgetMs = 12_000, maxP
   return { pages, seen, credited, complete, cursor: complete ? maxTs : lastTs, failed: failed.length };
 }
 
-/** ③ 已广播的提币：链上确认成功就扣除冻结；失败就解冻并通知管理员 */
-export async function confirmWithdrawals(db, tron, { notify } = {}) {
+/** TRON 交易原文出给页面时的有效期（server/pay/wallet-api.js 的 SIGN_TTL_MS）；过期后再加 5 分钟余量（等区块固化）链上仍查不到，才算没发出去 */
+export const TRON_TX_TTL_MS = 30 * 60_000;
+const TRON_GONE_MS = TRON_TX_TTL_MS + 5 * 60_000;
+
+/**
+ * ③ 已广播的提币：链上确认成功就扣除冻结；失败就按规则退回。
+ * 链上查不到：交易过期（记成已广播之后 SIGN_TTL + 5 分钟）之前一律继续等——签好的交易可能已经在别的节点上，随时会上链；
+ * 过期之后仍查不到才算没发出去（打款回到已审核待签名、冻结不动；老的单笔提币解冻）。查询出错不下结论，下一轮再查。
+ */
+export async function confirmWithdrawals(db, tron, { notify, now = Date.now() } = {}) {
   // TRON 的单（以太坊、BSC 的整批由 server/wallet/payout.js 的 confirm 按回执处理）
-  const rows = await db.query(`select id, txid, approved_at from withdrawals where status = 'broadcast' and txid is not null and chain = 'tron' order by updated_at limit 50`);
+  const rows = await db.query(`select id, txid, approved_at, updated_at from withdrawals where status = 'broadcast' and txid is not null and chain = 'tron' order by updated_at limit 50`);
   let done = 0;
   for (const w of rows) {
-    const info = await tron.txInfo(w.txid).catch(() => null);
-    if (!info) continue;
+    let info;
+    try { info = await tron.txInfo(w.txid); } catch { continue; }
+    if (!info) {
+      if (now - new Date(w.updated_at).getTime() <= TRON_GONE_MS) continue;
+      if (w.approved_at) await settlePayoutItem(db, w.id, { success: false, reason: 'expired_not_onchain' });
+      else await settleWithdrawal(db, w.id, false);
+      if (notify) await notify(`TRON 打款没上链：${w.id}`, w.approved_at ? `TRON 打款 ${w.id} 的交易（${w.txid}）已过期，链上查不到，不会再上链。这一笔回到"已审核"，冻结的金额不动，可以重新签名。` : `提币 ${w.id} 的交易（${w.txid}）已过期，链上查不到，冻结的金额已退回商户余额。`);
+      done++;
+      continue;
+    }
     // 审核通过后凑批签的（第 3 批起都是）：逐笔记账，失败的回到已审核待签名、冻结不动（Q-B2）
     if (w.approved_at) await settlePayoutItem(db, w.id, { success: info.ok, txid: w.txid, reason: info.ok ? null : 'chain_failed' });
     else await settleWithdrawal(db, w.id, info.ok);
@@ -75,14 +91,14 @@ export async function notifyWithdrawals(db, notify, adminUrl) {
   return rows.length;
 }
 
-export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetchImpl, resolve, confirmSweeps, scanEvm, confirmPayouts }) {
+export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetchImpl, resolve, confirmSweeps, scanEvm, confirmPayouts, now = () => Date.now() }) {
   const t0 = Date.now();
   const out = {};
   const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = { error: e.message }; console.error(`[tick] ${name}: ${e.message}`); } };
   await step('scan', () => scan(db, tron, { onError: notify && ((ids) => notify('到账处理失败', `以下链上转账没有处理成功，已记到"异常到账"，请联系研发：\n${ids.join('\n')}`)) }));
   if (scanEvm) await step('scan_evm', () => scanEvm()); // ETH、BSC（server/wallet/scan.js，每条链各自出错各自告警）
   await step('expired', () => expireOrders(db));
-  await step('withdrawals', () => confirmWithdrawals(db, tron, { notify }));
+  await step('withdrawals', () => confirmWithdrawals(db, tron, { notify, now: now() }));
   if (confirmPayouts) await step('payouts', () => confirmPayouts()); // 以太坊、BSC 批量打款：按回执整批确认或整批回到已审核
   // 归集（确认已发出的批次、到点凑批）：出错只告警（故障一次、恢复一次、长期没恢复每天一次），不影响其他步骤和运行时间
   if (confirmSweeps) {

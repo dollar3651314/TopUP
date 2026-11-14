@@ -272,8 +272,8 @@ export const ENDPOINTS = [
   },
   {
     method: 'POST', path: 'withdrawals/cancel/', title: ['Cancel a withdrawal', '取消提币'],
-    body: [['withdrawal_no', 'string', true, ['Withdrawal number; only pending withdrawals can be cancelled', '提币单号；只能取消待审核（pending）的提币']]],
-    returns: ['Withdrawal'], errors: ['not_found', 'invalid_state'],
+    body: [['withdrawal_no', 'string', true, ['Withdrawal number; only pending withdrawals can be cancelled. Items of a batch payout cannot be cancelled one by one: cancel the batch (its not-yet-reviewed items) instead', '提币单号；只能取消待审核（pending）的提币。批量打款里的单不能单笔取消，只能整批取消还没审核的部分']]],
+    returns: ['Withdrawal'], errors: ['not_found', 'invalid_state', 'batch_item_cancel'],
   },
   {
     method: 'POST', path: 'payouts/batch/', title: ['Submit a batch payout', '提交批量打款'],
@@ -320,6 +320,7 @@ export const ERRORS = [
   ['409', 'not_matched', ['The deposit is not matched to this order', '这笔到账没有匹配在这个订单上']],
   ['409', 'chain_not_enabled', ['This chain is not open for new addresses yet (TRON comes in a later release)', '这条链还没有开放分配新地址（TRON 在后续版本开放）']],
   ['409', 'invalid_state', ['Not allowed in the current state (e.g. cancelling a withdrawal that is no longer pending)', '当前状态不允许这个操作（例如取消已经不是待审核的提币）']],
+  ['409', 'batch_item_cancel', ['The withdrawal belongs to a batch payout and cannot be cancelled on its own; cancel the batch instead', '这笔属于批量打款，不能单笔取消，请整批取消（只取消还没审核的部分）']],
   ['413', 'too_large', ['Request body over 32 KB (256 KB for POST payouts/batch/)', '请求体超过 32 KB（POST payouts/batch/ 是 256 KB）']],
   ['422', 'invalid_param', ['A parameter is missing or invalid; see error.field', '参数缺失或格式错误，见 error.field']],
   ['422', 'invalid_address', ['Not a valid address for the chain', '不是这条链的合法地址']],

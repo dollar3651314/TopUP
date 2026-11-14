@@ -12,22 +12,26 @@ export const CUSTOMER_RE = /^[A-Za-z0-9_.@-]{1,128}$/;
 export const ORDER_NO_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const OPEN = ['pending', 'partial'];
 export const PAYOUT_CHAINS = ['eth', 'bsc', 'tron'];
+const TRON_ZERO = 'T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb';
 
 /** 按链校验收款地址：ETH / BSC 是 0x 地址（大小写混合的必须校验和正确，返回 EIP-55 写法），TRON 是 Base58；不对返回 null */
 export function chainAddress(chain, to) {
   const s = typeof to === 'string' ? to.trim() : '';
-  if (chain === 'tron') return isValidAddress(s) ? s : null;
-  if (chain === 'eth' || chain === 'bsc') return isChecksumAddress(s) ? checksumAddress(s) : null;
+  // 全 0 地址（TRON 是 T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb）付不出去：BatchPayout 会整批回滚，TRON 会烧掉，一律不收
+  if (chain === 'tron') return isValidAddress(s) && s !== TRON_ZERO ? s : null;
+  if (chain === 'eth' || chain === 'bsc') return isChecksumAddress(s) && !/^0x0{40}$/i.test(s) ? checksumAddress(s) : null;
   return null;
 }
 /** 商户登记的提现地址：元素是 { chain, address }；老数据里的字符串当作 TRON。返回规范化后的数组，有不对的抛出 invalid_address */
 export function normalizeCashoutWallets(list, field = 'cashout_wallets') {
   if (!Array.isArray(list)) throw new PayError('invalid_param', 422, field);
-  return list.map((w) => {
+  // 出错时 rows 写明第几行（从 1 起），页面据此提示"第 N 行"
+  const bad = (code, i) => Object.assign(new PayError(code, 422, field), { rows: [{ line: i + 1, code }] });
+  return list.map((w, i) => {
     const chain = typeof w === 'string' ? 'tron' : w?.chain;
-    if (!PAYOUT_CHAINS.includes(chain)) throw new PayError('invalid_param', 422, field);
+    if (!PAYOUT_CHAINS.includes(chain)) throw bad('invalid_param', i);
     const address = chainAddress(chain, typeof w === 'string' ? w : w.address);
-    if (!address) throw new PayError('invalid_address', 422, field);
+    if (!address) throw bad('invalid_address', i);
     return { chain, address };
   });
 }
@@ -348,8 +352,10 @@ export async function moveWithdrawal(t, id, from, to, extra = {}) {
 }
 export async function cancelWithdrawal(db, merchantId, id) {
   return db.tx(async (t) => {
-    const [own] = await t.query('select 1 from withdrawals where id = $1 and merchant_id = $2', [id, merchantId]);
+    const [own] = await t.query('select batch_ref from withdrawals where id = $1 and merchant_id = $2', [id, merchantId]);
     if (!own) throw new PayError('not_found', 404);
+    // 批量打款里的单不能单笔取消：只能整批取消还没审核的部分（payout-batch-cancel），2026-11-14 定
+    if (own.batch_ref) throw new PayError('batch_item_cancel', 409, 'withdrawal_no');
     const w = await moveWithdrawal(t, id, ['pending'], 'cancelled');
     await post(t, w.merchant_id, 'unfreeze', w.amount + w.fee, -(w.amount + w.fee), id, w.customer_id);
     await wdCallback(t, id);

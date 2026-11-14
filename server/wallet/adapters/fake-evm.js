@@ -23,6 +23,7 @@ function senderOf(f) {
   return '0x' + Buffer.from(keccak_256(pub.subarray(1))).subarray(12).toString('hex');
 }
 
+const TRANSFER_FAILED_SEL = selector('TransferFailed(uint256)');
 const SWEPT = keccakHex(Buffer.from('Swept(bytes32,address,bool)'));
 const SWEEP_SEL = selector('sweep(address,bytes32[])');
 
@@ -53,6 +54,16 @@ export function createFakeEvm({ chain, usdt, decimals, confirmations = 0, parent
   let resolveSalt = null;
   const id = () => '0x' + randomBytes(32).toString('hex');
   const key = (a) => a.toLowerCase();
+  /** 按 BatchPayout.pay 的规则试算：返回出错的那一笔（-1 表示整笔能成功；额度、余额不够返回 -2，和链上一样整笔回滚、说不出是哪一笔） */
+  const payCheck = (from, to, data) => {
+    const call = decodePayCall('0x' + data);
+    const sum = call.items.reduce((s, i) => s + i.amount, 0n);
+    const bad = call.items.findIndex((i) => blocked.has(key(i.to)) || /^0x0{40}$/i.test(i.to));
+    if (bad >= 0) return bad;
+    const ok = key(call.token) === key(usdt) && (allowances.get(`${key(from)}|${key(to)}`) || 0n) >= sum && (balances.get(key(from)) || 0n) >= sum;
+    return ok ? -1 : -2;
+  };
+  const reverted = (i) => Object.assign(new Error('execution reverted'), { rpcCode: 3, data: i >= 0 ? '0x' + TRANSFER_FAILED_SEL + BigInt(i).toString(16).padStart(64, '0') : '0x' });
   return {
     chain, usdt, decimals, confirmations, fake: true,
     /** 归集时盐 → 地址（由 contract 提供方告诉替身） */
@@ -82,7 +93,20 @@ export function createFakeEvm({ chain, usdt, decimals, confirmations = 0, parent
     async chainId() { return 31337n; },
     async gasPrice() { return 1_000_000_000n; },
     async nonce() { return BigInt(txs.size); },
-    async estimateGas() { throw new Error('fake: no estimate'); },
+    /** 试算网络费：打款按 pay 的规则试算（会回滚时和真节点一样抛出，带回滚数据） */
+    async estimateGas(tx) {
+      const data = String(tx?.data || '').replace(/^0x/, '');
+      if (data.startsWith(PAY_SEL)) { const r = payCheck(tx.from || '', tx.to || '', data); if (r !== -1) throw reverted(r); return 60_000n + 45_000n * BigInt(decodePayCall('0x' + data).items.length); }
+      if (data.startsWith(APPROVE_SEL)) return 50_000n;
+      return 21_000n;
+    },
+    async call(tx) {
+      const data = String(tx?.data || '').replace(/^0x/, '');
+      if (data.startsWith(PAY_SEL)) { const r = payCheck(tx.from || '', tx.to || '', data); if (r !== -1) throw reverted(r); }
+      return '0x';
+    },
+    async getCode(address) { return code.has(key(address)) ? '0x00' : '0x'; },
+    async confirmedNonce() { return BigInt(txs.size); },
     async sendRaw(raw) {
       const hash = keccakHex(Buffer.from(raw.slice(2), 'hex'));
       const f = rlpDecode(Buffer.from(raw.slice(2), 'hex'));
@@ -102,8 +126,7 @@ export function createFakeEvm({ chain, usdt, decimals, confirmations = 0, parent
         const call = decodePayCall('0x' + data);
         const sum = call.items.reduce((s, i) => s + i.amount, 0n);
         const k = `${from}|${key(to)}`;
-        const ok = key(call.token) === key(usdt) && (allowances.get(k) || 0n) >= sum && (balances.get(from) || 0n) >= sum && !call.items.some((i) => blocked.has(key(i.to)));
-        if (!ok) status = '0x0';
+        if (payCheck(from, to, data) !== -1) status = '0x0';
         else {
           allowances.set(k, allowances.get(k) - sum);
           for (const i of call.items) {

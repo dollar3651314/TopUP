@@ -17,7 +17,7 @@ import { walletAdminActions } from '../wallet/admin-actions.js';
 import { evmUnswept } from '../wallet/addresses.js';
 import { getSweepSettings } from '../wallet/sweep.js';
 import { payoutAdminActions } from './payout-admin.js';
-import { approvePayouts, createPayoutTxBatch, expirePayoutBatch, settlePayoutItem, getPayoutLimits, MAX_ITEMS_PER_TX } from './payout.js';
+import { createPayoutTxBatch, expirePayoutBatch, getPayoutLimits, MAX_ITEMS_PER_TX } from './payout.js';
 
 const TRX = 1_000_000;
 const SIGN_TTL_MS = 30 * 60 * 1000; // 待签名交易的有效期
@@ -31,6 +31,12 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
   const need = (cond, code, status = 422, field) => { if (!cond) throw new PayError(code, status, field); };
   const merchantRow = async (id) => { const m = await core.getMerchant(db, id); need(m, 'not_found', 404); return m; };
   const withExpiry = (tx) => { const rawHex = setExpiration(tx.raw_data_hex, now() + SIGN_TTL_MS); return { rawHex, txID: txIdOf(rawHex) }; };
+
+  /** 作废一个没签名的 TRON 打款批次：签名批次先改成 expired（之后交来的签名一律 409），再把单退回已审核 */
+  async function voidTronBatch(ptId) {
+    await db.query(`update sign_batches set status = 'expired', updated_at = now() where kind = 'withdraw' and status = 'planned' and plan->>'payout_batch' = $1`, [ptId]);
+    return expirePayoutBatch(db, ptId);
+  }
 
   // ---------- 签名批次 ----------
   async function saveBatch(kind, plan) {
@@ -125,7 +131,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     async withdrawals(b, actor, q) {
       const all = q.get('all') === '1';
       // approved=tron：已审核、还没凑进批次的 TRON 单（TRON 卡片的"核对并签名"用）
-      const where = q.get('approved') === 'tron' ? "where w.status = 'approved' and w.batch_id is null and w.chain = 'tron'" : all ? '' : "where w.status = 'pending'";
+      const where = q.get('approved') === 'tron' ? "where w.status = 'approved' and w.batch_id is null and w.hold_reason is null and w.chain = 'tron'" : all ? '' : "where w.status = 'pending'";
       const rows = await db.query(`select w.*, m.name merchant from withdrawals w join merchants m on m.id = w.merchant_id ${where} order by ${q.get('approved') ? 'w.approved_at, w.created_at, coalesce(w.batch_line, 0)' : 'w.created_at desc'} limit 200`);
       let hotUsdt = null; try { hotUsdt = (await tron.account(hot)).trc20[tron.contract] || 0; } catch { /* 查询失败时页面显示"—" */ }
       const overview = await payoutActions['payout-overview']();
@@ -136,23 +142,15 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     async 'withdraw-plan'(b) {
       const ids = [...new Set((b.ids || []).map(String))];
       need(ids.length > 0 && ids.length <= MAX_ITEMS_PER_TX.tron, 'invalid_param', 422, 'ids');
-      let rows = await db.query(`select * from withdrawals where id = any($1::text[]) and status in ('pending', 'approved') and batch_id is null and chain = 'tron'`, [ids]);
-      need(rows.length === ids.length, 'invalid_state', 409);
+      // 只收已审核、没凑进批次、没挂起的：审核只在"打款审核"的逐笔审核里做（单笔、每天上限、收款地址提示），签名不顺带审核
+      let rows = await db.query(`select * from withdrawals where id = any($1::text[]) and status = 'approved' and batch_id is null and hold_reason is null and chain = 'tron'`, [ids]);
+      need(rows.length === ids.length, 'not_approved', 409);
       const hotUsdt = (await tron.account(hot)).trc20[tron.contract] || 0;
       const total = rows.reduce((s, w) => s + w.amount, 0);
       need(total <= hotUsdt, 'hot_wallet_insufficient', 409);
       need(total <= (await getPayoutLimits(db)).perBatch, 'exceeds_batch_cap', 409);
-      // 页面上"审核 + 签名"一起做的（待审核的）：先按单笔、每天上限审核通过，超了的不签
-      const pend = rows.filter((w) => w.status === 'pending').map((w) => w.id);
-      if (pend.length) {
-        const r = await approvePayouts(db, { ids: pend, actor: 'admin', now: now() });
-        if (r.refused.length) throw Object.assign(new PayError(r.refused[0].reason, 409, 'ids'), { rows: r.refused });
-      }
-      // 之前凑了没签的 TRON 批次作废（单回到已审核）
-      for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) {
-        await expirePayoutBatch(db, x.id);
-        await db.query(`update sign_batches set status = 'expired', updated_at = now() where kind = 'withdraw' and status = 'planned' and plan->>'payout_batch' = $1`, [x.id]);
-      }
+      // 之前凑了没签的 TRON 批次作废（单回到已审核）；已经交了签名的（不是 planned）不动
+      for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) await voidTronBatch(x.id);
       const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids, actor: 'admin' });
       rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, coalesce(batch_line, 0), id', [ids]);
       const steps = [];
@@ -225,10 +223,17 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       await db.query('update sign_batches set verified_until = $2 where id = $1', [batch.id, new Date(now() + VERIFY_TTL_MS)]);
       return { ok: true, verified_until: iso(now() + VERIFY_TTL_MS) };
     },
-    /** 收到签名：逐笔核对"签名人 = 这笔交易的付款地址"，然后按顺序广播 */
+    /**
+     * 收到签名：逐笔核对"签名人 = 这笔交易的付款地址"，先原子占住这一批（同一批交两次只有一次能过，第二次 409），再按顺序广播。
+     * 打款：占住时每一笔就记成"已广播"并记下本地算出的交易号；广播报错（含超时、节点拒绝）不马上退回——
+     * 签好的交易可能已经到了别的节点，要等交易本身过期（SIGN_TTL）后链上仍查不到才回到已审核（confirmWithdrawals）。
+     * 节点回 DUP_TRANSACTION_ERROR：同一笔已经在链上或交易池里，按已广播处理。
+     */
     async 'sign-submit'(b, actor) {
       const batch = await loadBatch(b.batch_id, ['planned']);
       need(batch.verified_until && new Date(batch.verified_until).getTime() > now(), 'verify_required', 409);
+      // 交易原文的过期时间是出原文时 + SIGN_TTL：快过期的不再广播（广播了也上不了链），请作废重凑
+      need(now() - new Date(batch.created_at).getTime() < SIGN_TTL_MS - 60_000, 'plan_expired', 409);
       const sigs = b.signatures || {};
       const plan = batch.plan;
       const all = batch.kind === 'withdraw' ? plan.steps : plan.items.flatMap((it) => it.steps);
@@ -238,20 +243,38 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
         need(signerOf(s.txID, sig) === s.owner, 'bad_signature', 422, s.txID);
         s.signature = sig;
       }
-      await audit(db, actor, `${batch.kind}.signed`, batch.id, { count: all.length });
       if (batch.kind === 'withdraw') {
-        if (plan.payout_batch) await db.query(`update payout_tx_batches set status = 'broadcast', updated_at = now() where id = $1 and status = 'planned'`, [plan.payout_batch]);
-        else for (const s of plan.steps) await core.markWithdrawal(db, s.withdrawal_id, 'signing', { batchId: batch.id });
+        await db.tx(async (t) => {
+          const [own] = await t.query(`update sign_batches set status = 'broadcasting', plan = $2::jsonb, updated_at = now() where id = $1 and status = 'planned' returning id`, [batch.id, JSON.stringify(plan)]);
+          if (!own) throw new PayError('invalid_state', 409);
+          if (plan.payout_batch) {
+            const [pt] = await t.query(`update payout_tx_batches set status = 'broadcast', updated_at = now() where id = $1 and status = 'planned' returning id`, [plan.payout_batch]);
+            if (!pt) throw new PayError('invalid_state', 409);
+          }
+          for (const s of plan.steps) {
+            const [w] = await t.query(`update withdrawals set status = 'broadcast', txid = $2, batch_id = coalesce(batch_id, $3), updated_at = now() where id = $1 and status = any($4::text[]) returning id`,
+              [s.withdrawal_id, s.txID, batch.id, plan.payout_batch ? ['signing'] : ['pending', 'approved']]);
+            if (!w) throw new PayError('invalid_state', 409);
+            await core.wdCallback(t, s.withdrawal_id);
+          }
+          await audit(t, actor, 'withdraw.signed', batch.id, { count: all.length });
+        });
+        const errs = [];
         for (const s of plan.steps) {
           const err = await broadcastSteps([s]);
-          if (err && plan.payout_batch) { await settlePayoutItem(db, s.withdrawal_id, { success: false, reason: String(err).slice(0, 200) }); if (notify) await notify(`TRON 打款没发出去：${s.withdrawal_id}`, `原因：${err}。这一笔回到"已审核"，可以重新签名，冻结的金额不动。`); }
-          else if (err) { await core.settleWithdrawal(db, s.withdrawal_id, false); if (notify) await notify(`提币广播失败：${s.withdrawal_id}`, `原因：${err}。冻结的金额已退回商户。`); }
-          else await core.markWithdrawal(db, s.withdrawal_id, 'broadcast', { txid: s.txid });
+          if (!err) continue;
+          if (/DUP_TRANSACTION/i.test(err)) { s.status = 'broadcast'; s.txid = s.txID; delete s.error; continue; }
+          s.status = 'pending_check'; s.txid = s.txID; // 先当作可能已经发出去，等过期后再判断
+          errs.push(`${s.withdrawal_id}：${err}`);
         }
         await db.query(`update sign_batches set status = 'done', plan = $2::jsonb, updated_at = now() where id = $1`, [batch.id, JSON.stringify(plan)]);
+        if (errs.length && notify) await notify(`TRON 打款广播出错：${errs.length} 笔`, `${errs.join('\n')}\n\n签好的交易可能已经发出去了，为了不付两次，这几笔先不退回：交易 ${Math.round(SIGN_TTL_MS / 60_000)} 分钟后过期，过期后链上仍查不到才回到"已审核"（冻结的金额不动），到时可以重新签名。`);
         return { ok: true, results: plan.steps.map((s) => ({ withdrawal_id: s.withdrawal_id, status: s.status, txid: s.txid || null, error: s.error || null })) };
       }
-      // 归集：先广播第 1 步，后面的步骤由每分钟的任务在上一步确认后继续（sweepProgress）
+      // 归集：先占住（同一批交两次只有一次能过），再广播第 1 步，后面的步骤由每分钟的任务在上一步确认后继续（sweepProgress）
+      const [own] = await db.query(`update sign_batches set status = 'broadcasting', updated_at = now() where id = $1 and status = 'planned' returning id`, [batch.id]);
+      need(own, 'invalid_state', 409);
+      await audit(db, actor, `${batch.kind}.signed`, batch.id, { count: all.length });
       for (const it of plan.items) { const err = await broadcastSteps(it.steps.filter((s) => s.stage === 1)); if (err) it.error = err; }
       await db.query(`update sign_batches set status = 'stage1', plan = $2::jsonb, updated_at = now() where id = $1`, [batch.id, JSON.stringify(plan)]);
       await db.query(`update sweeps set status = 'broadcasting' where batch_id = $1`, [batch.id]);
@@ -355,7 +378,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const within = async (p, ms = 6000) => { let timer; try { return await Promise.race([p, new Promise((res) => { timer = setTimeout(() => res(null), ms); })]); } catch (e) { console.error(`[overview-chain] ${e.message}`); return null; } finally { clearTimeout(timer); } };
       const chain = async (a) => { if (!a) return { usdt: 0, trx: 0 }; const acc = await tron.account(a); return { usdt: Number(acc.trc20[tron.contract]) || 0, trx: acc.trx }; };
       const [h, c, r, approved, kybPending] = await Promise.all([within(chain(hot)), within(chain(cold)), within(tron.resources(hot)), within(listApproved()), within(pendingKyb())]);
-      // ETH、BSC：冷钱包（合约里写死的 parent）的 USDT 余额；第 1 批 ETH、BSC 没有热钱包（打款在后续批次）
+      // ETH、BSC：冷钱包（合约里写死的 parent）的 USDT 余额；热钱包只有开通了批量打款（第 3 批）的链才有
       const evmChains = layer ? [...layer.enabledChains] : [];
       // TRON 合约钱包的 parent 和第 0 批的冷钱包是同一个地址时只算一次
       const tronParent = layer?.providers?.contract?.scheme?.('tron')?.parent;
@@ -368,20 +391,24 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const opened = new Set((await db.query('select kyb_ref from merchants where kyb_ref is not null')).map((x) => x.kyb_ref));
       const evmColdKnown = Object.values(evmCold).every((x) => x !== null);
       const coldAll = c && evmColdKnown ? c.usdt + Object.values(evmCold).reduce((a, x) => a + x, 0) : null;
+      // 以太坊、BSC 热钱包（第 3 批批量打款开通的链）：也是平台的钱，算进资产
+      const payoutOn = payoutSvc ? payoutSvc.chains : [];
+      const evmHot = Object.fromEntries(await Promise.all(payoutOn.map(async (ch) => [ch, await within(payoutSvc.hotBalance(ch))])));
+      const hotAll = h && Object.values(evmHot).every((x) => x !== null) ? h.usdt + Object.values(evmHot).reduce((a, x) => a + x, 0) : null;
       // 任何一条开通的链查不到余额，合计就显示"—"（不拿缺一块的数字算利润和告警）
-      const owed = bal.owed, wallets = h && coldAll !== null ? h.usdt + coldAll : null, assets = wallets === null ? null : unsAll + wallets;
+      const owed = bal.owed, wallets = hotAll !== null && coldAll !== null ? hotAll + coldAll : null, assets = wallets === null ? null : unsAll + wallets;
       console.log(`[overview-chain] ${Date.now() - t0} ms`);
       return {
         elapsed_ms: Date.now() - t0,
         funds: {
-          hot_usdt: h ? h.usdt : null, cold_usdt: coldAll, assets_total: assets,
+          hot_usdt: hotAll, cold_usdt: coldAll, assets_total: assets,
           profit_total: assets === null ? null : assets - owed,
           profit_now: wallets === null ? null : Math.max(0, wallets - owed),
           profit_after_sweep: assets === null ? null : assets - owed - Math.max(0, wallets - owed),
           by_chain: {
             // TRON 一行：第 0 批热钱包、冷钱包 + 合约钱包的 parent（parent 就是第 0 批冷钱包时只算一次）
             tron: { hot_usdt: h ? h.usdt : null, cold_usdt: !c ? null : 'tron' in evmCold ? (evmCold.tron === null ? null : c.usdt + evmCold.tron) : c.usdt },
-            ...Object.fromEntries(evmChains.filter((ch) => ch !== 'tron').map((ch) => [ch, { hot_usdt: null, cold_usdt: evmCold[ch] }])),
+            ...Object.fromEntries(evmChains.filter((ch) => ch !== 'tron').map((ch) => [ch, { hot_usdt: payoutOn.includes(ch) ? evmHot[ch] : null, hot_enabled: payoutOn.includes(ch), cold_usdt: evmCold[ch] }])),
           },
         },
         todo: { kyb_pending: kybPending, merchants_to_open: approved === null ? null : approved.filter((a) => !opened.has(a.ref)).length },
