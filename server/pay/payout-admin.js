@@ -67,7 +67,7 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
   return {
     /** 打款审核页：待审核的（单笔、商户批量分组）、各链凑批卡片、最近的签名批次、上限、处理时段 */
     async 'payout-overview'() {
-      const rows = await db.query(`select w.*, m.name merchant, m.cashout_wallets from withdrawals w join merchants m on m.id = w.merchant_id where w.status = 'pending' order by w.created_at, w.id limit 1000`);
+      const rows = await db.query(`select w.*, m.name merchant, m.cashout_wallets from withdrawals w join merchants m on m.id = w.merchant_id where w.status = 'pending' order by w.created_at, coalesce(w.batch_line, 0), w.id limit 1000`);
       // 代付的收款地址是不是第一次付（原型偏离第 2 条：没有白名单，审核时提示）
       const seen = new Set((await db.query(`select distinct merchant_id || '|' || chain || '|' || lower(to_address) k from withdrawals where status = 'completed'`)).map((r) => r.k));
       const item = (w) => ({

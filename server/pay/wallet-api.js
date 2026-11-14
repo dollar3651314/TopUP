@@ -126,7 +126,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const all = q.get('all') === '1';
       // approved=tron：已审核、还没凑进批次的 TRON 单（TRON 卡片的"核对并签名"用）
       const where = q.get('approved') === 'tron' ? "where w.status = 'approved' and w.batch_id is null and w.chain = 'tron'" : all ? '' : "where w.status = 'pending'";
-      const rows = await db.query(`select w.*, m.name merchant from withdrawals w join merchants m on m.id = w.merchant_id ${where} order by ${q.get('approved') ? 'w.approved_at, w.created_at' : 'w.created_at desc'} limit 200`);
+      const rows = await db.query(`select w.*, m.name merchant from withdrawals w join merchants m on m.id = w.merchant_id ${where} order by ${q.get('approved') ? 'w.approved_at, w.created_at, coalesce(w.batch_line, 0)' : 'w.created_at desc'} limit 200`);
       let hotUsdt = null; try { hotUsdt = (await tron.account(hot)).trc20[tron.contract] || 0; } catch { /* 查询失败时页面显示"—" */ }
       const overview = await payoutActions['payout-overview']();
       return { ...overview, hot: { address: hot, usdt: hotUsdt }, items: rows.map((w) => ({ id: w.id, merchant_id: w.merchant_id, merchant: w.merchant, kind: w.kind, chain: w.chain, batch_no: w.batch_ref || null, customer_id: w.customer_id, to: w.to_address, amount: w.amount, fee: w.fee, source: w.source, status: w.status, txid: w.txid, reason: w.reason, created_at: iso(w.created_at), registered: w.kind === 'cashout' })) };
@@ -154,7 +154,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
         await db.query(`update sign_batches set status = 'expired', updated_at = now() where kind = 'withdraw' and status = 'planned' and plan->>'payout_batch' = $1`, [x.id]);
       }
       const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids, actor: 'admin' });
-      rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, id', [ids]);
+      rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, coalesce(batch_line, 0), id', [ids]);
       const steps = [];
       for (const w of rows) {
         const tx = await tron.buildUsdtTransfer({ from: hot, to: w.to_address, amount: w.amount, feeLimit: USDT_FEE_LIMIT });

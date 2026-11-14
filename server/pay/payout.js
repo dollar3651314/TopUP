@@ -150,7 +150,7 @@ function batchStatus(items) {
 export async function payoutBatchView(q, batchNo, merchantId = null) {
   const [b] = await q.query(`select * from payout_batches where batch_no = $1 ${merchantId ? 'and merchant_id = $2' : ''}`, merchantId ? [batchNo, merchantId] : [batchNo]);
   if (!b) return null;
-  const rows = await q.query(`select id from withdrawals where batch_ref = $1 order by created_at, id`, [batchNo]);
+  const rows = await q.query(`select id from withdrawals where batch_ref = $1 order by batch_line, created_at, id`, [batchNo]);
   const items = [];
   for (const r of rows) items.push(await withdrawalView(q, r.id));
   return { batch_no: b.batch_no, merchant_id: b.merchant_id, source: b.source, status: batchStatus(items), count: b.item_count, total: Number(b.total), created_at: new Date(b.created_at).toISOString(), items };
@@ -168,7 +168,7 @@ export async function reviewPayoutBatch(db, { batchNo, approve = [], reason = ''
   return db.tx(async (t) => {
     const [b] = await t.query('select batch_no from payout_batches where batch_no = $1', [String(batchNo || '')]);
     if (!b) throw new PayError('not_found', 404);
-    const pend = await t.query(`select id from withdrawals where batch_ref = $1 and status = 'pending' order by created_at, id for update`, [b.batch_no]);
+    const pend = await t.query(`select id from withdrawals where batch_ref = $1 and status = 'pending' order by batch_line, created_at, id for update`, [b.batch_no]);
     if (!pend.length) throw new PayError('invalid_state', 409);
     for (const id of ok) if (!pend.some((p) => p.id === id)) throw new PayError('invalid_param', 422, 'approve');
     const rejectIds = pend.map((p) => p.id).filter((id) => !ok.has(id));
@@ -245,8 +245,8 @@ export async function submitPayoutBatch(db, merchant, { rows = [], source = 'web
     for (const r of good) {
       if (r.customer_id) await ensureCustomer(t, merchant.id, r.customer_id);
       const id = `WD-${ymd(now)}-${rid(4)}${(k++).toString(36).toUpperCase()}`;
-      await t.query(`insert into withdrawals (id, merchant_id, kind, customer_id, to_address, amount, fee, source, status, merchant_ref, chain, batch_ref, created_at) values ($1, $2, 'payout', $3, $4, $5, $6, $7, 'pending', $8, $9, $10, clock_timestamp())`,
-        [id, merchant.id, r.customer_id, r.to, r.amount, r.fee, source, r.merchant_ref, r.chain, no]);
+      await t.query(`insert into withdrawals (id, merchant_id, kind, customer_id, to_address, amount, fee, source, status, merchant_ref, chain, batch_ref, batch_line, created_at) values ($1, $2, 'payout', $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, clock_timestamp())`,
+        [id, merchant.id, r.customer_id, r.to, r.amount, r.fee, source, r.merchant_ref, r.chain, no, k]);
       out.push({ line: r.line, index: r.index, withdrawal_no: id, chain: r.chain, to: r.to, amount: r.amount, fee: r.fee, status: 'pending', merchant_ref: r.merchant_ref, warnings: r.warnings });
     }
     await audit(t, `merchant:${merchant.id}`, 'payout.batch_submit', no, { count: good.length, source });

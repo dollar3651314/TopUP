@@ -328,6 +328,7 @@ alter table withdrawals add column if not exists chain text not null default 'tr
 alter table withdrawals drop constraint if exists withdrawals_chain_check;
 alter table withdrawals add constraint withdrawals_chain_check check (chain in ('eth', 'bsc', 'tron'));
 alter table withdrawals add column if not exists batch_ref text;
+alter table withdrawals add column if not exists batch_line int; -- 商户批次里的顺序（同一时刻建的几笔按它排）
 alter table withdrawals add column if not exists approved_at timestamptz;
 alter table withdrawals add column if not exists approved_by text;
 create index if not exists withdrawals_batch_ref on withdrawals (batch_ref) where batch_ref is not null;

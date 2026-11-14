@@ -53,7 +53,7 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
     const c = cfgOf(chain);
     if (await allowanceBusy(chain)) throw new PayError('allowance_in_progress', 409);
     for (const b of await db.query(`select id from payout_tx_batches where chain = $1 and status = 'planned'`, [chain])) await expirePayoutBatch(db, b.id);
-    const rows = await db.query(`select id, amount, to_address from withdrawals where chain = $1 and status = 'approved' and batch_id is null order by approved_at, created_at, id`, [chain]);
+    const rows = await db.query(`select id, amount, to_address from withdrawals where chain = $1 and status = 'approved' and batch_id is null order by approved_at, created_at, coalesce(batch_line, 0), id`, [chain]);
     const st = await status(chain);
     const p = planPayoutBatches(rows.map((r) => ({ id: r.id, amount: Number(r.amount), to: r.to_address })), { chain, perBatch: st.limits.perBatch, hotBalance: st.hot_balance, allowance: st.allowance, perItem: st.limits.perItem });
     const chainId = await chainIdOf(chain);
