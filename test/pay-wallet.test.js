@@ -128,14 +128,23 @@ test('核对规则：收款地址不是热钱包或冷钱包、付款地址不�
   assert.match(checkStep(wrongTx, { from: addr }, rules).error, /哈希/);
 });
 
-test('钱包初始化：只接受 xpub，第 1 个地址要对得上，只能初始化一次', async () => {
+test('钱包初始化接口已删除：wallet-init 一律 404 not_found（交私钥、交 xpub 都一样），不写 xpub、不留审计', async () => {
+  // 第 3 批：全新系统也没有"初始化主助记词"，按钮先删、接口随后删；删了以后任何请求都不能再写主 xpub
   const { db, call } = await setup();
   await db.query("delete from pay_meta where key = 'xpub'");
   const acc = root.derive("m/44'/195'/0'");
-  assert.equal((await call('wallet-init', { xpub: acc.privateExtendedKey, first_address: 'x', code: '1' })).body.error.code, 'private_key_not_allowed');
-  assert.equal((await call('wallet-init', { xpub: XPUB, first_address: HOT, code: '1' })).body.error.code, 'first_address_mismatch');
-  assert.equal((await call('wallet-init', { xpub: XPUB, first_address: addressOfPrivateKey(priv(0)), code: '1' })).status, 200);
-  assert.equal((await call('wallet-init', { xpub: XPUB, first_address: addressOfPrivateKey(priv(0)), code: '1' })).body.error.code, 'already_initialized');
+  const auditBefore = (await db.query('select count(*)::int n from pay_audit'))[0].n;
+  for (const body of [
+    { xpub: acc.privateExtendedKey, first_address: 'x', code: '1' },
+    { xpub: XPUB, first_address: HOT, code: '1' },
+    { xpub: XPUB, first_address: addressOfPrivateKey(priv(0)), code: '1' },
+  ]) {
+    const r = await call('wallet-init', body);
+    assert.equal(r.status, 404, `wallet-init 应该已删除（404），实际 ${r.status} ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.error.code, 'not_found');
+  }
+  assert.equal((await db.query("select count(*)::int n from pay_meta where key = 'xpub'"))[0].n, 0, '不能写进主 xpub');
+  assert.equal((await db.query('select count(*)::int n from pay_audit'))[0].n, auditBefore, '不留审计（接口不存在）');
 });
 
 test('归集只转账本上记录过的金额：链上多出来的还没扫到的到账先不动', async () => {

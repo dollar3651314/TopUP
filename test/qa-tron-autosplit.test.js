@@ -25,13 +25,13 @@ const COLD = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 // 那就成了"一笔交易记两笔打款"，和这里要测的拆批无关（真实节点两次请求不会落在同一毫秒）
 const payee = (i) => addressOfPrivateKey(hex.decode((i + 0x100).toString(16).padStart(64, '0')));
 
-async function setup() {
+async function setup({ now } = {}) {
   const db = await createTestDb(); await migrate(db);
   const tron = createFakeTron();
   await core.createMerchant(db, { id: 'm1', name: 'Acme', feeIn: { ppm: 0, fixed: 0, min: 0 }, feeOut: { ppm: 0, fixed: 0, min: 0 } });
   await db.query('update balances set available = available + $1', [100_000 * U]);
   const m1 = await core.getMerchant(db, 'm1');
-  const api = createWalletApi({ db, tron, keys: derivePayKeys('test-app-secret-test-app-secret-0123456789'), wallets: { hot: HOT, cold: COLD }, requireAdmin: async () => {}, verifyAdminCode: async () => true });
+  const api = createWalletApi({ db, tron, keys: derivePayKeys('test-app-secret-test-app-secret-0123456789'), wallets: { hot: HOT, cold: COLD }, requireAdmin: async () => {}, verifyAdminCode: async () => true, ...(now ? { now } : {}) });
   const call = async (a, body) => {
     const res = await api(new Request(`https://x/api/wallet/?a=${a}`, { method: body ? 'POST' : 'GET', body: body ? JSON.stringify(body) : undefined, headers: { 'content-type': 'application/json', 'x-topup-csrf': '1' } }));
     return { status: res.status, body: await res.json() };
@@ -232,4 +232,40 @@ test('TRON 自动拆批：签完一批后，剩下的下一轮能继续签；全
   const [b] = await t.db.query(`select frozen::bigint f from balances where merchant_id = 'm1'`);
   assert.equal(Number(b.f), 0, '冻结清零');
   await t.assertNoOverlap();
+});
+
+test('TRON 同一批里两笔收款地址、金额都相同：出的是 2 笔不同的交易（交易号不同），链上 2 笔转账，每笔打款各对应自己那一笔', { timeout: 60_000 }, async () => {
+  // 服务器时钟：凑批这一次请求里停在同一毫秒（循环里连着出交易，同一毫秒里出好几笔是常态）；其余时候是真实时间
+  const clock = { frozen: null };
+  const t = await setup({ now: () => clock.frozen ?? Date.now() });
+  t.setHot(10_000);
+  const db = t.db;
+  const m1 = await core.getMerchant(db, 'm1');
+  const to = payee(7);
+  const ids = [];
+  for (let i = 0; i < 2; i++) ids.push((await core.requestWithdrawal(db, m1, { kind: 'payout', chain: 'tron', to, amount: 100 * U, source: 'web' })).withdrawal_no);
+  const t0 = Date.now() - 3_600_000;
+  for (const [k, id] of ids.entries()) assert.deepEqual((await approvePayouts(db, { ids: [id], actor: 'admin', now: t0 + k * 1000 })).approved, [id]);
+  // 节点替身：前两次出交易落在同一毫秒（服务器循环里连着出 20 笔，真实节点上也会碰到），之后的请求时间往后走
+  const orig = t.tron.buildUsdtTransfer.bind(t.tron);
+  const T = Date.now();
+  let calls = 0;
+  t.tron.buildUsdtTransfer = async (p) => {
+    const at = T + Math.max(0, calls++ - 1);
+    const real = Date.now;
+    Date.now = () => at;
+    try { return await orig(p); } finally { Date.now = real; }
+  };
+  clock.frozen = Date.now();
+  const r = await t.plan(ids);
+  clock.frozen = null;
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.steps.length, 2, '两笔都在这一批');
+  const txids = r.body.steps.map((s) => s.txID);
+  assert.equal(new Set(txids).size, 2, `同一批里出了两份一样的交易（交易号 ${txids.join('、')}）：只会上链一笔，两笔打款却都会记完成`);
+  await t.sign(r.body);
+  const onchain = new Set(t.tron.broadcasts.filter((d) => d.contracts[0].to === to).map((d) => d.txId));
+  assert.equal(onchain.size, 2, `链上应该有 2 笔转账，实际 ${onchain.size} 笔`);
+  const rows = await db.query('select id, txid from withdrawals where id = any($1::text[])', [ids]);
+  assert.equal(new Set(rows.map((x) => x.txid)).size, 2, `两笔打款记的交易号应该不同：${JSON.stringify(rows)}`);
 });
