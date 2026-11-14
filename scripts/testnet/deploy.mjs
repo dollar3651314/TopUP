@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // 测试网合约部署（Sepolia、BSC 测试网、TRON Nile）。说明见同目录 README.md；GitHub 上由 .github/workflows/testnet-deploy.yml 运行（环境 testnet，要管理员批准）。
-//   ETH / BSC：forge script contracts/script/DeployTestnet.s.sol（实现合约 → 工厂 → SweepBatcher → 测试 USDT → BatchPayout）
+//   ETH / BSC：forge script contracts/script/DeployTestnet.s.sol（实现合约 → 工厂 → SweepBatcher → 测试 USDT → BatchPayout）只生成交易、不广播；
+//              由 evm-send.mjs 按节点自己的规则模拟整套、定 gas、逐笔签名发出并核对回执（forge 1.5.1 不认识 Sepolia 现在的硬分叉，它估的 gas 不用）；
+//              全部上链后再用 contracts/script/VerifyDeployment.s.sol 连链只读核对一遍
 //   TRON：TRON 官方编译器（scripts/tron-nile/compile.mjs）编译，ForwarderTron → ForwarderFactoryTron → SweepBatcherTron → 测试 USDT（TRC20）
 // 部署完用服务器自己的代码核对（server/wallet/：和服务器启动时同一套链上核对、同一套充值地址算法），全部通过才算成功。
 // 结果：OUT_DIR（默认 testnet-deploy/）下 deployment.json（全部是公开地址和交易号，可以填进 config/wallets.json 的 staging 一节）和 summary.md。
@@ -11,6 +13,8 @@
 //   TESTNET_ETH_RPC_URL / TESTNET_BSC_RPC_URL   节点地址（可以带 key，日志里不打印）；不填用公共测试网节点
 //   TESTNET_TRON_NODE            TRON 节点（默认 https://nile.trongrid.io）；TRONGRID_API_KEY 可选
 //   EVM_PARENT / EVM_OPERATOR / EVM_OWNER（默认 = parent）/ EVM_START_NONCE（默认 0）
+//   EVM_ALIGN_NONCE              1 = 部署账户在某条 EVM 链上的 nonce 小于 EVM_START_NONCE 时，先给自己转 0 把 nonce 推到起始 nonce（两条链地址才相同）
+//   EVM_GAS_PRICE_GWEI           ETH / BSC 的 gas 价格（gwei，可选）；不填按节点：max(eth_gasPrice, 2 × baseFee + 小费)
 //   TRON_PARENT / TRON_OPERATOR / TRON_OWNER（默认 = parent）
 //   TESTNET_USDT                 1 = 每条链部署一个测试 USDT（默认 1）；0 = 不部署（TRON 用 config/wallets.json 里 Nile 官方测试 USDT；ETH、BSC 没有官方的，usdt 留空）
 //   TESTNET_USDT_MINT            部署时给部署账户多少个测试 USDT（默认 1,000,000）
@@ -18,9 +22,11 @@
 //   TESTNET_LOCAL=1              本机演练：允许本地 anvil（链 ID 31337）和本机 TRON 私链；GitHub 上不要设
 //   OUT_DIR                      结果目录（默认 testnet-deploy）
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { addressOfKey } from '../../server/wallet/evm-tx.js';
+import { preflight, sendAll, alignNonce, pickGasPrice, fmtEth } from './evm-send.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const env = process.env;
@@ -30,8 +36,8 @@ const CHAINS = (env.TESTNET_CHAINS || 'eth,bsc,tron').split(',').map((s) => s.tr
 const USDT = (env.TESTNET_USDT ?? '1') === '1';
 const MINT = env.TESTNET_USDT_MINT || '1000000';
 const EVM = {
-  eth: { name: '以太坊 Sepolia', chainId: 11155111, rpc: env.TESTNET_ETH_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com', explorer: 'https://sepolia.etherscan.io' },
-  bsc: { name: 'BSC 测试网', chainId: 97, rpc: env.TESTNET_BSC_RPC_URL || 'https://bsc-testnet-rpc.publicnode.com', explorer: 'https://testnet.bscscan.com', legacy: true },
+  eth: { name: '以太坊 Sepolia', chainId: 11155111, rpc: env.TESTNET_ETH_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com', explorer: 'https://sepolia.etherscan.io', unit: 'ETH' },
+  bsc: { name: 'BSC 测试网', chainId: 97, rpc: env.TESTNET_BSC_RPC_URL || 'https://bsc-testnet-rpc.publicnode.com', explorer: 'https://testnet.bscscan.com', unit: 'tBNB' },
 };
 const TRON_NODE = env.TESTNET_TRON_NODE || 'https://nile.trongrid.io';
 const FEE_LIMIT = 1_000_000_000; // TRON 每笔最多烧 1,000 TRX（测试币）
@@ -74,16 +80,17 @@ async function rpc(url, method, params = []) {
 }
 
 /**
- * forge script：私钥、参数都走环境变量（不进命令行参数）；返回 TOPUP_OUT 行里的地址。
+ * forge script（只模拟、不广播）：私钥、参数都走环境变量（不进命令行参数）；返回 TOPUP_OUT 行里的地址。
  * 不加 -v：失败时 forge 的调用轨迹会把私钥按十进制整数打出来（vm.addr、startBroadcast 的参数），GitHub 只遮盖原样的密钥值。
  * 另外把输出里出现的私钥（十六进制、十进制）和节点地址（可能带 key）都换掉再显示。
  */
-function forge(c, extraEnv, k) {
-  const args = ['script', 'script/DeployTestnet.s.sol:DeployTestnet', '--rpc-url', c.rpc, '--broadcast', '--slow', ...(c.legacy ? ['--legacy'] : [])];
+function forge(c, script, extraEnv, k) {
+  const args = ['script', script, '--rpc-url', c.rpc];
   const secrets = [k, BigInt('0x' + k).toString(10), ...(c.rpc && !isLocalHost(c.rpc) ? [c.rpc] : [])];
   return new Promise((resolve, reject) => {
     // 空着的参数不传（forge 的 vm.envOr 遇到空字符串会报解析错误，而不是用默认值）
-    const childEnv = Object.fromEntries(Object.entries({ ...env, ...extraEnv, TOPUP_TESTNET_DEPLOYER_KEY: '0x' + k }).filter(([, v]) => v !== '' && v !== undefined));
+    // 私钥只给部署脚本（核对脚本不需要）
+    const childEnv = Object.fromEntries(Object.entries({ ...env, ...extraEnv, TOPUP_TESTNET_DEPLOYER_KEY: script.startsWith('script/DeployTestnet') ? '0x' + k : '' }).filter(([, v]) => v !== '' && v !== undefined));
     const p = spawn('forge', args, { cwd: join(ROOT, 'contracts'), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
     let text = '';
     const mask = (s) => secrets.reduce((t, x) => t.split(x).join('<已遮盖>'), String(s).replace(/0x([0-9a-f]{64})/gi, (m, h) => (h.toLowerCase() === k ? '<已遮盖>' : m)));
@@ -103,11 +110,23 @@ function forge(c, extraEnv, k) {
   });
 }
 
-function broadcastTxs(chainId) {
-  const f = join(ROOT, 'contracts/broadcast/DeployTestnet.s.sol', String(chainId), 'run-latest.json');
-  if (!existsSync(f)) return [];
-  const j = JSON.parse(readFileSync(f, 'utf8'));
-  return (j.transactions || []).map((t) => ({ hash: t.hash, type: t.transactionType, contract: t.contractName || null, address: t.contractAddress || null, fn: t.function || null }));
+const dryRunFile = (chainId) => join(ROOT, 'contracts/broadcast/DeployTestnet.s.sol', String(chainId), 'dry-run/run-latest.json');
+
+/** forge 模拟出的交易（不广播时写在 dry-run 里）：核对发送人、nonce 连续，取出要发的数据 */
+function plannedTxs(chainId, deployer, startNonce) {
+  const f = dryRunFile(chainId);
+  if (!existsSync(f)) fail(`forge 没有写出模拟的交易（${f}）`);
+  const list = JSON.parse(readFileSync(f, 'utf8')).transactions || [];
+  if (!list.length) fail('forge 模拟出的交易是空的');
+  return list.map((t, i) => {
+    const tx = t.transaction || {};
+    if (String(tx.from || '').toLowerCase() !== deployer.toLowerCase()) fail(`forge 模拟的第 ${i + 1} 笔不是部署账户发的：${tx.from}`);
+    const nonce = Number(BigInt(tx.nonce ?? -1));
+    if (nonce !== startNonce + i) fail(`forge 模拟的第 ${i + 1} 笔 nonce 是 ${nonce}，应该是 ${startNonce + i}`);
+    const create = t.transactionType === 'CREATE';
+    const label = create ? `${t.contractName || '合约'} 创建` : `${t.contractName || '合约'}.${String(t.function || '调用').replace(/\(.*/, '')}`;
+    return { label, contract: t.contractName || null, fn: t.function || null, nonce, to: create ? null : tx.to, data: tx.input || tx.data, value: BigInt(tx.value || 0), contractAddress: create ? t.contractAddress : null };
+  });
 }
 
 async function deployEvm(chain, k) {
@@ -121,23 +140,65 @@ async function deployEvm(chain, k) {
   const localOk = LOCAL && id === 31337 && isLocalHost(c.rpc);
   if (id !== c.chainId && !localOk) fail(`${c.name}：节点的链 ID 是 ${id}，应该是 ${c.chainId}`);
   log(`\n== ${c.name}（链 ID ${id}）`);
-  const got = await forge(c, {
+  const call = (method, params) => rpc(c.rpc, method, params);
+  const explorer = localOk ? '' : c.explorer;
+  const deployer = addressOfKey('0x' + k);
+  const startNonce = Number(env.EVM_START_NONCE || '0');
+  if (!Number.isInteger(startNonce) || startNonce < 0) fail('EVM_START_NONCE 要填 0 或正整数');
+  // 先把结果的骨架写好：中途失败时，已经发出的交易也会写进 deployment.json
+  const rec = out.chains[chain] = { name: c.name, chainId: id, explorer: explorer || null, deployer, startNonce, operator, owner, txs: [] };
+  const onTx = (t) => rec.txs.push(t);
+  const wait = localOk ? { timeoutMs: 60_000, pollMs: 200 } : { timeoutMs: 600_000, pollMs: 3_000 };
+  const gasPrice = await pickGasPrice(call, { overrideGwei: env.EVM_GAS_PRICE_GWEI || '' });
+  let nonce = Number(BigInt(await call('eth_getTransactionCount', [deployer, 'latest'])));
+  const balance0 = BigInt(await call('eth_getBalance', [deployer, 'latest']));
+  log(`部署账户 ${deployer}：nonce ${nonce}（起始 nonce 填的是 ${startNonce}），余额 ${fmtEth(balance0, c.unit)}；gas 价格 ${gasPrice} wei`);
+  if (nonce !== startNonce) {
+    if (env.EVM_ALIGN_NONCE === '1' && nonce < startNonce) {
+      await alignNonce(call, { key: '0x' + k, from: deployer, chainId: id, target: startNonce, gasPrice, explorer, onTx, log, wait, unit: c.unit });
+      nonce = Number(BigInt(await call('eth_getTransactionCount', [deployer, 'latest'])));
+    }
+    if (nonce !== startNonce) {
+      fail(`${c.name}：部署账户的 nonce 是 ${nonce}，起始 nonce 填的是 ${startNonce}。` + (nonce < startNonce
+        ? `要让这条链的地址和另一条链一样，运行时勾选"对齐 nonce"（EVM_ALIGN_NONCE=1，先给自己转 0 把 nonce 推到 ${startNonce}）`
+        : `nonce 不能往回退：起始 nonce 填 ${nonce}（另一条链也要用同一个值，不够的勾选"对齐 nonce"）`));
+    }
+  }
+  // 1. forge 只模拟（不广播）：算出地址、跑部署脚本里的字节码和参数核对、写出要发的交易
+  try { rmSync(dryRunFile(id), { force: true }); } catch { /* 没有就算了 */ }
+  const got = await forge(c, 'script/DeployTestnet.s.sol:DeployTestnet', {
     SWEEP_PARENT: parent, SWEEP_OPERATOR: operator, SWEEP_OWNER: owner,
-    SWEEP_EXPECT_NONCE: env.EVM_START_NONCE || '0', TESTNET_USDT: USDT ? '1' : '0', TESTNET_USDT_MINT: MINT,
+    SWEEP_EXPECT_NONCE: String(startNonce), TESTNET_USDT: USDT ? '1' : '0', TESTNET_USDT_MINT: MINT,
     TESTNET_USDT_DECIMALS: chain === 'bsc' ? '18' : '6', PAYOUT_PAYER: env.PAYOUT_PAYER || '',
   }, k);
   for (const n of ['implementation', 'factory', 'batcher']) if (!isEvm(got[n])) fail(`${c.name}：forge 的输出里没有 ${n} 地址`);
-  // 地址上确实有代码（forge 模拟出的地址和真正上链的一致）
+  Object.assign(rec, got, { chainId: id, startNonce, deployer, operator, owner, txs: rec.txs });
+  const txs = plannedTxs(id, deployer, startNonce);
+  if (String(txs[0].contractAddress).toLowerCase() !== got.implementation.toLowerCase()) fail(`${c.name}：forge 模拟的第一笔不是实现合约 ${got.implementation}`);
+  log(`  forge 模拟出 ${txs.length} 笔交易（forge 估的 gas 不用：它不认识这条链现在的硬分叉，下面按节点的规则重新算）`);
+  // 2. 按节点自己的规则把整套交易跑一遍：会失败、超过单笔上限、余额不够付，就一笔都不发
+  const balance = BigInt(await call('eth_getBalance', [deployer, 'latest']));
+  const pf = await preflight(call, { from: deployer, txs, gasPrice, balance, unit: c.unit });
+  rec.preflight = { simulated: pf.simulated, gas: pf.gas, totalGasLimit: pf.totalLimit, maxCostWei: String(pf.cost), gasPrice: String(gasPrice) };
+  log(pf.simulated
+    ? `  节点模拟（eth_simulateV1）：${txs.length} 笔全部成功，gas ${pf.gas.map((g) => g.toLocaleString('en-US')).join(' + ')}；按 × 1.25 最多花 ${fmtEth(pf.cost, c.unit)}，余额 ${fmtEth(balance, c.unit)}`
+    : `  提示：节点不支持 eth_simulateV1，只估了第一笔（${pf.gas[0].toLocaleString('en-US')} gas）；后面每笔发之前再估`);
+  // 3. 逐笔发出，每笔等回执核对 status 和合约地址，失败立即停
+  await sendAll(call, { key: '0x' + k, from: deployer, chainId: id, gasPrice, txs, explorer, onTx, log, wait });
+  // 4. 地址上确实有代码，再用 VerifyDeployment.s.sol 连链只读核对（字节码、工厂和批量合约的参数、发起账户、所有者、用户 1 的地址）
   for (const n of ['implementation', 'factory', 'batcher', 'usdt', 'payout']) {
     if (got[n] && (await rpc(c.rpc, 'eth_getCode', [got[n], 'latest'])) === '0x') fail(`${c.name}：${n} ${got[n]} 上没有合约代码`);
   }
+  await forge(c, 'script/VerifyDeployment.s.sol:VerifyDeployment', {
+    SWEEP_IMPLEMENTATION: got.implementation, SWEEP_FACTORY: got.factory, SWEEP_BATCHER: got.batcher, SWEEP_PARENT: parent, SWEEP_OPERATOR: operator, SWEEP_OWNER: owner,
+  }, k);
+  rec.onchainVerify = 'ok';
   const prev = WALLETS.staging?.evm?.[chain] || {};
   const section = {
     usdt: got.usdt || '', factory: got.factory, implementation: got.implementation, parent, batcher: got.batcher, ver: nextVer(prev, got.factory),
     ...(got.payout ? { hot: got.hot, payout: got.payout } : {}),
   };
   if (!section.usdt) out.notes.push(`${c.name} 没有部署测试 USDT，也没有官方测试 USDT：usdt 要另外填，否则这条链不开通`);
-  out.chains[chain] = { name: c.name, chainId: id, explorer: localOk ? null : c.explorer, deployer: got.deployer, startNonce: Number(got.startNonce), operator, owner, ...got, txs: broadcastTxs(id) };
   out.walletsStaging.evm ||= {};
   out.walletsStaging.evm[chain] = section;
   await serverCheck(chain, section, { rpcUrl: c.rpc });
@@ -236,8 +297,9 @@ function summary() {
     lines.push(`## ${c.name}${c.chainId ? `（链 ID ${c.chainId}）` : c.network ? `（${c.network}）` : ''}`, '');
     lines.push(`- 部署账户 ${c.deployer}${c.startNonce !== undefined ? `（起始 nonce ${c.startNonce}）` : ''}`, `- 发起账户 ${c.operator}；所有者交给 ${c.owner}（等它调用 acceptOwnership 接受）`);
     lines.push(`- 用户 1 的充值地址 ${c.user1}；服务器钱包层核对：${c.serverCheck || '未通过'}`);
-    const txs = (c.txs || []).map((t) => ({ ...t, label: t.contract && t.fn ? `${t.contract}.${t.fn.replace(/\(.*/, '')}` : t.contract || t.name || t.fn || 'tx' }));
+    const txs = (c.txs || []).map((t) => ({ ...t, label: (t.label || t.name || 'tx') + (t.status && t.status !== 'ok' ? `【${t.status === 'failed' ? '链上失败' : t.status === 'pending' ? '未上链' : t.status}】` : '') }));
     if (txs.length) lines.push(`- 交易（${txs.length} 笔）：${txs.map((t) => (c.explorer ? `[${t.label}](${c.explorer}/${chain === 'tron' ? '#/transaction' : 'tx'}/${(t.hash || t.txId || '').replace(/^0x/, chain === 'tron' ? '' : '0x')})` : `${t.label} ${t.hash || t.txId}`)).join('、')}`);
+    if (c.preflight) lines.push(`- 节点模拟：${c.preflight.simulated ? `gas ${c.preflight.gas.map((g) => g.toLocaleString('en-US')).join(' + ')}` : '节点不支持 eth_simulateV1，逐笔估算'}；gas 价格 ${c.preflight.gasPrice} wei`);
     lines.push('');
   }
   if (out.notes.length) lines.push('提醒：', ...out.notes.map((n) => `- ${n}`), '');

@@ -27,9 +27,12 @@ on:
         description: TRON 归集发起账户（T 地址；空着用 TESTNET_TRON_OPERATOR）
         required: false
       evm_start_nonce:
-        description: 部署账户在两条 EVM 链上的起始 nonce（新账户是 0；两条链必须一样，地址才相同）
+        description: 部署账户在两条 EVM 链上的起始 nonce（新账户是 0；两条链必须一样，地址才相同；空着用 TESTNET_EVM_START_NONCE）
         required: false
-        default: '0'
+      evm_align_nonce:
+        description: 某条 EVM 链的 nonce 小于起始 nonce 时，先给自己转 0 把它推到起始 nonce（两条链地址才相同）
+        type: boolean
+        default: false
       test_usdt:
         description: 每条链部署一个测试 USDT
         type: boolean
@@ -78,6 +81,8 @@ jobs:
           TRON_PARENT: ${{ inputs.tron_parent || vars.TESTNET_TRON_PARENT }}
           TRON_OPERATOR: ${{ inputs.tron_operator || vars.TESTNET_TRON_OPERATOR }}
           EVM_START_NONCE: ${{ inputs.evm_start_nonce || vars.TESTNET_EVM_START_NONCE || '0' }}
+          EVM_ALIGN_NONCE: ${{ (inputs.evm_align_nonce || vars.TESTNET_EVM_ALIGN_NONCE == '1') && '1' || '0' }}
+          EVM_GAS_PRICE_GWEI: ${{ vars.TESTNET_EVM_GAS_PRICE_GWEI }}
           TESTNET_USDT: ${{ (github.event_name != 'workflow_dispatch' || inputs.test_usdt) && '1' || '0' }}
           PAYOUT_PAYER: ${{ inputs.payout_payer || vars.TESTNET_PAYOUT_PAYER }}
           OUT_DIR: testnet-deploy
