@@ -24,14 +24,14 @@ x-app: &app
     TRUST_PROXY: "1"
     HOST: 0.0.0.0
     PORT: "8080"
-    NODE_OPTIONS: --max-old-space-size=160
+    NODE_OPTIONS: --max-old-space-size=144
   volumes: ["${TOPUP_DIR:?}/data/blobs:/data/blobs"]
   depends_on:
     postgres: { condition: service_healthy }
     redis: { condition: service_healthy }
   restart: unless-stopped
-  mem_limit: 288m
-  memswap_limit: 288m
+  mem_limit: 256m
+  memswap_limit: 256m
   logging: *logging
 
 services:
@@ -41,9 +41,9 @@ services:
       POSTGRES_USER: topup
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
       POSTGRES_DB: topup
-    # 小内存设置：共享缓冲 64 MB、最多 30 个连接
-    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "work_mem=4MB", "-c", "maintenance_work_mem=32MB",
-      "-c", "effective_cache_size=192MB", "-c", "max_connections=30"]
+    # 小内存设置：共享缓冲 48 MB、最多 20 个连接（web、worker 各最多 3 个，加备份和管理命令也用不到 10 个）
+    command: ["postgres", "-c", "shared_buffers=48MB", "-c", "work_mem=4MB", "-c", "maintenance_work_mem=32MB",
+      "-c", "effective_cache_size=128MB", "-c", "max_connections=20"]
     volumes: ["${TOPUP_DIR:?}/data/postgres:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U topup -d topup"]
@@ -51,15 +51,15 @@ services:
       timeout: 5s
       retries: 20
     restart: unless-stopped
-    mem_limit: 320m
-    memswap_limit: 320m
+    mem_limit: 256m
+    memswap_limit: 256m
     shm_size: 64m
     logging: *logging
 
   redis:
     image: redis:7
     # 开户资料和管理员会话在 Redis 里：写满时报错，不淘汰数据（noeviction）；AOF 持久化
-    command: ["sh", "-c", "exec redis-server --appendonly yes --maxmemory 64mb --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
+    command: ["sh", "-c", "exec redis-server --appendonly yes --maxmemory 48mb --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?}
     volumes: ["${TOPUP_DIR:?}/data/redis:/data"]
@@ -69,8 +69,8 @@ services:
       timeout: 5s
       retries: 20
     restart: unless-stopped
-    mem_limit: 96m
-    memswap_limit: 96m
+    mem_limit: 80m
+    memswap_limit: 80m
     logging: *logging
 
   web:
@@ -93,6 +93,6 @@ services:
       - "${WEBROOT_DIR:-/var/www/certbot}:/var/www/certbot:ro"
     ports: ["80:80", "443:443"]
     restart: unless-stopped
-    mem_limit: 48m
-    memswap_limit: 48m
+    mem_limit: 32m
+    memswap_limit: 32m
     logging: *logging

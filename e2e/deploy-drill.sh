@@ -175,7 +175,7 @@ echo "== 场景 10：内存不够时不启动；stop / start"
 out=$(T stop 2>&1); echo "$out" | sed 's/^/    /'
 check "stop：定时器 → 应用 → 备份 → 数据库，80、443 空出" "grep -q '第 3 步' <<< \"\$out\" && [ -z \"\$(docker ps -q --filter label=com.docker.compose.project=topup)\" ] && ls '$TOPUP_DIR'/backup/topup-*-before-stop.tar.age > /dev/null"
 T update; check "停下后自动更新不会把它拉起来" "[ -z \"\$(docker ps -q --filter label=com.docker.compose.project=topup)\" ]"
-out=$(TOPUP_DRILL_MEM_MB=900 T start 2>&1); check "可用内存 900 MB：不启动，说明需要多少" "grep -q '内存不够：可用 900 MB，需要 1140 MB' <<< \"\$out\" && [ -z \"\$(docker ps -q --filter label=com.docker.compose.project=topup)\" ]"
+out=$(TOPUP_DRILL_MEM_MB=900 T start 2>&1); check "可用内存 900 MB：不启动，说明需要多少" "grep -q '内存不够：可用 900 MB，需要 980 MB' <<< \"\$out\" && [ -z \"\$(docker ps -q --filter label=com.docker.compose.project=topup)\" ]"
 out=$(T start 2>&1); check "start：健康检查通过，版本 = v2" "grep -q 'TopUP 已启动' <<< \"\$out\" && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\"' > /dev/null"
 docker stats --no-stream --format '    {{.Name}} {{.MemUsage}}' $(docker ps -q --filter label=com.docker.compose.project=topup)
 

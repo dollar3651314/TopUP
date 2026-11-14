@@ -55,14 +55,18 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 在控制台运行 `set-key` 时用"远程连接"的普通终端，不要用控制台自带的 AI 助手，也不要把任何值发给对话框。
 
 ## 3. 内存总账（容器不用交换分区：`mem_limit` = `memswap_limit`）
-| 容器 | 上限 | 怎么来的 |
-|---|---|---|
-| postgres | 320 MB | `shared_buffers` 64 MB + 30 个连接 × 约 5 MB + `maintenance_work_mem` 32 MB + 进程本身 |
-| redis | 96 MB | `maxmemory 64mb`（写满报错、不淘汰数据）+ 进程和 AOF 重写 |
-| web | 288 MB | Node 堆 `--max-old-space-size=160` + 代码、缓冲区约 100 MB |
-| worker | 288 MB | 同 web |
-| nginx | 48 MB | 实际十几 MB |
-| 合计 | 1,040 MB | 启动前要求服务器可用内存 ≥ 1,140 MB（`install`、`start` 会检查，不够就不启动） |
+按 1.6 GB 的测试服务器定：停掉别的项目后 `free -m` 的 available 约 1,050 MB（服务器上阿里云监控、Docker 自己等常驻程序已经算在里面）。
+
+| 容器 | 上限 | 怎么来的 | 实测峰值（MB） |
+|---|---|---|---|
+| postgres | 256 MB | `shared_buffers` 48 MB + 20 个连接（web、worker 各最多 3 个）× 约 5 MB + `maintenance_work_mem` 32 MB + 进程本身 | 190（压力测试，含缓存；进程 RSS 48） |
+| redis | 80 MB | `maxmemory 48mb`（写满报错、不淘汰数据）+ 进程和 AOF 重写 | 6 |
+| web | 256 MB | Node 堆 `--max-old-space-size=144` + 代码、缓冲区约 100 MB | 150 |
+| worker | 256 MB | 同 web | 39 |
+| nginx | 32 MB | 实际 5 MB 左右 | 5 |
+| 合计 | 880 MB | 再留 100 MB 给容器之外的 Docker 进程（5 个 containerd-shim、每个对外端口一个 docker-proxy，实测 RSS 合计约 77 MB）：启动前要求服务器可用内存 ≥ 980 MB（`install`、`start` 会检查，不够就不启动） | |
+
+实测峰值的做法：开发机上用演练环境（`e2e/deploy-drill.sh` 同样的部署方式）部署后采样每个容器的内存（`docker stats` 口径，即用量减去不活跃的文件缓存），期间跑：静态页面、健康检查和各接口的并发请求（20、60 并发各 60 秒，含 2 MB 的大请求体）；负载中同时备份；自动更新到新版本；Postgres 建 40 万行的表和索引、12 个连接同时排序和全表扫描。全程没有容器被杀（`OOMKilled=false`、重启 0 次）。测试数据很少，数据多了以后 Postgres 主要多占文件缓存（可以回收），共享缓冲最多 48 MB 不变。上线到生产换更大的服务器时，可以按这张表放宽。
 
 ## 4. 两个配置文件（只在服务器上，权限 600，不进仓库、不进镜像）
 - `deploy.env`：部署用。`install` 生成：`TOPUP_DIR`、`TOPUP_IMAGE`、`TOPUP_ENV`、`DOMAIN`、`CERT_EMAIL`、`CERT_NAME`、`LE_DIR`、`WEBROOT_DIR`、`POSTGRES_PASSWORD`、`REDIS_PASSWORD`；`BACKUP_OFFSITE=off`（异地备份默认关）。只有打开异地备份时才用到：`backup-key` 写 `BACKUP_AGE_RECIPIENT`；管理员填 `R2_ACCOUNT_ID`、`R2_BUCKET`（`set`）和 `R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`（`set-key`）。本机备份的加密密钥在 `state/backup-identity`（服务器生成，600）。
