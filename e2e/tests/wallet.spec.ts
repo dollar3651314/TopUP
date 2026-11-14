@@ -59,7 +59,9 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     const r = await fetch(`/api/wallet/?a=${a}`, body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json', 'x-topup-csrf': '1' }, body: JSON.stringify(body) });
     return { status: r.status, body: await r.json() };
   }, [a, body] as const);
-  const isWallet = (name: string) => (url: URL) => url.pathname === '/api/wallet/' && url.searchParams.get('a') === name;
+  // 同一个名字每次给同一个函数：page.unroute 按"同一个函数对象"认路由，每次新建一个函数的话 unroute 什么都不撤
+  const walletMatchers: Record<string, (url: URL) => boolean> = {};
+  const isWallet = (name: string) => (walletMatchers[name] ||= (url: URL) => url.pathname === '/api/wallet/' && url.searchParams.get('a') === name);
   /** 拦截接口、改返回再交给页面。页面切走或用例结束时请求可能已经作废（响应被释放）：这时不再处理，不把错误留给后面的用例 */
   const patchJson = (edit: (j: any) => void) => async (r: any) => {
     let res, j;

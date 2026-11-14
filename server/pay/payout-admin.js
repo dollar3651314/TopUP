@@ -5,6 +5,7 @@ import { PayError, getMeta, audit } from './core.js';
 import { fmtUsdt, parseUsdt } from './money.js';
 import { iso } from './common.js';
 import * as payout from './payout.js';
+import { native } from '../wallet/admin-actions.js';
 
 const usdt = (u) => (u === null || u === undefined ? null : fmtUsdt(Number(u)).replace(/,/g, ''));
 const EVM = ['eth', 'bsc'];
@@ -22,6 +23,7 @@ export function txBatchOut(b) {
     energy: b.chain === 'tron' ? (b.energy || { mode: 'burn' }) : null,
     items: ids.map((id) => ({ id, status: res[id] ? (res[id].ok ? 'completed' : 'approved') : null, reason: res[id]?.reason || null })),
     rebroadcast_at: iso(b.rebroadcast_at) || null, stuck_since: iso(b.stuck_since) || null,
+    nonce: b.chain === 'tron' ? null : (b.nonce ?? null), // 以太坊 / BSC：热钱包这笔交易用的 nonce（确认作废时在区块浏览器上核对）
     created_at: iso(b.created_at), updated_at: iso(b.updated_at),
   };
 }
@@ -199,12 +201,19 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
         if (card.payout_enabled) {
           try { const s = await svc().status(chain); card.hot_balance = usdt(s.hot_onchain); card.allowance = usdt(s.allowance_onchain); card.low = s.hot_low; } catch { card.error = 'rpc'; }
         }
+        // 冷钱包 USDT、热钱包手续费币（读不到的给 null，页面写"暂时查不到"）
+        if (layer?.enabledChains?.includes(chain)) {
+          try { card.cold_balance = usdt(await layer.providers.contract.balance(chain, { vault: 'cold' })); } catch { card.cold_balance = null; }
+          try { card.hot_gas = card.hot && layer.adapters?.[chain] ? native(await layer.adapters[chain].nativeBalance(card.hot), chain) : null; } catch { card.hot_gas = null; }
+        }
         cards.push(card);
       }
       const [legacy] = await db.query('select count(*)::int n from customers where address is not null');
       const tcard = { chain: 'tron', enabled: Boolean(layer?.enabledChains?.includes('tron')), cold: wallets.cold || null, hot: wallets.hot || null, payout: null, payout_enabled: Boolean(wallets.hot),
         contracts_configured: Boolean(layer?.config?.tron?.complete), operator: layer?.providers?.contract?.tronOperator || null, legacy_addresses: legacy.n, hot_balance: null, hot_max: usdt(limits.hotMax), hot_low: usdt(limits.hotLow), allowance: null, rental: Boolean(layer?.tronEnergy) };
-      if (wallets.hot) { try { const acc = await tron.account(wallets.hot); tcard.hot_balance = usdt(acc.trc20[tron.contract] || 0); tcard.low = Number(acc.trc20[tron.contract] || 0) < limits.hotLow; } catch { tcard.error = 'rpc'; } }
+      // 冷钱包 USDT、热钱包 TRX：读不到给 null（字段一直在，页面写"暂时查不到"）
+      if (wallets.hot) { tcard.hot_gas = null; try { const acc = await tron.account(wallets.hot); tcard.hot_balance = usdt(acc.trc20[tron.contract] || 0); tcard.low = Number(acc.trc20[tron.contract] || 0) < limits.hotLow; tcard.hot_gas = native(acc.trx || 0, 'tron'); } catch { tcard.error = 'rpc'; } }
+      if (wallets.cold) { tcard.cold_balance = null; try { const acc = await tron.account(wallets.cold); tcard.cold_balance = usdt(acc.trc20[tron.contract] || 0); } catch { tcard.cold_balance = null; } }
       cards.push(tcard);
       return { cards, limits: limitsOut(limits), xpub: Boolean(await getMeta(db, 'xpub')) };
     },

@@ -494,6 +494,8 @@
       "badSheet": "Could not read the sheet: the first row must be the header chain,to,amount (optionally customer_id,merchant_ref).",
       "summary": "{n} rows: {ok} OK · {bad} with problems · {warn} to confirm.",
       "summaryNote": "Rows with problems are not submitted.",
+      "summaryOver": "{n} rows: {ok} OK · {over} over the per-payment limit (will be rejected) · {bad} with problems · {warn} to confirm.",
+      "onlyValidOver": "Submit only the {n} rows without format problems ({over} of them are over the per-payment limit and will be rejected)",
       "cols": {
         "line": "Row",
         "chain": "Chain",
@@ -1055,6 +1057,8 @@
       "badSheet": "没读出表格：第一行要是表头 chain,to,amount（后面可以有 customer_id,merchant_ref）。",
       "summary": "{n} 行：{ok} 行没问题 · {bad} 行有问题 · {warn} 行要你确认。",
       "summaryNote": "有问题的行不会提交。",
+      "summaryOver": "{n} 行：{ok} 行没问题 · {over} 行超单笔上限（会被驳回）· {bad} 行有问题 · {warn} 行要你确认。",
+      "onlyValidOver": "只提交格式没问题的 {n} 行（其中 {over} 行超单笔上限，会被驳回）",
       "cols": {
         "line": "行",
         "chain": "链",
