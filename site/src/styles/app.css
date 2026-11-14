@@ -433,3 +433,12 @@ tr[data-wait="late"] td:first-child { box-shadow: inset 4px 0 0 var(--danger); }
 tr.row-over td { color: var(--danger); }
 /* 私钥输入框：普通文本框 + 遮盖显示（不用 type=password，浏览器不会提示"保存密码"） */
 .secret-input { -webkit-text-security: disc; text-security: disc; }
+/* 表格里较长的提示可以换行（手机上不用横着滑就能看完） */
+.pay-table td .cell-wrap, td .cell-wrap { white-space: normal; display: inline-block; min-width: 12em; max-width: 22em; }
+/* 超上限、挂起的行：只把文字标红，行里的按钮保持自己的颜色 */
+tr.row-over td .btn { color: inherit; }
+tr.row-over td .btn-primary { color: var(--accent-contrast); }
+/* 暗色下不可点的按钮：半透明看不清，改成实底灰色、文字清楚 */
+@media (prefers-color-scheme: dark) {
+  .btn[disabled], .btn:disabled { opacity: 1; background: #24364f; border-color: #35506f; color: #a3b3c6; cursor: not-allowed; }
+}

@@ -36,7 +36,7 @@ const PERR: Record<string, string> = {
   broadcast_unreachable: '节点暂时连不上，这一笔没算签完：稍后用同一个窗口再签一次同一笔（同一笔交易，不会重复）。', rpc_unreachable: '节点暂时连不上（以太坊 / BSC 节点），稍后再试。', estimate_reverted: '节点试算这一批会失败（合约回滚），没出交易：检查热钱包余额、授权额度和收款地址后再试。',
   too_many_bad_items: '这一轮有多笔收款地址转不了，已逐笔挂起；请先处理挂起的，再凑批。', exceeds_hot_max: '新额度不能超过热钱包上限：先改上限，或者调低额度。',
   payout_contract_mismatch: '这条链的批量打款合约核对不一致（代码、付款人或所有者不对），打款已停用。请研发核对配置后重启。', payout_contract_unverified: '这条链的批量打款合约还没核对上（节点暂时连不上），先不出交易，稍后再试。',
-  not_approved: '只能签已审核的打款：先在上面逐笔审核通过。', funds_short: '热钱包余额或授权额度不够付这一批（在途的批次已经占用了一部分）：先补款或改额度，等在途的批次出结果再凑。', duplicate_txid: '这一批里有两笔交易号相同，页面已拦下：请作废重凑。', plan_expired: '这一批交易原文已经快过期了：点"作废重凑"重新凑批再签。', invalid_state: '状态已经变化（可能已经签过或已作废），请刷新后再看。',
+  not_approved: '只能签已审核的打款：先在上面逐笔审核通过。', funds_short: '热钱包余额或授权额度不够付这一批。还在链上确认的批次已经占用了一部分，请先补款或改额度，或者等它们确认后再凑批。', duplicate_txid: '这一批有两笔交易号重复，已被服务器拦下，请作废重凑。', nonce_not_used: '热钱包的这个 nonce 还没被用掉，这笔交易还可能上链，不能作废。', tx_on_chain: '这笔交易已经上链（有回执），不能作废，等链上确认即可。', node_lagging: '查交易的节点比查 nonce 的节点落后，现在下不了结论，请过几分钟再试。', plan_expired: '这一批交易原文已经快过期了：点"作废重凑"重新凑批再签。', invalid_state: '状态已经变化（可能已经签过或已作废），请刷新后再看。',
   fee_too_high: '现在的网络费超过上限，先不签，稍后再试。', chain_not_enabled: '这条链还没开通批量打款（config/wallets.json 没写热钱包和 BatchPayout）。', not_applicable: 'TRON 打款不走合约，不用授权额度。',
 };
 /** 上限之间的约束（服务器 updatePayoutLimits 的 rows[0].rule） */
@@ -88,9 +88,9 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
   const approvedT = table(['单号', '商户', '链', '收款地址', '金额 USDT', '情况', ''], appr.map((x) => [mono(x.id), x.merchant, chainTag(x.chain), mono(shortAddr(x.to), x.to), usd(x.amount),
     x.hold ? h('span', { class: 'bad' }, `已挂起：${HOLD[x.hold] || x.hold}`) : h('span', { class: 'muted' }, x.batch_no ? `批量 ${x.batch_no} · 等凑批` : '等凑批'),
     h('span', { class: 'row-actions' },
-      x.hold ? h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-unhold': x.id, onclick: (e: Event) => { e.stopPropagation(); unhold(ui, x); } }, '解除挂起') : null,
+      x.hold ? h('button', { type: 'button', class: 'btn btn-primary btn-sm', 'data-unhold': x.id, onclick: (e: Event) => { e.stopPropagation(); unhold(ui, x); } }, '解除挂起') : null,
       h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-reject-approved': x.id, onclick: (e: Event) => { e.stopPropagation(); rejectApproved(ui, x); } }, '驳回'))]),
-    '没有已审核待凑批的单。', { rowAttrs: (i) => ({ 'data-approved-row': appr[i].id, ...(appr[i].hold ? { class: 'row-over' } : {}) }) });
+    '没有已审核待凑批的单。', { onRow: (i) => approvedActions(ui, appr[i]), rowAttrs: (i) => ({ 'data-approved-row': appr[i].id, ...(appr[i].hold ? { class: 'row-over' } : {}) }) });
   const L = r.limits;
   const limits = h('section', { class: 'card stack', 'data-payout-limits': '' },
     kv([['单笔', `≤ ${usd(L.perItem)} USDT（超过的只能驳回，或先改上限）`], ['每批', `≤ ${usd(L.perBatch)} USDT；以太坊、BSC 每笔交易 ≤ 100 笔，TRON ≤ 20 笔（Nile 实测后再定）`],
@@ -114,9 +114,10 @@ function batchState(b: any): HTMLElement {
   const ST: Record<string, [string, string]> = { planned: ['submitted', '没签完（等签名）'], broadcast: ['in', b.rebroadcast_at ? '还没上链，已重发' : '链上确认中'], confirmed: ['approved', '已完成'], partial: ['needs_info', '部分成功'], failed: ['bad', b.chain === 'tron' ? '失败' : '整批回滚'], expired: ['expired', '没签名，已作废'] };
   const [cls, text] = ST[b.status] || ['submitted', b.status];
   box.append(status(cls, text));
-  if (b.status === 'failed' && b.chain !== 'tron') box.append(h('span', { class: 'hint muted' }, '整批回滚：每笔回到已审核，可以重新凑批签名；商户余额没动'));
+  if (b.status === 'failed' && b.chain !== 'tron') box.append(h('span', { class: 'hint muted' }, b.error === 'void_confirmed' ? '管理员确认作废：每笔回到已审核，可以重新凑批签名；商户余额没动' : b.error === 'dropped' ? '没上链（nonce 已被别的交易用掉）：每笔回到已审核，可以重新凑批签名；商户余额没动' : '整批回滚：每笔回到已审核，可以重新凑批签名；商户余额没动'));
   if (b.status === 'partial') box.append(h('span', { class: 'hint muted' }, `${b.ok} 笔成功，失败的 ${b.failed} 笔回到已审核待签名`));
   if (b.status === 'planned') box.append(h('span', { class: 'hint muted' }, '这批的单都锁在里面：点开继续签名，或作废重凑'));
+  if (b.status === 'broadcast' && b.stuck_since) box.append(h('span', { class: 'hint muted' }, 'nonce 已被用掉、节点还认得这笔：超过 1 小时没结论会发邮件，核对后可以"确认作废"'));
   if (b.status === 'broadcast' && b.rebroadcast_at) box.append(h('span', { class: 'hint muted' }, '30 分钟没上链：nonce 还没被用掉，不退回（防止付两次），系统用原来签好的交易重发'));
   if (b.chain === 'tron') box.append(h('span', { class: 'hint muted', 'data-energy-line': '' }, energyText(b.energy)));
   return box;
@@ -172,7 +173,9 @@ function batchDetail(ui: WalletUi, b: any, legacyTron: TronSign) {
     const acts = d.voidable ? h('div', { class: 'row-actions' },
       d.resumable ? h('button', { type: 'button', class: 'btn btn-primary btn-sm', 'data-batch-resume': d.id, onclick: () => resumeBatch(ui, d, legacyTron) }, '继续签名') : null,
       h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-batch-void': d.id, onclick: () => voidBatch(ui, d) }, '作废重凑'),
-      d.resumable ? null : h('span', { class: 'hint muted' }, '交易原文快过期了，只能作废重凑')) : null;
+      d.resumable ? null : h('span', { class: 'hint muted' }, '交易原文快过期了，只能作废重凑')) : d.chain !== 'tron' && d.status === 'broadcast' && (d.stuck_since || d.rebroadcast_at)
+      ? h('div', { class: 'row-actions' }, h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-void-confirmed': d.id, onclick: () => voidConfirmed(ui, d) }, '确认作废'),
+        h('span', { class: 'hint muted' }, '只在热钱包这个 nonce 已被别的交易用掉、这笔没有回执时能用')) : null;
     ui.dialog(`签名批次 ${b.id}`, h('div', { class: 'stack' }, kv([['链', chainTag(d.chain)], ['状态', batchState(d)], ['交易', d.tx_hash ? mono(d.tx_hash) : '—']]), acts,
       table(['单号', '商户', '收款地址', '金额', '状态'], d.withdrawals.map((w: any) => [mono(w.id), w.merchant, mono(shortAddr(w.to), w.to), usd(w.amount),
         h('span', { class: w.hold ? 'bad' : '' }, `${WST[w.status] || w.status}${w.hold ? `，已挂起：${HOLD[w.hold] || w.hold}` : ''}${w.reason ? ` · ${w.reason}` : ''}`)]), '—')), '关闭', null, false, true);
@@ -184,6 +187,19 @@ async function resumeBatch(ui: WalletUi, b: any, legacyTron: TronSign) {
   try { r = await ui.call('payout-resume', { id: b.id }); } catch (e) { ui.say(errOf(ui, e)); ui.rerender(); return; }
   if (b.chain === 'tron') legacyTron([], r); else signBatch(ui, b.chain, r, 0);
 }
+/** 确认作废（以太坊 / BSC 已广播、一直没结论的批次）：动态码；服务器核对 nonce 已被用掉、这笔没有回执才允许，整批回到已审核 */
+function voidConfirmed(ui: WalletUi, b: any) {
+  const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' }) as HTMLInputElement;
+  const msg = h('div');
+  ui.dialog(`确认作废 ${b.id}`, h('div', { class: 'stack' },
+    h('p', { class: 'warn-box m0' }, `先在区块浏览器上核对：热钱包的这个 nonce 上链的是别的交易（例如你签的作废交易），不是 ${b.tx_hash ? shortAddr(b.tx_hash) : '这笔'}。确认后这一批 ${b.count} 笔回到"已审核"，可以重新凑批签名。`),
+    field('vc-code', '验证器动态码（6 位）', code), msg), '确认作废', async () => {
+    if (fieldErr(code, /^\d{6}$/.test(code.value.trim()) ? null : '请输入 6 位动态码')) return false;
+    try { await ui.call('payout-void-confirmed', { id: b.id, code: code.value.trim() }); }
+    catch (e: any) { if (e?.code === 'bad_code') fieldErr(code, errOf(ui, e)); else msg.replaceChildren(h('p', { class: 'alert m0' }, errOf(ui, e))); return false; }
+    ui.say(`已确认作废 ${b.id}，${b.count} 笔回到已审核`); ui.rerender(); return true;
+  }, true);
+}
 /** 作废重凑：只作废还没签名的批次（服务器只认 planned；已经交了签名的一律不动），单回到已审核 */
 function voidBatch(ui: WalletUi, b: any) {
   const msg = h('div');
@@ -191,6 +207,13 @@ function voidBatch(ui: WalletUi, b: any) {
     try { await ui.call('payout-void', { id: b.id }); } catch (e) { msg.replaceChildren(h('p', { class: 'alert m0' }, errOf(ui, e))); return false; }
     ui.say(`已作废 ${b.id}，${b.count} 笔回到已审核`); ui.rerender(); return true;
   }, true);
+}
+/** 点整行（手机上按钮可能要横着滑才看得到）：弹出这一笔的操作 */
+function approvedActions(ui: WalletUi, x: any) {
+  ui.dialog(`已审核 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', x.merchant], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['情况', x.hold ? `已挂起：${HOLD[x.hold] || x.hold}` : '等凑批']]),
+    h('div', { class: 'row-actions' },
+      x.hold ? h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: () => unhold(ui, x) }, '解除挂起') : null,
+      h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => rejectApproved(ui, x) }, '驳回这笔'))), '关闭', null, false, true);
 }
 /** 解除挂起：确认收款地址没问题（例如代币已解除拉黑）后，回到普通的已审核，下一轮照常凑批 */
 function unhold(ui: WalletUi, x: any) {

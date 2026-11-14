@@ -523,7 +523,7 @@ render.withdraw = async (p) => {
 
 // ---------- 批量打款（第 3 批）：上传 → 逐行检查 → 按链汇总 + 动态码提交；批次记录、明细、取消还没审核的 ----------
 type PbRow = { line: number; chain: string; to: string; amount: Amount; amount_text: string; fee: Amount; ok: boolean; errors: string[]; warnings: string[] };
-type PbCheck = { rows: PbRow[]; totals: Record<string, { count: number; amount: string; fee: string; total: string }>; ok_count: number; bad_count: number; need: Amount; available: Amount; enough: boolean; service: { open: boolean; next_open_at?: string } };
+type PbCheck = { rows: PbRow[]; per_item_limit?: string; totals: Record<string, { count: number; amount: string; fee: string; total: string }>; ok_count: number; bad_count: number; need: Amount; available: Amount; enough: boolean; service: { open: boolean; next_open_at?: string } };
 const pb = { step: 1, csv: '', check: null as PbCheck | null, onlyValid: false, err: '', done: null as null | { n: number; no: string; late: boolean } };
 const PB_ST: Record<string, string> = { pending: 'submitted', approved: 'invited', partially_rejected: 'needs_info', rejected: 'rejected', completed: 'approved', cancelled: 'expired' };
 render['payout-batch'] = async (p) => {
@@ -559,7 +559,7 @@ render['payout-batch'] = async (p) => {
     const msg = (r: PbRow) => {
       if (r.ok && !r.warnings.length) return h('span', { class: 'ok' }, `✓ ${cp.ok}`);
       const parts = r.errors.map((e) => e === 'invalid_amount' && /\.\d{7,}/.test(r.amount_text) ? cp.err.decimals : tpl((cp.err as Record<string, string>)[e] || e, { net: netName(r.chain) }));
-      return h('span', { class: r.ok ? 'warn' : 'bad' }, ...(r.ok ? r.warnings.map((w) => `! ${(cp.err as Record<string, string>)[w] || w}`) : parts.map((x) => `× ${x}`)));
+      return h('span', { class: `${r.ok ? 'warn' : 'bad'} cell-wrap` }, ...(r.ok ? r.warnings.map((w) => `! ${tpl((cp.err as Record<string, string>)[w] || w, { limit: k.per_item_limit ?? '' })}`) : parts.map((x) => `× ${x}`)));
     };
     const only = h('input', { type: 'checkbox', id: 'mb-only-valid', checked: pb.onlyValid }) as HTMLInputElement;
     only.addEventListener('change', () => { pb.onlyValid = only.checked; note.hidden = true; });
@@ -570,6 +570,8 @@ render['payout-batch'] = async (p) => {
     } }, cp.next);
     body = h('div', { class: 'card stack', 'data-mb-step': '2' },
       h('p', { class: 'm0' }, h('b', {}, tpl(cp.summary, { n: k.rows.length, ok: k.ok_count, bad: k.bad_count, warn })), ' ', h('span', { class: 'muted' }, cp.summaryNote)),
+      // 超过平台单笔上限的行：表格上方再写一句（手机上表格要横着滑，这一句不用滑就能看到）
+      (() => { const over = k.rows.filter((r) => r.ok && r.warnings.includes('over_per_item_limit')); return over.length ? h('p', { class: 'warn-box m0', 'data-mb-over': '' }, tpl(cp.err.over_rows, { lines: over.map((r) => r.line + 1).join(lang === 'en' ? ', ' : '、'), limit: k.per_item_limit ?? '' })) : null; })(),
       table([cp.cols.line, cp.cols.chain, cp.cols.to, cp.cols.amount, cp.cols.check], k.rows.map((r) => [tpl(cp.lineNo, { n: r.line + 1 }), CHAINS.includes(r.chain as any) ? netName(r.chain) : r.chain || '—', mono(shortAddr(r.to || '—'), r.to), r.amount_text, msg(r)]), c.common.none,
         { rowAttrs: (i) => ({ 'data-row-line': String(k.rows[i].line), class: !k.rows[i].ok ? 'row-bad' : k.rows[i].warnings.length ? 'row-warn' : '' }), page: { size: 100, more: (n) => tpl(c.common.more, { n }) } }),
       h('p', { class: 'hint muted m0' }, cp.lineNote),

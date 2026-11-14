@@ -81,7 +81,12 @@ function maskWithDots(el: HTMLInputElement | HTMLTextAreaElement) {
   let real = '';
   const show = (caret: number) => { native.set!.call(el, '•'.repeat(real.length)); el.setSelectionRange(caret, caret); };
   Object.defineProperty(el, 'value', { configurable: true, get: () => real, set: (v: string) => { real = String(v ?? ''); native.set!.call(el, '•'.repeat(real.length)); } });
+  // 输入法（拼音等）组字时拦不下，组字结束再把组好的字放进真内容，框里换回圆点
+  let compAt = [0, 0];
+  el.addEventListener('compositionstart', () => { compAt = [el.selectionStart ?? real.length, el.selectionEnd ?? real.length]; });
+  el.addEventListener('compositionend', (e: CompositionEvent) => { const add = e.data || ''; real = real.slice(0, compAt[0]) + add + real.slice(compAt[1]); show(compAt[0] + add.length); });
   el.addEventListener('beforeinput', (e: InputEvent) => {
+    if (e.isComposing || e.inputType === 'insertCompositionText') return;
     e.preventDefault();
     const a = el.selectionStart ?? real.length, b = el.selectionEnd ?? real.length;
     const t = e.inputType;

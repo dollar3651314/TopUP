@@ -33,7 +33,7 @@ const toolbar = (title: string, ...right: (HTMLElement | null)[]) => h('div', { 
 class WErr extends Error { constructor(public code: string, public field?: string, public rows?: { line: number; code: string }[]) { super(code); } }
 const ERR: Record<string, string> = {
   internal_error: '服务器出错了，请稍后重试。如果一直出错，看"系统状态"或服务器日志。', http_500: '服务器出错了，请稍后重试。', http_502: '服务器暂时连不上，请稍后重试。', http_503: '服务暂时不可用，请稍后重试。', http_504: '服务器响应超时，请稍后重试。',
-  bad_code: '动态码不正确或已经用过，请等下一个动态码。', not_approved: '只能签已审核的打款：先在"打款审核"里逐笔审核通过。', plan_expired: '这一批交易原文快过期了：请作废重凑后再签。', hot_wallet_insufficient: '热钱包的 USDT 不够，请先归集。', verify_required: '验证码已过期，请重新签名。', bad_signature: '签名和交易的付款地址不一致。',
+  bad_code: '动态码不正确或已经用过，请等下一个动态码。', not_approved: '只能签已审核的打款：先在"打款审核"里逐笔审核通过。', duplicate_txid: '这一批有两笔交易号重复，已被服务器拦下，请作废重凑。', plan_expired: '这一批交易原文快过期了：请作废重凑后再签。', hot_wallet_insufficient: '热钱包的 USDT 不够，请先归集。', verify_required: '验证码已过期，请重新签名。', bad_signature: '签名和交易的付款地址不一致。',
   invalid_state: '状态已经变化，请刷新后再试。', nothing_to_sweep: '选中的地址在链上已经没有 USDT。', sweep_in_progress: '有地址正在归集中，请等上一次完成。', cold_wallet_not_configured: '还没有配置冷钱包地址。',
   already_initialized: '已经初始化过了。', first_address_mismatch: '服务器算出的第 1 个地址和浏览器不一致，已停止。', private_key_not_allowed: '只能提交公钥。', invalid_fee: '手续费格式不对。', invalid_order_mode: '订单模式的设置超出范围。',
   invalid_address: 'TRON 地址格式不对。', not_configured: '收付款还没有配置好（数据库、TronGrid 等），请先在服务器上完成配置（看"系统状态"里哪一项没配置）。', unauthorized: '登录已过期，请重新登录。',
