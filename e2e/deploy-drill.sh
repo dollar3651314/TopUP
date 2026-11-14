@@ -115,7 +115,7 @@ out2=$(T gen-operator 2>&1); check "gen-operator 再运行：两把都不重新�
 echo "== 场景 5：自动更新到 v2（成功）"
 stage "$v2"; T update; rc=$?
 check "更新成功，健康检查提交号 = v2，上一个版本记为 v1" "[ $rc = 0 ] && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\"' > /dev/null && [ \"\$(cat '$TOPUP_DIR/state/previous')\" = '$v1' ]"
-check "更新前自动备份了一份" "ls '$TOPUP_DIR'/backup/topup-*-before-${v2:0:7}.tar > /dev/null 2>&1"
+check "更新前自动备份了一份（加密）" "ls '$TOPUP_DIR'/backup/topup-*-before-${v2:0:7}.tar.age > /dev/null 2>&1"
 check "数据还在（更新前填的发起账户私钥）" "curl -s http://127.0.0.1:18080/api/health/ | jq -e '.wallet.operator == true' > /dev/null"
 
 echo "== 场景 6：自动更新到 v3（起不来 → 自动换回 v2、记下不再重试）"
@@ -133,19 +133,35 @@ check "回滚到 v1，v2 不再自动重试" "curl -s http://127.0.0.1:18080/api
 T retry > /dev/null; T update
 check "retry 后自动更新回 v2" "curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\"' > /dev/null"
 
-echo "== 场景 8：备份和恢复演练"
+echo "== 场景 8：备份和恢复演练（默认只在本机、加密；异地默认关）"
 docker exec topup-redis-1 sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning set drill:key 1' > /dev/null
 echo hello > "$TOPUP_DIR/data/blobs/drill.txt"
-out=$(T backup 2>&1); echo "$out" | sed 's/^/    /'
-check "备份成功；R2 没配时只在本机、不报错" "grep -q '✓ 备份：本机' <<< \"\$out\" && grep -q '异地备份没有配置' <<< \"\$out\""
-check "备份文件权限 600、目录 700" "[ \$(stat -c %a \$(ls -1t '$TOPUP_DIR'/backup/topup-*.tar | head -1)) = 600 ] && [ \$(stat -c %a '$TOPUP_DIR/backup') = 700 ]"
+out=$(T backup 2>&1); rc=$?; echo "$out" | sed 's/^/    /'
+check "备份成功；只在本机、加密；异地默认关、不报错" "[ $rc = 0 ] && grep -q '✓ 备份：本机已加密' <<< \"\$out\" && grep -q '异地备份：关' <<< \"\$out\" && jq -e '.local == \"encrypted\" and .r2 == \"off\"' '$TOPUP_DIR/state/last-backup.json' > /dev/null"
+f=$(ls -1t "$TOPUP_DIR"/backup/topup-*.tar.age | head -1)
+check "备份文件是 age 密文、权限 600；目录 700；本机密钥 600；没有明文 .tar 留在磁盘上" "head -c 21 '$f' | grep -q 'age-encryption.org/v1' && [ \$(stat -c %a '$f') = 600 ] && [ \$(stat -c %a '$TOPUP_DIR/backup') = 700 ] && [ \$(stat -c %a '$TOPUP_DIR/state/backup-identity') = 600 ] && [ -z \"\$(find '$TOPUP_DIR/backup' -name '*.tar' -o -name '.work-*')\" ]"
+check "密文里没有主密钥的明文" "! grep -aq \"\$(sed -n 's/^APP_SECRET=//p' '$TOPUP_DIR/.env')\" '$f'"
 out=$(T restore-drill 2>&1); echo "$out" | sed 's/^/    /'
-check "恢复演练通过（表一样、Redis 有键、开户文件、主密钥）" "grep -q '恢复演练通过' <<< \"\$out\" && grep -q '开户文件：1 个' <<< \"\$out\""
-check "演练的临时容器已删除，正在运行的没动" "[ -z \"\$(docker ps -aq --filter name=topup-drill-)\" ] && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.db == true' > /dev/null"
+check "恢复演练（本机解密）通过（表一样、Redis 有键、开户文件、主密钥）" "grep -q '恢复演练通过' <<< \"\$out\" && grep -q '开户文件：1 个' <<< \"\$out\" && grep -q '已解密到临时目录' <<< \"\$out\""
+check "演练的临时容器、解密出的临时文件已删除，正在运行的没动" "[ -z \"\$(docker ps -aq --filter name=topup-drill-)\" ] && [ -z \"\$(find '$TOPUP_DIR/backup' -name '.drill-*')\" ] && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.db == true' > /dev/null"
+# 管理员生成过备份公钥（异地备份用）时：同一份密文他的私钥也能解
 age-keygen -o "$WORK/age.key" 2> /dev/null
 VAL=$(sed -n 's/^# public key: //p' "$WORK/age.key"); sed -i "s/^BACKUP_AGE_RECIPIENT=.*/BACKUP_AGE_RECIPIENT=$VAL/" "$TOPUP_DIR/deploy.env"
-f=$(ls -1t "$TOPUP_DIR"/backup/topup-*.tar | head -1); age -r "$VAL" -o "$WORK/b.age" "$f"
-check "age 加密的备份能用私钥解开、内容一致（R2 那份的格式）" "age -d -i '$WORK/age.key' '$WORK/b.age' | cmp -s - '$f'"
+T backup > /dev/null 2>&1; f=$(ls -1t "$TOPUP_DIR"/backup/topup-*.tar.age | head -1)
+check "填了管理员公钥后：管理员私钥和本机密钥都能解开同一份，内容一致，里面有两个配置文件" "age -d -i '$WORK/age.key' '$f' > '$WORK/a.tar' && age -d -i '$TOPUP_DIR/state/backup-identity' '$f' | cmp -s - '$WORK/a.tar' && tar -tf '$WORK/a.tar' | grep -q '^./app.env$' && tar -tf '$WORK/a.tar' | grep -q '^./deploy.env$'"
+out=$(T set BACKUP_OFFSITE yes 2>&1); check "BACKUP_OFFSITE 只认 off / r2" "grep -q '只能是 off' <<< \"\$out\" && grep -q '^BACKUP_OFFSITE=off$' '$TOPUP_DIR/deploy.env'"
+T set BACKUP_OFFSITE r2 > /dev/null 2>&1
+out=$(T backup 2>&1); rc=$?
+check "打开异地但 R2 没配：本机照样备份、不报错，只提示" "[ $rc = 0 ] && grep -q '打开了但没配好' <<< \"\$out\" && jq -e '.r2 == \"not_configured\"' '$TOPUP_DIR/state/last-backup.json' > /dev/null"
+T set BACKUP_OFFSITE off > /dev/null 2>&1
+# 保留：7 天以上的删；合计超上限从最旧删；至少留 3 份；旧版本的明文 .tar 删掉
+for i in 1 2 3; do head -c 1024 /dev/urandom > "$TOPUP_DIR/backup/topup-20000101-00000$i-old.tar.age"; touch -d '10 days ago' "$TOPUP_DIR/backup/topup-20000101-00000$i-old.tar.age"; done
+: > "$TOPUP_DIR/backup/topup-20000101-000000-plain.tar"
+T backup > /dev/null 2>&1
+check "超过 7 天的删掉、旧的明文 .tar 删掉，新的都在" "[ -z \"\$(ls '$TOPUP_DIR'/backup/topup-20000101-* 2> /dev/null)\" ] && [ \$(ls '$TOPUP_DIR'/backup/topup-*.tar.age | wc -l) -ge 3 ]"
+TOPUP_BACKUP_MAX_MB=0 T backup > /dev/null 2>&1
+check "合计超过上限：从最旧的删，至少留最新 3 份" "[ \$(ls '$TOPUP_DIR'/backup/topup-*.tar.age | wc -l) = 3 ]"
+echo "    本机备份大小：$(ls -l "$TOPUP_DIR"/backup/topup-*.tar.age | awk '{print $5}' | tr '\n' ' ')字节"
 
 echo "== 场景 9：每 5 分钟检查（状态变化才发邮件）"
 rm -f "$TOPUP_DIR/state/watch"
@@ -157,7 +173,7 @@ check "第二次：问题没变，不再发（不留日志）" "[ $n1 = $n2 ]"
 
 echo "== 场景 10：内存不够时不启动；stop / start"
 out=$(T stop 2>&1); echo "$out" | sed 's/^/    /'
-check "stop：定时器 → 应用 → 备份 → 数据库，80、443 空出" "grep -q '第 3 步' <<< \"\$out\" && [ -z \"\$(docker ps -q --filter label=com.docker.compose.project=topup)\" ] && ls '$TOPUP_DIR'/backup/topup-*-before-stop.tar > /dev/null"
+check "stop：定时器 → 应用 → 备份 → 数据库，80、443 空出" "grep -q '第 3 步' <<< \"\$out\" && [ -z \"\$(docker ps -q --filter label=com.docker.compose.project=topup)\" ] && ls '$TOPUP_DIR'/backup/topup-*-before-stop.tar.age > /dev/null"
 T update; check "停下后自动更新不会把它拉起来" "[ -z \"\$(docker ps -q --filter label=com.docker.compose.project=topup)\" ]"
 out=$(TOPUP_DRILL_MEM_MB=900 T start 2>&1); check "可用内存 900 MB：不启动，说明需要多少" "grep -q '内存不够：可用 900 MB，需要 1140 MB' <<< \"\$out\" && [ -z \"\$(docker ps -q --filter label=com.docker.compose.project=topup)\" ]"
 out=$(T start 2>&1); check "start：健康检查通过，版本 = v2" "grep -q 'TopUP 已启动' <<< \"\$out\" && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\"' > /dev/null"

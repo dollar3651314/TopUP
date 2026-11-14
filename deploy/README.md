@@ -32,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 ```
 
 它做 8 步，每步一行 ✓ / ✗，失败时写原因和下一步然后停下；可以重复运行（做完的步骤跳过，已有的口令不重新生成）：
-装软件（Docker、certbot、age、rclone、jq）→ 取部署工具包 → 生成配置文件（内部口令、主密钥随机生成、不显示）→ 停同一台服务器上别的项目（同一时间只运行一个）→ 检查内存和磁盘 → 申请证书 → 启动 → 打开定时器。最后打印一份不含密钥的摘要。
+装软件（Docker、certbot、age、jq；`rclone` 只在打开异地备份时才要）→ 取部署工具包 → 生成配置文件（内部口令、主密钥随机生成、不显示）→ 停同一台服务器上别的项目（同一时间只运行一个）→ 检查内存和磁盘 → 申请证书 → 启动 → 打开定时器。最后打印一份不含密钥的摘要。
 
 | 命令 | 做什么 |
 |---|---|
@@ -43,9 +43,9 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 | `sudo topup gen-operator` | 只用于测试环境：在服务器上随机生成两个归集发起账户（ETH/BSC 一把、TRON 一把，已有的不重新生成），私钥只写进 `.env`，屏幕上只显示地址（拿去领测试币、登记进合约） |
 | `sudo topup admin-token` | 在终端上显示一次运营后台的初始化口令（不进日志）；初始化完成后后台拒绝再次初始化，口令就没用了 |
 | `sudo topup test-mail` | 发一封测试邮件到 `MAIL_TO` |
-| `sudo topup backup-key` | 生成备份加密的密钥对：公钥写进 `deploy.env`，私钥只在屏幕上显示一次（服务器上不保存） |
-| `sudo topup backup` | 立刻备份一次 |
-| `sudo topup restore-drill [--from-r2]` | 恢复演练：最近一份备份恢复进临时容器，核对表、行数、Redis、开户文件、主密钥；不碰正在运行的数据 |
+| `sudo topup backup` | 立刻备份一次（本机加密保存，默认不传到别处） |
+| `sudo topup restore-drill` | 恢复演练：本机最近一份备份解密后恢复进临时容器，核对表、行数、Redis、开户文件、主密钥；不碰正在运行的数据，解密出的临时文件用完删除 |
+| `sudo topup backup-key`、`restore-drill --from-r2` | 异地备份用（默认关闭，见第 5 节）：生成管理员的备份密钥对（公钥写进 `deploy.env`，私钥只在屏幕上显示一次）；从 R2 下载最新一份、粘贴私钥解密后演练 |
 | `sudo topup rollback` | 换回上一个版本，并且不再自动更新到当前版本 |
 | `sudo topup retry` | 清掉"不再重试"的记录（`state/skip`），下一分钟重新尝试最新版本 |
 | `sudo topup stop` / `start` | 停下（定时器 → 应用 → 备份 → 数据库，数据保留）/ 启动（先按同样的顺序停别的项目） |
@@ -63,18 +63,21 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 | 合计 | 1,040 MB | 启动前要求服务器可用内存 ≥ 1,140 MB（`install`、`start` 会检查，不够就不启动） |
 
 ## 4. 两个配置文件（只在服务器上，权限 600，不进仓库、不进镜像）
-- `deploy.env`：部署用。`install` 生成：`TOPUP_DIR`、`TOPUP_IMAGE`、`TOPUP_ENV`、`DOMAIN`、`CERT_EMAIL`、`CERT_NAME`、`LE_DIR`、`WEBROOT_DIR`、`POSTGRES_PASSWORD`、`REDIS_PASSWORD`；`backup-key` 写 `BACKUP_AGE_RECIPIENT`；管理员填 `R2_ACCOUNT_ID`、`R2_BUCKET`（`set`）和 `R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`（`set-key`）。
+- `deploy.env`：部署用。`install` 生成：`TOPUP_DIR`、`TOPUP_IMAGE`、`TOPUP_ENV`、`DOMAIN`、`CERT_EMAIL`、`CERT_NAME`、`LE_DIR`、`WEBROOT_DIR`、`POSTGRES_PASSWORD`、`REDIS_PASSWORD`；`BACKUP_OFFSITE=off`（异地备份默认关）。只有打开异地备份时才用到：`backup-key` 写 `BACKUP_AGE_RECIPIENT`；管理员填 `R2_ACCOUNT_ID`、`R2_BUCKET`（`set`）和 `R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`（`set-key`）。本机备份的加密密钥在 `state/backup-identity`（服务器生成，600）。
 - `.env`：应用用，变量见仓库根目录 `.env.example`。`install` 生成 `APP_SECRET`、`ADMIN_SETUP_TOKEN`，设 `TRON_NETWORK=nile`；其余由管理员用 `set-key` / `set` 填。`APP_ENV`、`PUBLIC_URL`、`DATABASE_URL`、`REDIS_URL`、`BLOB_DIR`、`TRUST_PROXY=1`、`HOST`、`PORT` 由 `compose.yml` 决定，不放进 `.env`。
 
 ## 5. 备份和恢复
 - 内容：`pg_dump`（Postgres）、Redis 快照（开户资料和管理员会话在 Redis 里）、开户文件目录、两个配置文件（主密钥 `APP_SECRET` 丢了开户资料就解不开）。
-- 本机：`backup/` 下，目录 700、文件 600，保留 7 天（至少 3 份）。每次自动更新前、`stop` 前各备份一次。
-- 异地：用 `age` 公钥加密后上传 Cloudflare R2（`rclone`，配置只经环境变量传入）；R2 里只有密文，私钥只在管理员手里。没配 R2 时只在本机，`status` 里显示，不发告警。
-- 恢复演练：`sudo topup restore-drill`（本机那份）或 `--from-r2`（下载 R2 上最新一份，管理员粘贴私钥解密，私钥只在内存盘里用完即删）。
+- 什么时候：每天 UTC 19:40；每次自动更新前；`stop` 前。
+- **默认只在本机、加密**：`backup/topup-<时间>-<标签>.tar.age`，用 `age` 加密（收件人 = 服务器自己生成的 `state/backup-identity`；管理员跑过 `backup-key` 的话也加上他的公钥），打包时直接写进 `age`，磁盘上不留明文整包。目录 700、文件 600。
+- 加密防的是：备份文件被单独拷走（下载、误传）。防不了：有服务器 root 权限的人（他本来就能读 `.env`）；整台服务器丢失（备份跟着丢）。测试环境只有测试数据，这个风险可以接受；上生产前再定异地备份。
+- 保留：超过 7 天的删掉；本机备份合计超过 2 GB（`TOPUP_BACKUP_MAX_MB`，默认 2048）时从最旧的删起；无论如何至少留最新 3 份。以前版本留下的明文 `.tar` 会被删掉。
+- 异地（Cloudflare R2）：**默认关闭**（`BACKUP_OFFSITE=off`），没配置不报错。以后要开：`sudo topup backup-key`（管理员私钥存进密码管理器）→ `set BACKUP_OFFSITE r2` → 填 `R2_…` → 装 `rclone`；上传的是同一份密文（配置只经环境变量交给 `rclone`）。打开了但没配好：本机照样备份，只提示、记 `r2=not_configured`；上传失败才报错。
+- 恢复演练：`sudo topup restore-drill`（本机那份，用本机密钥解密到临时目录，用完删除）；打开异地后可以 `--from-r2`（下载 R2 上最新一份，管理员粘贴私钥解密，私钥只在内存盘里用完即删）。
 
 ## 6. 检查和告警
 - 自动更新只看"应用活着"：提交号对得上、数据库、Redis、主密钥、worker 5 分钟内运行过。邮件、节点 Key 没填不算失败（换回旧版本也解决不了）。
-- `topup-watch` 每 5 分钟：web 没响应、健康检查 `ok=false`（列出哪几项）、worker 停了、磁盘 ≥ 85%、可用内存 < 100 MB、超过 26 小时没备份、上传 R2 失败、有版本更新失败被跳过、证书 14 天内过期。**状态变化时**用应用自己的发信设置发一封邮件给 `MAIL_TO`（问题不变不重复发，恢复时再发一封）。
+- `topup-watch` 每 5 分钟：web 没响应、健康检查 `ok=false`（列出哪几项）、worker 停了、磁盘 ≥ 85%、可用内存 < 100 MB、超过 26 小时没备份、上一次备份没加密、上传 R2 失败（只在打开异地时）、有版本更新失败被跳过、证书 14 天内过期。**状态变化时**用应用自己的发信设置发一封邮件给 `MAIL_TO`（问题不变不重复发，恢复时再发一封）。
 - 服务器整台宕机时它发不出邮件：要从外部定时探测，另外开（默认不开）。
 
 ## 7. 真实 IP

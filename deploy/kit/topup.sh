@@ -8,9 +8,10 @@
 #   sudo topup gen-operator      测试环境：在服务器上生成两个归集发起账户（ETH/BSC 一个、TRON 一个），只显示地址
 #   sudo topup admin-token       显示一次运营后台的初始化口令（第一次进后台用，初始化后作废）
 #   sudo topup test-mail         发一封测试邮件到 MAIL_TO
-#   sudo topup backup-key        生成备份加密用的密钥对：公钥写进 deploy.env，私钥只在屏幕上显示一次
-#   sudo topup backup            立刻备份一次（每天的定时备份也是它）
-#   sudo topup restore-drill     恢复演练：把最近一份备份恢复进临时容器并核对，不碰正在运行的数据（加 --from-r2 从 R2 下载）
+#   sudo topup backup            立刻备份一次（每天的定时备份也是它）：本机加密保存，默认不传到别处
+#   sudo topup restore-drill     恢复演练：把本机最近一份备份解密、恢复进临时容器并核对，不碰正在运行的数据
+#   sudo topup backup-key        （异地备份用，默认用不到）生成管理员的备份密钥对：公钥写进 deploy.env，私钥只在屏幕上显示一次
+#                                异地备份默认关闭；生产要开时 set BACKUP_OFFSITE r2 并填 R2_…，restore-drill --from-r2 从 R2 下载演练
 #   sudo topup rollback          换回上一个版本，并且不再自动更新到当前这个版本
 #   sudo topup retry             清掉"不再重试"的记录，下一分钟重新尝试最新版本
 #   sudo topup stop / start      停下 TopUP（停定时器 → 停应用 → 备份 → 停数据库，数据保留）/ 重新启动
@@ -32,13 +33,17 @@ LIMITS_MB=1040
 # 系统和 Docker 自己要留的（MB，推断）；启动前要求可用内存 ≥ 上限之和 + 这个数
 RESERVE_MB=100
 HEALTH=http://127.0.0.1:18080/api/health/
+# 备份：本机保留 7 天、至少 3 份；本机备份合计超过这个大小时从最旧的删起（至少留 3 份）
+BACKUP_MAX_MB=${TOPUP_BACKUP_MAX_MB:-2048}
+# 本机备份的加密密钥（服务器自己生成，只在本机，600）
+BACKUP_IDENTITY_REL=state/backup-identity
 # 可以用 set-key 填的密钥（屏幕上不显示）；R2_ 开头的写进 deploy.env，其余写进 .env
 SECRET_KEYS="RESEND_API_KEY SMTP_PASS TRONGRID_API_KEY ETH_RPC_URL BSC_RPC_URL TRON_NODE_URL SWEEP_OPERATOR_KEY SWEEP_OPERATOR_KEY_TRON TRONSAVE_API_KEY R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY"
 # 可以用 set 填的普通设置（不是密钥，会显示）
-PLAIN_KEYS="MAIL_FROM MAIL_TO SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER ETH_CONFIRMATIONS BSC_CONFIRMATIONS TRON_CONFIRMATIONS TRONSAVE_MAX_PRICE_SUN TRON_RENT_MAX_ENERGY USDT_CONTRACT R2_ACCOUNT_ID R2_BUCKET"
+PLAIN_KEYS="MAIL_FROM MAIL_TO SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER ETH_CONFIRMATIONS BSC_CONFIRMATIONS TRON_CONFIRMATIONS TRONSAVE_MAX_PRICE_SUN TRON_RENT_MAX_ENERGY USDT_CONTRACT BACKUP_OFFSITE R2_ACCOUNT_ID R2_BUCKET"
 # 由部署决定的变量（compose.yml 的 environment 或镜像），不写进 .env
 MANAGED_KEYS="APP_ENV PUBLIC_URL HOST PORT TRUST_PROXY GIT_COMMIT DATABASE_URL REDIS_URL BLOB_DIR"
-DEPLOY_KEYS=" R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET BACKUP_AGE_RECIPIENT "
+DEPLOY_KEYS=" BACKUP_OFFSITE R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET BACKUP_AGE_RECIPIENT "
 
 LOG=/dev/null
 say() { echo "$*" | tee -a "$LOG"; }
@@ -220,7 +225,8 @@ cmd_install() {
     [ "${VERSION_ID:-}" = "24.04" ] || detail "提醒：本脚本按 Ubuntu 24.04 编写，这台是 ${PRETTY_NAME:-未知}"
     local need=()
     command -v docker > /dev/null || need+=(docker.io docker-compose-v2)
-    for p in certbot age rclone jq curl openssl; do command -v "$p" > /dev/null || need+=("$p"); done
+    # rclone 只有打开异地备份时才要（backup 会提示安装），默认不装
+    for p in certbot age jq curl openssl; do command -v "$p" > /dev/null || need+=("$p"); done
     if [ "${#need[@]}" -gt 0 ]; then
       say "  … 第 1 步：安装 ${need[*]}（约 1～3 分钟）"
       export DEBIAN_FRONTEND=noninteractive
@@ -231,7 +237,7 @@ cmd_install() {
       echo '{ "log-driver": "json-file", "log-opts": { "max-size": "50m", "max-file": "3" } }' > /etc/docker/daemon.json
       systemctl restart docker >> "$LOG" 2>&1
     fi
-    ok "第 1 步：软件（Docker $(docker --version | awk '{print $3}' | tr -d ,)、certbot、age、rclone、jq）"
+    ok "第 1 步：软件（Docker $(docker --version | awk '{print $3}' | tr -d ,)、certbot、age、jq）"
   fi
 
   # 第 2 步：取部署工具包（镜像 staging 标签里的 /topup-kit）
@@ -263,7 +269,9 @@ cmd_install() {
   set_default WEBROOT_DIR "$WEBROOT_DIR" "$TOPUP_DIR/deploy.env"
   set_default POSTGRES_PASSWORD "$(rand 24)" "$TOPUP_DIR/deploy.env"
   set_default REDIS_PASSWORD "$(rand 24)" "$TOPUP_DIR/deploy.env"
+  set_default BACKUP_OFFSITE off "$TOPUP_DIR/deploy.env"
   for k in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY BACKUP_AGE_RECIPIENT; do grep -q "^$k=" "$TOPUP_DIR/deploy.env" || echo "$k=" >> "$TOPUP_DIR/deploy.env"; done
+  backup_identity > /dev/null || die "第 3 步：生成本机备份的加密密钥失败" "截图发运维"
   set_default TRON_NETWORK nile "$TOPUP_DIR/.env"
   # 主密钥：派生全部加密、签名密钥，换了以后旧数据解不开。只生成一次，不显示（加密备份里有它）
   set_default APP_SECRET "$(rand 32)" "$TOPUP_DIR/.env"
@@ -361,7 +369,7 @@ summary() {
   say "  · 邮件：填好 MAIL_FROM、MAIL_TO 和 RESEND_API_KEY（或 SMTP）之前不发任何邮件，告警也发不出"
   say "  · ETH、BSC：ETH_RPC_URL / BSC_RPC_URL 没填、合约地址没进 config/wallets.json 之前不开通"
   say "  · TRON 合约钱包：config/wallets.json 的 staging.tron 没填之前不开通；归集要 SWEEP_OPERATOR_KEY_TRON"
-  say "  · 异地备份：R2 和备份公钥没填之前只备份在本机（sudo topup backup-key、set-key R2_…）"
+  say "  · 异地备份：测试环境不开（D6），备份只加密保存在这台服务器上；整台服务器丢了备份也跟着丢"
   say "下一步：按部署方案的清单用 sudo topup set-key 变量名 填密钥；sudo topup status 随时看状态。"
 }
 
@@ -370,7 +378,7 @@ missing_list() {
   for k in MAIL_FROM MAIL_TO TRONGRID_API_KEY; do [ -n "$(envval "$k")" ] || miss="$miss $k"; done
   [ -n "$(envval RESEND_API_KEY)$(envval SMTP_HOST)" ] || miss="$miss RESEND_API_KEY(或SMTP)"
   for k in ETH_RPC_URL BSC_RPC_URL SWEEP_OPERATOR_KEY SWEEP_OPERATOR_KEY_TRON; do [ -n "$(envval "$k")" ] || miss="$miss $k"; done
-  for k in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY BACKUP_AGE_RECIPIENT; do [ -n "$(dval "$k")" ] || miss="$miss $k"; done
+  if offsite_on; then for k in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY BACKUP_AGE_RECIPIENT; do [ -n "$(dval "$k")" ] || miss="$miss $k"; done; fi
   echo "${miss:- 没有}"
 }
 
@@ -438,11 +446,24 @@ cmd_rollback() {
 }
 
 # ---------- backup ----------
+# 本机备份的加密密钥：第一次用时由服务器生成（age），只存在 state/ 里（600），输出公钥
+backup_identity() {
+  local f="$TOPUP_DIR/$BACKUP_IDENTITY_REL"
+  if [ ! -s "$f" ]; then
+    ( umask 077; age-keygen -o "$f.new" 2> /dev/null ) && mv "$f.new" "$f" || { rm -f "$f.new"; return 1; }
+  fi
+  chmod 600 "$f"
+  age-keygen -y "$f" 2> /dev/null
+}
+# 异地备份默认关；只有 BACKUP_OFFSITE=r2 才用 R2
+offsite_on() { [ "$(dval BACKUP_OFFSITE)" = r2 ]; }
+
 cmd_backup() {
-  local label=${1:-daily} ts dir tar recip
+  local label=${1:-daily} ts dir out pub recip offsite=off
   start_log backup
   exec 8> "$TOPUP_DIR/state/backup.lock"
   flock -w 600 8 || die "上一次备份还没结束"
+  pub=$(backup_identity) && [ -n "$pub" ] || die "备份：本机加密密钥不可用" "截图发运维"
   ts=$(date -u +%Y%m%d-%H%M%S)
   dir=$(mktemp -d "$TOPUP_DIR/backup/.work-XXXXXX")
   chmod 700 "$dir"
@@ -450,33 +471,51 @@ cmd_backup() {
   compose exec -T redis sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning --rdb /data/backup.rdb > /dev/null' >> "$LOG" 2>&1 \
     && mv "$TOPUP_DIR/data/redis/backup.rdb" "$dir/redis.rdb" || { rm -rf "$dir"; die "备份：导出 Redis 失败" "sudo topup status 截图发运维"; }
   tar -C "$TOPUP_DIR/data" -cf "$dir/blobs.tar" blobs 2>> "$LOG" || { rm -rf "$dir"; die "备份：打包开户文件失败"; }
-  # 两个配置文件也进备份：主密钥 APP_SECRET 丢了，开户资料就解不开了（异地那份是加密的，只有管理员的私钥能解）
+  # 两个配置文件也进备份（D7）：主密钥 APP_SECRET 丢了，开户资料就解不开了
   cp "$TOPUP_DIR/.env" "$dir/app.env"; cp "$TOPUP_DIR/deploy.env" "$dir/deploy.env"
   echo "{\"at\":\"$ts\",\"label\":\"$label\",\"version\":\"$(cur_tag)\"}" > "$dir/meta.json"
-  tar="$TOPUP_DIR/backup/topup-$ts-$label.tar"
-  tar -C "$dir" -cf "$tar" . && chmod 600 "$tar"
+  # 加密：收件人 = 本机密钥；管理员生成过备份公钥（backup-key）的话也加上，他的私钥也能解
+  recip=(-r "$pub"); [ -z "$(dval BACKUP_AGE_RECIPIENT)" ] || recip+=(-r "$(dval BACKUP_AGE_RECIPIENT)")
+  out="$TOPUP_DIR/backup/topup-$ts-$label.tar.age"
+  # 明文不落盘成一个整包：直接打包进 age
+  if ! ( umask 077; tar -C "$dir" -cf - . | age "${recip[@]}" -o "$out.part" ) 2>> "$LOG"; then
+    rm -rf "$dir" "$out.part"; die "备份：加密失败" "截图发运维"
+  fi
+  mv "$out.part" "$out"; chmod 600 "$out"
   rm -rf "$dir"
-  ok "备份：本机 $(basename "$tar")（$(du -h "$tar" | cut -f1)）"
-  # 本机保留 7 天（至少留 3 份）
-  ls -1t "$TOPUP_DIR"/backup/topup-*.tar 2> /dev/null | tail -n +4 | while read -r f; do
-    [ -n "$(find "$f" -mtime +7)" ] && rm -f "$f"
-  done
-  # 异地：age 公钥加密后传到 R2；没配好就只在本机（不发告警，status 里显示）
-  recip=$(dval BACKUP_AGE_RECIPIENT)
-  if [ -z "$recip" ] || [ -z "$(dval R2_ACCOUNT_ID)" ] || [ -z "$(dval R2_BUCKET)" ] || [ -z "$(dval R2_ACCESS_KEY_ID)" ] || [ -z "$(dval R2_SECRET_ACCESS_KEY)" ]; then
-    detail "异地备份没有配置（R2 或备份公钥没填），只在本机"
-    echo "{\"at\":\"$ts\",\"local\":true,\"r2\":\"not_configured\"}" > "$TOPUP_DIR/state/last-backup.json"
-    return 0
-  fi
-  if age -r "$recip" -o "$tar.age" "$tar" 2>> "$LOG" && r2 copyto "$tar.age" "r2:$(dval R2_BUCKET)/topup-staging/$(basename "$tar").age" >> "$LOG" 2>&1; then
-    rm -f "$tar.age"
-    ok "备份：已加密上传到 R2"
-    echo "{\"at\":\"$ts\",\"local\":true,\"r2\":\"ok\"}" > "$TOPUP_DIR/state/last-backup.json"
+  ok "备份：本机已加密 $(basename "$out")（$(du -h "$out" | cut -f1)）"
+  backup_prune
+  # 异地（R2）：默认关闭；打开了但没配好只提示、不算失败
+  if offsite_on; then
+    if [ -z "$(dval BACKUP_AGE_RECIPIENT)" ] || [ -z "$(dval R2_ACCOUNT_ID)" ] || [ -z "$(dval R2_BUCKET)" ] || [ -z "$(dval R2_ACCESS_KEY_ID)" ] || [ -z "$(dval R2_SECRET_ACCESS_KEY)" ]; then
+      detail "异地备份打开了但没配好（R2_… 或备份公钥没填），这次只在本机"; offsite=not_configured
+    elif ! command -v rclone > /dev/null; then
+      detail "异地备份要 rclone：sudo apt-get install -y rclone，这次只在本机"; offsite=not_configured
+    elif r2 copyto "$out" "r2:$(dval R2_BUCKET)/topup-staging/$(basename "$out")" >> "$LOG" 2>&1; then
+      ok "备份：已上传到 R2（只有密文）"; offsite=ok
+    else
+      offsite=failed
+    fi
   else
-    rm -f "$tar.age"
-    echo "{\"at\":\"$ts\",\"local\":true,\"r2\":\"failed\"}" > "$TOPUP_DIR/state/last-backup.json"
-    die "备份：上传 R2 失败（本机那份已经做好）" "sudo topup status 截图发运维"
+    detail "异地备份：关（只在本机）"
   fi
+  echo "{\"at\":\"$ts\",\"local\":\"encrypted\",\"r2\":\"$offsite\"}" > "$TOPUP_DIR/state/last-backup.json"
+  [ "$offsite" != failed ] || die "备份：上传 R2 失败（本机那份已经做好）" "sudo topup status 截图发运维"
+}
+
+# 本机保留：7 天以上的删掉；合计超过 BACKUP_MAX_MB 时从最旧的删起；无论如何至少留最新 3 份
+backup_prune() {
+  local f total n=0
+  total=$(du -ck "$TOPUP_DIR"/backup/topup-*.tar.age 2> /dev/null | tail -1 | cut -f1)
+  while read -r f; do
+    [ -n "$f" ] || continue
+    n=$((n + 1)); [ "$n" -gt 3 ] || continue
+    if [ -n "$(find "$f" -mtime +7)" ] || [ "${total:-0}" -gt $((BACKUP_MAX_MB * 1024)) ]; then
+      total=$(( total - $(du -k "$f" | cut -f1) )); rm -f "$f"
+    fi
+  done <<< "$(ls -1t "$TOPUP_DIR"/backup/topup-*.tar.age 2> /dev/null)"
+  # 以前版本留下的明文备份（.tar）一并删掉
+  rm -f "$TOPUP_DIR"/backup/topup-*.tar
 }
 
 # R2（S3 兼容）：配置只经环境变量交给 rclone，不写文件、不出现在命令行参数里
@@ -514,7 +553,9 @@ cmd_restore_drill() {
   start_log restore-drill
   local src=${1:-} tar tmp key pg rd live restored ok_all=1 files
   tmp=$(mktemp -d "$TOPUP_DIR/backup/.drill-XXXXXX"); chmod 700 "$tmp"
-  trap 'docker rm -f topup-drill-pg topup-drill-redis > /dev/null 2>&1; rm -rf "$tmp"' EXIT
+  # 退出时删临时容器和临时目录（里面有解密出来的明文）；$tmp 在这里展开，函数返回后局部变量就没了
+  # shellcheck disable=SC2064
+  trap "docker rm -f topup-drill-pg topup-drill-redis > /dev/null 2>&1; rm -rf '$tmp'" EXIT
   if [ "$src" = "--from-r2" ]; then
     local name
     name=$(r2 lsf "r2:$(dval R2_BUCKET)/topup-staging/" 2>> "$LOG" | sort | tail -1)
@@ -530,9 +571,11 @@ cmd_restore_drill() {
     [ $rc = 0 ] || die "解密失败（私钥不对？）"
     tar="$tmp/b.tar"; say "  用 R2 上的 $name"
   else
-    tar=$(ls -1t "$TOPUP_DIR"/backup/topup-*.tar 2> /dev/null | head -1)
-    [ -n "$tar" ] || die "本机没有备份" "先 sudo topup backup"
-    say "  用本机的 $(basename "$tar")"
+    local enc
+    enc=$(ls -1t "$TOPUP_DIR"/backup/topup-*.tar.age 2> /dev/null | head -1)
+    [ -n "$enc" ] || die "本机没有备份" "先 sudo topup backup"
+    age -d -i "$TOPUP_DIR/$BACKUP_IDENTITY_REL" -o "$tmp/b.tar" "$enc" 2>> "$LOG" || die "本机备份解密失败（本机加密密钥不对或文件坏了）" "截图发运维"
+    tar="$tmp/b.tar"; say "  用本机的 $(basename "$enc")（已解密到临时目录，用完删除）"
   fi
   tar -C "$tmp" -xf "$tar" || die "备份文件解不开"
   pg=$(compose config --images 2> /dev/null | grep -m1 postgres); [ -n "$pg" ] || pg=postgres:16
@@ -585,6 +628,7 @@ watch_problems() {
     age=$(( ( $(date -u +%s) - $(date -u -d "$(jq -r .at "$TOPUP_DIR/state/last-backup.json" | sed -E 's/^(....)(..)(..)-(..)(..)(..)$/\1-\2-\3 \4:\5:\6/')" +%s 2> /dev/null || echo 0) ) / 3600 ))
     [ "$age" -le 26 ] || p+=("超过 ${age} 小时没有备份")
     [ "$(jq -r .r2 "$TOPUP_DIR/state/last-backup.json")" != failed ] || p+=("上一次上传 R2 失败")
+    [ "$(jq -r .local "$TOPUP_DIR/state/last-backup.json")" = encrypted ] || p+=("上一次备份没有加密（旧版本留下的，sudo topup backup 重做一次）")
   fi
   [ ! -f "$TOPUP_DIR/state/skip" ] || p+=("版本 $(cut -c1-7 "$TOPUP_DIR/state/skip") 更新失败、不再重试（sudo topup retry）")
   if [ -f "$LE_DIR/live/$CERT_NAME/fullchain.pem" ] && ! openssl x509 -checkend $((14 * 86400)) -noout -in "$LE_DIR/live/$CERT_NAME/fullchain.pem" > /dev/null 2>&1; then p+=("HTTPS 证书 14 天内过期"); fi
@@ -641,7 +685,7 @@ cmd_keys() {
   done
   say "普通设置（sudo topup set 变量名 值）："
   for k in $PLAIN_KEYS; do detail "$(printf '%-24s' "$k") $(key_value "$k")"; done
-  detail "BACKUP_AGE_RECIPIENT     $([ -n "$(dval BACKUP_AGE_RECIPIENT)" ] && echo 已生成 || echo '未生成（sudo topup backup-key）')"
+  detail "BACKUP_AGE_RECIPIENT     $([ -n "$(dval BACKUP_AGE_RECIPIENT)" ] && echo 已生成 || echo '未生成（只有打开异地备份才要：sudo topup backup-key）')"
 }
 key_file() { case "$DEPLOY_KEYS" in *" $1 "*) echo "$TOPUP_DIR/deploy.env" ;; *) echo "$TOPUP_DIR/.env" ;; esac; }
 key_value() { envval "$1" "$(key_file "$1")"; }
@@ -686,6 +730,8 @@ check_value() {
       printf '%s' "$val" | grep -Eq '^https://' || die "$key 应该是 https:// 开头的节点地址；什么都没有改" ;;
     MAIL_FROM | MAIL_TO)
       printf '%s' "$val" | grep -Eq '^[^@]+@[^@]+\.[^@]+$' || die "$key 应该是一个邮箱地址；什么都没有改" ;;
+    BACKUP_OFFSITE)
+      case "$val" in off | r2) ;; *) die "BACKUP_OFFSITE 只能是 off（默认，只在本机）或 r2；什么都没有改" ;; esac ;;
   esac
 }
 
