@@ -33,11 +33,13 @@ const STATE = resolve(TMP, 'payout-e2e.json');
 const ASTATE = resolve(TMP, 'payout-e2e-admin.json'), MSTATE = resolve(TMP, 'payout-e2e-merchant.json');
 type St = { adminSecret: string; merchantSecret: string; batch: string; cashout: string; mid: string };
 const st: St = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : { adminSecret: '', merchantSecret: '', batch: '', cashout: '', mid: '' };
-const save = () => writeFileSync(STATE, JSON.stringify(st));
+const save = () => writeFileSync(STATE, JSON.stringify({ ...st, lastStep }));
 const WALLETS = JSON.parse(readFileSync(new URL('../../config/wallets.json', import.meta.url), 'utf8')).local;
 const rndEvm = () => '0x' + Array.from({ length: 40 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');
 
-const lastStep: Record<string, number> = {};
+// 用过的动态码时间步也存进状态文件：一个用例失败后 Playwright 会换一个新的 worker 进程，只放内存里会丢，
+// 下一个用例就可能拿到同一个 30 秒里已经用过的动态码（bad_code）
+const lastStep: Record<string, number> = existsSync(STATE) ? (JSON.parse(readFileSync(STATE, 'utf8')).lastStep || {}) : {};
 async function code(secret: string) {
   for (;;) {
     for (const off of [0, 30_000]) {
@@ -439,11 +441,11 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
     await expect(b).toContainText('2 笔成功');
     await expect(b).toContainText('回到已审核');
     await expect(b).toContainText('直接烧 TRX');
-    await expect(b).not.toContainText('租');
+    for (const rent of ['确认后才租', '租到', '先租能量']) await expect(b).not.toContainText(rent); // 不说会租能量（"不租能量"这样的说明可以有）
     // TRON 凑批卡片也写明直接烧 TRX，不提租能量
     const card = admin.locator('[data-panel="p-withdrawals"] [data-payout-plan="tron"]');
     await expect(card).toContainText('直接烧 TRX');
-    await expect(card).not.toContainText('租');
+    for (const rent of ['确认后才租', '租到', '先租能量']) await expect(card).not.toContainText(rent);
     await admin.unroute(isWallet('withdrawals'));
   });
 
@@ -451,7 +453,7 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
     // 新建一批（2 笔）和一笔普通提币，都还没审核
     const sheet = ['chain,to,amount', `bsc,${rndEvm()},4`, `bsc,${rndEvm()},4`].join('\n');
     const sub = await mcall('payout-batch-submit', { csv: sheet, code: await code(st.merchantSecret) });
-    expect(sub.status).toBe(200);
+    expect(sub.status, JSON.stringify(sub.body)).toBe(200);
     const batchIds: string[] = sub.body.accepted.map((x: any) => x.withdrawal_no);
     const single = (await mcall('withdraw', { kind: 'payout', chain: 'bsc', to: rndEvm(), amount: '2', code: await code(st.merchantSecret) })).body.withdrawal_no;
     try {
