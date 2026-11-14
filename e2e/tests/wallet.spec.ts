@@ -355,7 +355,12 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
       await expect(box).toBeVisible();
       await expect(box.locator('input[value="tron"]')).toBeDisabled();
       await expect(box.locator('input[value=""]')).toBeChecked(); // 默认不指定
-      await merchant.fill('#mo-cust', 'ui_multi_1'); await merchant.press('#mo-cust', 'Escape');
+      // 客户搜索列表出来以后再按 Esc（只关列表）：列表还没出来时 Esc 会关掉整个弹窗（CI 上搜索慢时第二张单的表单就不见了）
+      await merchant.fill('#mo-cust', 'ui_multi_1');
+      await expect(merchant.locator('#mo-cust-list')).toBeVisible();
+      await merchant.press('#mo-cust', 'Escape');
+      await expect(merchant.locator('#mo-cust-list')).toBeHidden();
+      await expect(box).toBeVisible();
       await merchant.fill('#mo-no', no); await merchant.fill('#mo-amt', '20');
       await box.locator(`input[value="${chain}"]`).check();
       await merchant.click('[data-mdialog-ok]');
