@@ -141,7 +141,8 @@ jobs:
           (cd contracts && FOUNDRY_PROFILE=payout forge build)
           anvil --port 18545 --silent &
           for i in $(seq 1 30); do curl -sf -X POST -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId"}' "$TOPUP_ANVIL_RPC" >/dev/null && break; sleep 1; done
-          node --test test/anvil/*.test.js
+          # 几个文件共用同一条 anvil 和同一个部署账户：一个一个跑，免得同时发交易抢同一个 nonce（replacement transaction underpriced）
+          node --test --test-concurrency=1 test/anvil/*.test.js
 
   # TRON：用 TRON 官方编译器编译（编译器 sha256 写死）→ 起本机 TRON 私链（tronbox/tre，镜像按摘要固定）→ 跑 Nile 验证脚本的全部场景
   # 私链账户是容器启动时自己生成的、只在这个容器里有效的测试账户，不是任何真实或测试网账户；不打印、不保存。
