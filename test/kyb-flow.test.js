@@ -8,7 +8,7 @@ import { deriveKeys, decryptJson } from '../server/kyb/crypto.js';
 import { createRepo } from '../server/kyb/repo.js';
 import { createLocalBlobs } from '../server/kyb/blobs.js';
 import { createOnboardingHandler } from '../server/kyb/onboarding.js';
-import { createAdminHandler, createCleanup } from '../server/kyb/admin.js';
+import * as kybAdmin from '../server/kyb/admin.js';
 import { totpCode } from '../server/kyb/totp.js';
 import { approvedFromKyb } from '../server/pay/kyb-link.js';
 
@@ -28,8 +28,9 @@ function setup() {
   const send = async (m) => mails.push(m);
   const config = { mailTo: 'admin@example.test', adminSetupToken: 'setup-token-123' };
   const ob = createOnboardingHandler({ repo, blobs, send, config, now, log: quiet, getIp: () => '198.51.100.7' });
-  const ad = createAdminHandler({ repo, blobs, send, redis, keys, config, now, log: quiet });
-  const cleanup = createCleanup({ repo, blobs, now, log: quiet });
+  const ad = kybAdmin.createAdminHandler({ repo, blobs, send, redis, keys, config, now, log: quiet });
+  // 依 TU-15（客户资料永久保留、不删）：自动清理应当去掉；如果代码里还留着清理函数，用例照样调用它，检查它不删任何东西
+  const cleanup = typeof kybAdmin.createCleanup === 'function' ? kybAdmin.createCleanup({ repo, blobs, now, log: quiet }) : null;
   let cookie = '';
   const admin = async (action, body, method = body === undefined ? 'GET' : 'POST') => {
     const r = await ad(new Request(`${B}/api/admin/${action}`, { method, headers: { cookie, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined }));
@@ -263,20 +264,79 @@ test('链接 30 天过期；重新发送后旧链接失效、新链接可用', a
   } finally { s.done(); }
 });
 
-test('自动清理：未通过的申请满 1 年删除；通过且业务关系结束满 5 年删除', async () => {
+// 口径变更（依 TU-15，2026-11-13：客户资料含开户资料永久保留、不删）：原来断言"未通过满 1 年删、业务关系结束满 5 年删"，
+// 改为超过原来的 365 天 / 5 年之后资料仍在、不被删除。这不是放宽：断言的方向随需求反过来了，且比原来查得更多（每个阶段都查）。
+test('永久保留（TU-15）：未通过的申请超过 365 天、业务关系结束超过 5 年后，申请记录仍在、不被删除', async () => {
   const s = setup();
   try {
-    const { app: a1 } = await s.repo.create({ company: 'Old', email: 'o@x.com' });
+    const { app: a1 } = await s.repo.create({ company: 'Old', email: 'o@x.com' }); // 一直没提交（邀请过期）
     const { app: a2 } = await s.repo.create({ company: 'Client', email: 'c@x.com' });
     a2.status = 'approved'; await s.repo.save(a2);
+    const { app: a3 } = await s.repo.create({ company: 'Rejected', email: 'r@x.com' });
+    a3.status = 'rejected'; await s.repo.save(a3);
+    const runCleanup = async () => { if (s.cleanup) assert.equal((await s.cleanup()).deleted, 0, '清理函数不能再删任何申请'); };
     s.setNow(s.getNow() + 366 * 864e5);
-    assert.deepEqual(await s.cleanup(), { deleted: 1 });
-    assert.equal(await s.repo.get(a1.id), null);
+    await runCleanup();
+    for (const a of [a1, a2, a3]) {
+      const cur = await s.repo.get(a.id);
+      assert.ok(cur, `${a.company}：超过 365 天仍在`);
+      assert.equal(s.repo.open(cur).email, a.company === 'Old' ? 'o@x.com' : a.company === 'Client' ? 'c@x.com' : 'r@x.com', '加密的资料仍可解开');
+    }
     const cur = await s.repo.get(a2.id);
     cur.relationshipEndedAt = new Date(s.getNow()).toISOString(); await s.repo.save(cur);
-    s.setNow(s.getNow() + 5 * 366 * 864e5);
-    assert.deepEqual(await s.cleanup(), { deleted: 1 });
-    assert.equal(await s.repo.get(a2.id), null);
+    s.setNow(s.getNow() + 5 * 366 * 864e5 + 864e5);
+    await runCleanup();
+    for (const a of [a1, a2, a3]) assert.ok(await s.repo.get(a.id), `${a.company}：业务关系结束超过 5 年（创建超过 6 年）仍在`);
+    assert.equal((await s.repo.list()).length, 3, '索引里 3 条都在');
+  } finally { s.done(); }
+});
+
+test('永久保留（TU-15）：已提交的开户资料（含证件、公司文件、签名）超过 365 天 / 5 年后，后台仍能查看和下载', async () => {
+  const s = setup();
+  try {
+    const secret = await s.login();
+    const relogin = async () => assert.equal((await s.admin('login/', { password: 'a-long-password-123', code: totpCode(secret, s.getNow()) }))[0], 200);
+    const submitOne = async (company, email) => {
+      await s.admin('invite/', { company, email });
+      const c = s.client(s.tokenFrom(s.mails.at(-1)));
+      await saveAll(c, fullForm());
+      await uploadIds(c);
+      assert.equal((await upload(c, 'company'))[0], 200);
+      assert.equal((await c('submit/', { signature: PNG }))[0], 200);
+      const [, list] = await s.admin('apps/');
+      return list.apps.find((x) => x.company === company).id;
+    };
+    const rej = await submitOne('Rejected Files Co', 'rej@x.com');
+    const ok = await submitOne('Approved Files Co', 'ok@x.com');
+    assert.equal((await s.admin('decide/', { id: rej, action: 'reject' }))[0], 200);
+    assert.equal((await s.admin('decide/', { id: ok, action: 'approve' }))[0], 200);
+    const day = new Date(s.getNow()).toISOString().slice(0, 10);
+    assert.equal((await s.admin('notes/', { id: ok, relationshipEndedAt: day }))[0], 200); // 业务关系今天结束
+    const blobCount = () => readdirSync(join(s.dir, 'blobs'), { recursive: true, withFileTypes: true }).filter((f) => f.isFile() && !f.name.endsWith('.meta')).length;
+    const before = blobCount();
+    assert.ok(before >= 8, `两份申请的文件都已落盘（${before}）`);
+    const readable = async (id, label) => {
+      const [st, d] = await s.admin(`app/?id=${id}`);
+      assert.equal(st, 200, `${label}：申请详情`);
+      assert.equal(d.form.people[0].idNo, 'K7654321Z', `${label}：资料可解开`);
+      assert.equal(d.files.length, 3, `${label}：3 个文件都在`);
+      for (const f of d.files) {
+        const [fs, fr] = await s.admin(`file/?id=${id}&fileId=${f.id}`);
+        assert.equal(fs, 200, `${label}：下载 ${f.doc}`);
+        assert.ok((await fr.arrayBuffer()).byteLength > 0, `${label}：${f.doc} 有内容`);
+      }
+      const [ss, sr] = await s.admin(`file/?id=${id}&sig=1`);
+      assert.equal(ss, 200, `${label}：签名`);
+      assert.ok((await sr.arrayBuffer()).byteLength > 0);
+    };
+    for (const [days, tag] of [[366, '超过 365 天'], [5 * 366 + 1, '业务关系结束超过 5 年']]) {
+      s.setNow(s.getNow() + days * 864e5);
+      if (s.cleanup) assert.equal((await s.cleanup()).deleted, 0, `${tag}：清理函数不能再删任何申请`);
+      await relogin();
+      await readable(rej, `未通过（${tag}）`);
+      await readable(ok, `已通过（${tag}）`);
+      assert.equal(blobCount(), before, `${tag}：存储里的文件一个不少`);
+    }
   } finally { s.done(); }
 });
 
