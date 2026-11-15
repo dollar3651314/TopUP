@@ -750,4 +750,94 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(admin.locator('[data-panel="p-sweep"]')).not.toContainText(OLD);
   });
 
+  // ---- 没开通的链不算出错（测试会话补测）：config/wallets.json 里一条链的合约地址全空 = not_enabled（ok = true），
+  // 灰着显示"未开通"，不进待处理、不亮系统状态红点；只填一部分才是 not_configured（照旧报错）。用拦截 wallet-chains 模拟。
+  // mode 换了以后切一次页面，概览"待处理"和侧栏角标会重新读 wallet-chains。
+  const chainOff = (j: any, mode: 'not_enabled' | 'not_configured') => {
+    for (const c of j.chains) if (c.chain === 'bsc') {
+      if (mode === 'not_enabled') Object.assign(c, { status: 'not_enabled', ok: true, usdt: false, contracts: { factory: false, implementation: false, parent: false, batcher: false }, scan: { ok: true, lag_blocks: null, age_s: null }, onchain: null });
+      else Object.assign(c, { status: 'not_configured', ok: false, rpc: true, usdt: true, contracts: { ...c.contracts, batcher: false } });
+    }
+  };
+  async function reloadOverview() {
+    await admin.click('[data-tab="p-sweep"]');
+    await expect(admin.locator('[data-panel="p-sweep"] [data-loading]')).toHaveCount(0);
+    await admin.click('[data-tab="p-overview"]');
+    await expect(admin.locator('[data-panel="p-overview"]')).toBeVisible();
+    await expect(admin.locator('[data-panel="p-overview"] [data-todo] [data-loading]')).toHaveCount(0);
+  }
+
+  test('TC-W18 BSC 没开通（not_enabled）：概览待处理没有"合约地址没配齐"、侧栏系统状态不亮"!"；系统状态 BSC 卡片灰着标"未开通"、不标红；顶部"开通的链都正常"并写"BSC未开通"', async () => {
+    await adminTab('p-overview');
+    let mode: 'not_enabled' | 'not_configured' = 'not_configured';
+    await admin.route(isWallet('wallet-chains'), patchJson((j) => chainOff(j, mode)));
+    const todo = admin.locator('[data-panel="p-overview"] [data-todo]');
+    const badge = admin.locator('[data-pcount="status"]');
+    // 前提：先用"没配齐"让红点亮起来，再换成"没开通"，看红点是不是跟着灭（不是一直就没亮）
+    await reloadOverview();
+    await expect(todo).toContainText('BSC：合约地址没配齐');
+    await expect(badge).toHaveText('!');
+    mode = 'not_enabled';
+    await reloadOverview();
+    await expect(todo).not.toContainText('读取失败');
+    await expect(todo).not.toContainText('BSC：合约地址没配齐');
+    await expect(badge).not.toHaveText('!');
+    await expect(badge).not.toHaveClass(/badge-bad/);
+    // 系统状态
+    await admin.click('[data-tab="p-status"]');
+    const p = admin.locator('[data-panel="p-status"]');
+    await expect(p.locator('[data-wallet-status]')).toBeVisible();
+    const card = p.locator('[data-chain-card="bsc"]');
+    await expect(card).toHaveCount(1);
+    await expect(card.locator('.later-tag')).toHaveText(OFF);
+    await expect(card).not.toHaveClass(/chain-bad/);
+    await expect(card.locator('.st-rejected')).toHaveCount(0);
+    await expect(card.locator('.alert')).toHaveCount(0);
+    await expect(card).not.toContainText(/少 \d+ 项配置/); // 说明文字里有"少几项配置"的提示，不算；不能有"少 N 项配置"这个状态
+    const top = p.locator('[data-wallet-status] [data-hero]').first();
+    await expect(top).toHaveAttribute('data-hero', 'ok');
+    await expect(top).toContainText('开通的链都正常');
+    await expect(top).toContainText('BSC未开通');
+    await expect(p.locator('[data-wallet-status] .hero-bad')).toHaveCount(0);
+    // 以太坊照常一张正常的卡
+    await expect(p.locator('[data-chain-card="eth"] .later-tag')).toHaveCount(0);
+    expect(await p.locator('[data-wallet-status]').innerText()).not.toMatch(/0x[0-9a-fA-F]{40}/);
+    await expect(p.locator('[data-loading]')).toHaveCount(0);
+    await admin.unroute(isWallet('wallet-chains'), { behavior: 'wait' });
+  });
+
+  test('TC-W19 BSC 只填了一部分（not_configured、节点已配）：概览待处理有"BSC：合约地址没配齐"、侧栏系统状态亮"!"；系统状态 BSC 卡片标红、没有"未开通"', async () => {
+    await adminTab('p-overview');
+    await admin.route(isWallet('wallet-chains'), patchJson((j) => chainOff(j, 'not_configured')));
+    await reloadOverview();
+    const todo = admin.locator('[data-panel="p-overview"] [data-todo]');
+    await expect(todo).toContainText('BSC：合约地址没配齐');
+    await expect(admin.locator('[data-pcount="status"]')).toHaveText('!');
+    await admin.click('[data-tab="p-status"]');
+    const p = admin.locator('[data-panel="p-status"]');
+    await expect(p.locator('[data-wallet-status]')).toBeVisible();
+    const card = p.locator('[data-chain-card="bsc"]');
+    await expect(card).toHaveClass(/chain-bad/);
+    await expect(card.locator('.st-rejected')).toBeVisible();
+    await expect(card.locator('.later-tag')).toHaveCount(0);
+    await expect(p.locator('[data-wallet-status] .hero-bad')).toContainText('BSC');
+    await expect(p.locator('[data-wallet-status]')).not.toContainText('开通的链都正常');
+    await expect(p.locator('[data-loading]')).toHaveCount(0);
+    await admin.unroute(isWallet('wallet-chains'), { behavior: 'wait' });
+  });
+
+  test('TC-W20 以太坊发起账户 ETH 余额 0（手续费没估出来、low = true）：概览待处理有"以太坊 发起账户的 ETH 不够付手续费"、侧栏"归集"亮"!"', async () => {
+    await adminTab('p-overview');
+    await admin.route(isWallet('wallet-chains'), patchJson((j) => {
+      for (const c of j.chains) if (c.chain === 'eth') c.operator = { ...c.operator, configured: true, gas: '0', symbol: 'ETH', batches_left: null, low: true };
+    }));
+    await reloadOverview();
+    const todo = admin.locator('[data-panel="p-overview"] [data-todo]');
+    await expect(todo).toContainText('以太坊 发起账户的 ETH 不够付手续费');
+    await expect(todo.locator('tbody tr', { hasText: '不够付手续费' })).toContainText('0 ETH');
+    await expect(admin.locator('[data-pcount="sweep"]')).toHaveText('!');
+    await expect(admin.locator('[data-pcount="sweep"]')).toHaveClass(/badge-bad/);
+    await admin.unroute(isWallet('wallet-chains'), { behavior: 'wait' });
+  });
+
 });
