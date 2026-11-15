@@ -26,7 +26,9 @@ const AMOUNT_KEYS = new Set(['amount', 'matched', 'fee', 'credited', 'available'
   // 运营后台"概览"
   'collected_total', 'owed_total', 'owed_available', 'owed_frozen', 'assets_total', 'unswept_total', 'hot_usdt', 'cold_usdt',
   'profit_total', 'profit_now', 'profit_after_sweep', 'income_fee_in', 'income_fee_out', 'income_dust', 'withdrawals_amount',
-  'over_threshold_total', 'threshold', 'hot_trx', 'month_sweep_trx', 'fees_in']);
+  'over_threshold_total', 'threshold', 'hot_trx', 'month_sweep_trx', 'fees_in',
+  // 对账的各链明细
+  'receivable']);
 // 注意：只有值是数字时才转换，所以 hot、cold 作为地址（字符串）时不受影响；数量类的字段不要用上面的名字（例如 total 是金额，地址数量用 address_count）
 /** 把对象里的金额字段（整数）转成字符串 */
 export function money(v) {
