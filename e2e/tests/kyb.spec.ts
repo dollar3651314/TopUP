@@ -397,12 +397,24 @@ test.describe.serial('TC-K 在线开户', () => {
     await expect(page.locator('[data-ob-invalid] button')).toHaveText('Try again');
   });
 
-  test('TC-K11 到期清理由 worker 执行，没有对外的接口（本地用 /__fake/cleanup/ 代替 worker 立即跑一次）', async ({ request }) => {
+  // 口径变更（依 TU-15：客户资料含开户资料永久保留、不删）：原来检查"到期清理由 worker 执行，本地 /__fake/cleanup/ 立即跑一次、deleted = 0"；
+  // 现在没有清理：对外接口和本地替身入口都不存在，跑一次每日任务后刚才那份申请照样在。
+  test('TC-K11 开户资料永久保留：没有清理接口（对外、本地替身都没有），跑过每日任务后申请仍在', async ({ request }) => {
     expect((await request.get('/api/cron/cleanup/')).status()).toBe(404);
     expect((await request.get('/api/cron/cleanup/', { headers: { authorization: 'Bearer wrong' } })).status()).toBe(404);
-    const ok = await request.get('/__fake/cleanup/');
-    expect(ok.status()).toBe(200);
-    expect(await ok.json()).toMatchObject({ ok: true, deleted: 0 });
+    const fake = await request.get('/__fake/cleanup/');
+    expect(fake.status()).toBe(404);
+    expect(await fake.text()).not.toMatch(/"deleted"/);
+    // 前面的 TC-K09 删掉了主流程那份申请：这里新发一份邀请，确认后台能列出来，再跑每日任务
+    const company = `Retain Co ${Date.now()}`;
+    const inv = await admin.request.post('/api/kyb/?g=admin&a=invite', { data: { company, email: `retain-${Date.now()}@mekong.example` } });
+    expect(inv.status()).toBe(200);
+    const names = async () => ((await (await admin.request.get('/api/kyb/?g=admin&a=apps')).json()).apps as any[]).map((a) => a.company);
+    const before = await names();
+    expect(before, '先确认后台能列出刚发的申请').toContain(company);
+    await request.get('/__fake/daily/'); // 主实例没开收付款时返回什么都行，只看申请还在
+    const after = await names();
+    expect(after).toEqual(before);
   });
 
   test('TC-K12 跨站请求（Origin 不一致）被拒绝', async () => {
