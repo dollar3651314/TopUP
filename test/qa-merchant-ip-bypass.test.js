@@ -4,7 +4,7 @@
 //   - 只在和测试管理员相同的条件下生效：APP_ENV=staging、TRON_NETWORK=nile、配了的以太坊 / BSC 节点链 ID 都在测试网白名单
 //     （11155111、17000、560048、97）；条件不满足就当没配
 //   - 生产（APP_ENV=production）配了这个变量：拒绝启动（和测试管理员一样，说明里只有变量名、没有值）
-//   - 效果：只对这一个商户，开放 API 提币（POST /api/v1/withdrawals/）跳过 IP 白名单；签名、时间戳、幂等、余额等其余检查照旧；
+//   - 效果：只对这一个商户，开放 API 的每一处 IP 白名单检查（提币 POST /api/v1/withdrawals/、批量打款 POST /api/v1/payouts/batch/）都跳过；签名、时间戳、幂等、余额等其余检查照旧；
 //     别的商户不受影响（白名单为空照样 403）
 //   - 健康检查：测试环境给出是否开着（只给是否，不给商户编号，仓库是公开的）；生产没有这一项
 //   - 启动时记一行日志说明已开启，不带密钥
@@ -16,6 +16,8 @@
 //   四、生效：以太坊节点是 Sepolia（11155111）时照样生效
 //   五、健康检查：测试环境开着时 test_merchant_ip_bypass = true、没有商户编号；没开 false；生产起不来、没有这一项
 //   六、启动日志：开着时恰好一行说明，不带 APP_SECRET、API 密钥；没开时没有这一行
+//   七、批量打款（POST /api/v1/payouts/batch/）也免：这个商户白名单为空、IP 不在白名单都能提交；空列表、一行不对、签名错、
+//       没有幂等键照样拒绝，幂等照旧；别的商户照旧 403（开放 API 里每一处 IP 白名单检查都免，只对这一个商户）
 // 只用替身：内嵌数据库、内存 Redis；以太坊节点是本机起的一个只回链 ID 的假节点。商户编号、密钥都是这里随机生成的。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -239,4 +241,39 @@ test('六、启动日志：开着时恰好一行说明（提到 TEST_MERCHANT_IP
     const hit = notNile.lines.filter((l) => l.includes(ENV));
     assert.ok(hit.every((l) => !/启用|已开|enabled/i.test(l) || /不|未|not|ignored|disabled/i.test(l)), `条件不满足时不能说已开启：${JSON.stringify(hit)}`);
   } finally { await notNile.done(); }
+});
+
+// ---------- 七、批量打款 ----------
+
+test('七、批量打款 POST /api/v1/payouts/batch/ 也免 IP 白名单（只对这个商户）；空列表、一行不对、签名错、没有幂等键照样拒绝；别的商户照旧 403', async () => {
+  const s = await stack();
+  try {
+    const items = [{ chain: 'tron', to: TO, amount: '5', customer_id: 'qa_buyer' }, { chain: 'tron', to: TO, amount: '3', merchant_ref: 'QA-2' }];
+    const batch = (who, body = { items }, opts) => s.call(who.cred, 'POST', 'payouts/batch/', body, opts);
+    // 别的商户：白名单为空，照旧 403
+    const o = await batch(s.other);
+    assert.equal(o.status, 403); assert.equal(code(o), 'ip_not_allowed');
+    // 测试商户：白名单为空也能提交
+    const idem = randomUUID();
+    const r1 = await batch(s.bypass, { items }, { idem });
+    assert.equal(r1.status, 200, JSON.stringify(r1.body));
+    assert.equal(r1.body.items.length, 2);
+    // 幂等：同一个 Key、同样的内容返回同一批
+    const r2 = await batch(s.bypass, { items }, { idem });
+    assert.equal(r2.body.batch_no, r1.body.batch_no);
+    // 白名单里只有别的 IP、请求 IP 不在里面：照样能提交
+    await s.deps.ops.setIpWhitelist(s.bypass.m, ['203.0.113.10']);
+    s.setIp('198.51.100.77');
+    assert.equal((await batch(s.bypass, { items: [items[0]] })).status, 200);
+    // 别的商户：白名单有别的 IP，照旧 403
+    await s.deps.ops.setIpWhitelist(s.other.m, ['203.0.113.10']);
+    assert.equal(code(await batch(s.other)), 'ip_not_allowed');
+    // 其余检查照旧
+    assert.equal(code(await batch(s.bypass, { items: [] })), 'invalid_param', '空列表');
+    const bad = await batch(s.bypass, { items: [items[0], { chain: 'tron', to: 'not-an-address', amount: '1' }] });
+    assert.equal(bad.status, 422, JSON.stringify(bad.body));
+    assert.equal(code(bad), 'invalid_rows');
+    assert.equal((await batch(s.bypass, { items }, { sig: 'deadbeef' })).status, 401);
+    assert.equal(code(await batch(s.bypass, { items }, { noIdem: true })), 'idempotency_key_required');
+  } finally { await s.done(); }
 });
