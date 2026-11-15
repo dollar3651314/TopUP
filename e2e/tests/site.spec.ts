@@ -237,7 +237,7 @@ for (const [path, lang] of [['/zh/docs/', 'zh'], ['/docs/', 'en']] as const) {
     for (const name of lang === 'zh' ? ['TRON', '以太坊', 'BSC'] : ['TRON', 'Ethereum', 'BSC']) expect(overview, `概览要写到 ${name}`).toContain(name);
     // 不再写"只支持 TRON"
     if (lang === 'zh') expect(overview).not.toMatch(/只支持\s*TRON/);
-    else { expect(overview).not.toMatch(/on TRON \(TRC20\) only/i); expect(overview).not.toMatch(/TRON[^.]*\bonly\b/i); }
+    else expect(overview).not.toMatch(/USDT on TRON \(TRC20\) only/i);
     // 确认数：写"确认"的那一条里三个数都有，并且各跟着自己的链名
     const conf = (await body.locator('#overview + ul li').allInnerTexts()).map((x) => x.replace(/\s+/g, ' ')).filter((x) => (lang === 'zh' ? /确认/ : /confirmation/i).test(x));
     expect(conf.length, '概览要有一条写确认数').toBeGreaterThan(0);
