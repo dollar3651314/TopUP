@@ -6,7 +6,7 @@
 //    每条链另算账本应收 = 这条链上的全部到账（含低于 1 USDT 的）− 这条链已完成的打款（账本 withdraw 记录按打款单的链归），
 //    和这条链的链上合计比，差额按链列出；查完的链对不上就发邮件（别的链没查完不影响），合计只在三条链都查完时比。
 //    TRON 什么都没配（没有第 0 批老地址、没有顶层热钱包和冷钱包、没开通合约钱包）时不列这条链。
-//    同一条链连续 incompleteDays 天（默认 2，RECON_INCOMPLETE_DAYS）没查完，另发提醒。
+//    同一条链连续 incompleteDays 天（默认 2，最小 1，RECON_INCOMPLETE_DAYS）没查完，另发提醒。
 // ② 资产检查：TRON 客户地址（老地址和合约地址）上出现 USDT 以外的代币，记为"异常到账"。
 //    以太坊、BSC 的节点接口列不出一个地址上有哪些代币，这一版不查（见项目地图"已知限制"）。
 // ③ 提醒：服务器磁盘用量达到 70%、链上监控超过 5 分钟没有运行，发邮件。
@@ -154,7 +154,9 @@ export async function runDaily({ db, tron, wallets, layer = null, notify, now = 
     msgs.push(`对账不一致（对不上的链在下面标出）：${head}如果你从热钱包或冷钱包转出过利润，差额会是负数，属于正常；在链之间调过钱（例如从 TRON 冷钱包换到以太坊热钱包）时，两条链的差额一正一负。\n各链：\n${lines.join('\n')}`);
   }
   // 同一条链连续 N 天没查完（含今天）：对账一直没做成，提醒看节点
-  const n = Math.max(1, Math.floor(Number(incompleteDays)) || 2);
+  // N 最小 1；填 0、负数、不是数字（含没填）一律按默认 2 天
+  const parsedDays = Math.floor(Number(incompleteDays));
+  const n = Number.isFinite(parsedDays) && parsedDays >= 1 ? parsedDays : 2;
   const stuck = Object.entries(byChain).filter(([, r]) => !r.complete);
   if (stuck.length) {
     // 往前数连续没查完的天数（日期要一天接一天，中间缺一天就断开），最多看 60 天
