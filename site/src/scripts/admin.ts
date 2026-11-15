@@ -80,10 +80,10 @@ const d = (days: number) => new Date(now + days * 864e5).toISOString();
 // ?empty=1 时显示空状态（没有任何申请），用来确认空状态的样子
 const PROTO_EMPTY = new URLSearchParams(location.search).get('empty') === '1';
 const protoApps: any[] = PROTO_EMPTY ? [] : [
-  { id: 'a5', ref: 'TU-2026-0004', company: 'Delta Payments FZE', status: 'submitted', updatedAt: d(0), createdAt: d(-4), submittedAt: d(0), expiresAt: d(26), retentionUntil: d(361), fileCount: 1, flags: { sanctions: true } },
-  { id: 'a1', ref: 'TU-2026-0003', company: 'Acme Export Ltd', status: 'submitted', updatedAt: d(0), createdAt: d(-6), submittedAt: d(0), expiresAt: d(24), retentionUntil: d(359), fileCount: 5 },
-  { id: 'a2', ref: 'TU-2026-0002', company: 'Northwind Manufacturing Co.', status: 'in_progress', updatedAt: d(-1), createdAt: d(-3), submittedAt: null, expiresAt: d(27), retentionUntil: d(362), fileCount: 2 },
-  { id: 'a3', ref: 'TU-2026-0001', company: 'Blue Harbor Trading', status: 'needs_info', updatedAt: d(-2), createdAt: d(-12), submittedAt: d(-5), expiresAt: d(28), retentionUntil: d(353), fileCount: 5 },
+  { id: 'a5', ref: 'TU-2026-0004', company: 'Delta Payments FZE', status: 'submitted', updatedAt: d(0), createdAt: d(-4), submittedAt: d(0), expiresAt: d(26), retentionUntil: null, fileCount: 1, flags: { sanctions: true } },
+  { id: 'a1', ref: 'TU-2026-0003', company: 'Acme Export Ltd', status: 'submitted', updatedAt: d(0), createdAt: d(-6), submittedAt: d(0), expiresAt: d(24), retentionUntil: null, fileCount: 5 },
+  { id: 'a2', ref: 'TU-2026-0002', company: 'Northwind Manufacturing Co.', status: 'in_progress', updatedAt: d(-1), createdAt: d(-3), submittedAt: null, expiresAt: d(27), retentionUntil: null, fileCount: 2 },
+  { id: 'a3', ref: 'TU-2026-0001', company: 'Blue Harbor Trading', status: 'needs_info', updatedAt: d(-2), createdAt: d(-12), submittedAt: d(-5), expiresAt: d(28), retentionUntil: null, fileCount: 5 },
   { id: 'a6', ref: 'TU-2026-0000', company: 'Harbor Legacy Ltd（旧版提交）', status: 'approved', updatedAt: d(-20), createdAt: d(-40), submittedAt: d(-30), expiresAt: d(-10), retentionUntil: null, fileCount: 9 },
 ];
 // 格式的人员：授权联系人是一个角色，证件信息不限护照
@@ -148,7 +148,7 @@ const A = PROTO
       logout: async () => ({ ok: true }),
       apps: async () => ({ apps: protoApps }),
       app: async (id: string) => protoDetail(protoApps.find((x) => x.id === id)),
-      invite: async (b: any) => { protoApps.unshift({ id: 'n' + Date.now(), ref: 'TU-2026-000' + protoApps.length, company: b.company, status: 'invited', updatedAt: d(0), createdAt: d(0), expiresAt: d(30), retentionUntil: d(365), fileCount: 0 }); return { ok: true, emailed: true }; },
+      invite: async (b: any) => { protoApps.unshift({ id: 'n' + Date.now(), ref: 'TU-2026-000' + protoApps.length, company: b.company, status: 'invited', updatedAt: d(0), createdAt: d(0), expiresAt: d(30), retentionUntil: null, fileCount: 0 }); return { ok: true, emailed: true }; },
       resend: async () => ({ ok: true, emailed: true }),
       decide: async (b: any) => { const a = protoApps.find((x) => x.id === b.id); a.status = b.action === 'approve' ? 'approved' : b.action === 'reject' ? 'rejected' : 'needs_info'; return { ok: true, emailed: true }; },
       notes: async () => ({ ok: true }),
@@ -277,7 +277,7 @@ async function renderList() {
     const tr = el('tr');
     tr.append(el('td', '', a.ref), el('td', '', a.company));
     const st = el('td', 'status-cell'); st.appendChild(statusBadge(a.status)); if (a.flags?.sanctions) st.appendChild(sanctionsFlag()); tr.appendChild(st);
-    tr.append(el('td', '', day(a.updatedAt)), el('td', '', a.retentionUntil ? day(a.retentionUntil) : '业务关系存续期间'));
+    tr.append(el('td', '', day(a.updatedAt)), el('td', '', '永久保留'));
     tr.tabIndex = 0;
     tr.dataset.ref = a.ref;
     tr.addEventListener('click', () => openDetail(a.id));
@@ -379,7 +379,7 @@ function renderSide(r: any) {
   const info: Record<string, string> = {
     编号: a.ref, 客户邮箱: a.email, 发送链接: day(a.invitedAt), 链接有效期至: day(a.expiresAt), 提交时间: dt(a.submittedAt),
     收件日期: day(r.review?.received), 审核人: r.review?.reviewer || '—', 审核日期: day(r.review?.reviewDate),
-    保留截止: a.retentionUntil ? day(a.retentionUntil) : '业务关系存续期间（结束后保留 5 年）',
+    保留期: '永久保留（含开户资料；业务关系存续期间和结束后都不删除）',
   };
   for (const [k, v] of Object.entries(info)) dl.append(el('dt', '', k), el('dd', '', v));
   side.appendChild(dl);
@@ -390,7 +390,7 @@ function renderSide(r: any) {
   side.appendChild(notes);
   if (a.status === 'approved') {
     const rel = el('div', 'f');
-    rel.innerHTML = '<label for="rv-rel">业务关系结束日期（填写后开始计算 5 年保留期）</label><input id="rv-rel" type="date" />';
+    rel.innerHTML = '<label for="rv-rel">业务关系结束日期（只做记录，资料照常保留）</label><input id="rv-rel" type="date" />';
     const inp = $<HTMLInputElement>('input', rel); inp.value = a.relationshipEndedAt ? day(a.relationshipEndedAt) : '';
     inp.addEventListener('change', async () => { await A.notes({ id: a.id, relationshipEndedAt: inp.value || null }); toast('已保存'); openDetail(a.id); });
     side.appendChild(rel);

@@ -121,7 +121,6 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
     }
     if (path === '/__fake/tick/') return Response.json(await d.tick());
     if (path === '/__fake/daily/') return Response.json(await d.daily());
-    if (path === '/__fake/cleanup/') return Response.json({ ok: true, ...(await (await app()).kyb.cleanup()) });
     if (path === '/__fake/sql/' && process.env.FAKE_SQL === '1') return Response.json(await d.db.query(body.sql, body.params || []));
     return null;
   }

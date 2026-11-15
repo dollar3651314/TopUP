@@ -9,29 +9,20 @@ import { encryptJson, decryptJson, newToken, hashToken } from './crypto.js';
 
 export const LINK_TTL_DAYS = 30;
 const DAY = 864e5;
-export const RETENTION_UNAPPROVED_DAYS = 365;
-export const RETENTION_AFTER_RELATIONSHIP_YEARS = 5;
 const EDITABLE = new Set(['invited', 'in_progress', 'needs_info']);
 
 export function createRepo({ redis, keys, now = () => Date.now() }) {
   const K = { app: (id) => `topup:app:${id}`, tok: (h) => `topup:tok:${h}`, audit: (id) => `topup:audit:${id}` };
   const iso = (t = now()) => new Date(t).toISOString();
 
-  function retentionUntil(app) {
-    if (app.status === 'approved') {
-      if (!app.relationshipEndedAt) return null; // 业务关系存续期间一直保留
-      const d = new Date(app.relationshipEndedAt); d.setFullYear(d.getFullYear() + RETENTION_AFTER_RELATIONSHIP_YEARS);
-      return d.toISOString();
-    }
-    return new Date(Date.parse(app.createdAt) + RETENTION_UNAPPROVED_DAYS * DAY).toISOString();
-  }
   function effectiveStatus(app) {
     if ((app.status === 'invited' || app.status === 'in_progress') && Date.parse(app.expiresAt) <= now()) return 'expired';
     return app.status;
   }
   async function write(app) {
     app.updatedAt = iso();
-    app.retentionUntil = retentionUntil(app);
+    // 客户资料（含开户资料）永久保留，不自动删除（2026-11-13 定）；保留截止一律为空，旧记录里算过的日期写回时清掉
+    app.retentionUntil = null;
     await redis.set(K.app(app.id), JSON.stringify(app));
     return app;
   }
