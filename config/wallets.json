@@ -41,11 +41,11 @@
     "usdt": "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf",
     "evm": {
       "eth": {
-        "usdt": "",
-        "factory": "",
-        "implementation": "",
-        "parent": "",
-        "batcher": "",
+        "usdt": "0x7cED3d4efa3e4cfb8d8812716E9f08554a29500e",
+        "factory": "0xB8D16f3111b10d0e67b3f3894f0d9E4531b71619",
+        "implementation": "0x97F08a01d59abA5ED4B7d6C05Ae44eEEF7c6a98D",
+        "parent": "0x1220AFA2cAF72D81D84aBc3eCb66228c83b9A67a",
+        "batcher": "0x33c83C41c7C3868b30fA842Df17f93Dc736ED135",
         "ver": 1,
         "hot": "",
         "payout": ""
@@ -62,11 +62,11 @@
       }
     },
     "tron": {
-      "usdt": "",
-      "factory": "",
-      "implementation": "",
-      "parent": "",
-      "batcher": "",
+      "usdt": "TRRciutGz3Ht2jCvKAqV3a7Qb1TUvdLdAr",
+      "factory": "TWSN1zXHrFrFcKLzSf4FHo4v7XcqJEARzf",
+      "implementation": "TP2anufBfnE3dLBAzYVL1UnJFdrmc782Dz",
+      "parent": "TBd4KacsT3P98a9dAVoGzXtBTS9hbkcGvE",
+      "batcher": "TQkJquG9hMFZddJTAgtoTPn2iR3S8M66uZ",
       "ver": 1
     }
   },
