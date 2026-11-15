@@ -4,7 +4,9 @@
 //    + 热钱包（顶层 hot = TRON；evm.<链>.hot）+ 冷钱包（顶层 cold = TRON 第 0 批；合约钱包的 parent），
 //    三条链合计应该等于 商户余额之和 + 平台收取的手续费 + 低于 1 USDT 没有入账的钱。
 //    每条链另算账本应收 = 这条链上的全部到账（含低于 1 USDT 的）− 这条链已完成的打款（账本 withdraw 记录按打款单的链归），
-//    和这条链的链上合计比，差额按链列出；任何一条链（或合计）对不上就发邮件。
+//    和这条链的链上合计比，差额按链列出；查完的链对不上就发邮件（别的链没查完不影响），合计只在三条链都查完时比。
+//    TRON 什么都没配（没有第 0 批老地址、没有顶层热钱包和冷钱包、没开通合约钱包）时不列这条链。
+//    同一条链连续 incompleteDays 天（默认 2，最小 1，RECON_INCOMPLETE_DAYS）没查完，另发提醒。
 // ② 资产检查：TRON 客户地址（老地址和合约地址）上出现 USDT 以外的代币，记为"异常到账"。
 //    以太坊、BSC 的节点接口列不出一个地址上有哪些代币，这一版不查（见项目地图"已知限制"）。
 // ③ 提醒：服务器磁盘用量达到 70%、链上监控超过 5 分钟没有运行，发邮件。
@@ -14,6 +16,7 @@ import { diskUsage, DISK_ALERT } from './disk.js';
 import { toUnits } from '../wallet/units.js';
 
 const CHAIN_NAMES = { tron: 'TRON', eth: '以太坊', bsc: 'BSC' };
+const incompleteText = (r) => r.wallet_errors ? `热钱包或冷钱包有 ${r.wallet_errors} 个没查到` : `只查了 ${r.checked}/${r.address_count} 个地址`;
 const EVM_CHAINS = ['eth', 'bsc'];
 
 /** 合约钱包的充值地址（含停用的旧地址）：按账本估算的未归集金额从多到少，最多 limit 个 */
@@ -24,7 +27,7 @@ async function contractAddresses(db, chain, limit) {
     from customer_addresses ca where ca.chain = $1 and ca.provider = 'contract' order by v desc, ca.id desc limit $2`, [chain, limit]);
 }
 
-export async function runDaily({ db, tron, wallets, layer = null, notify, now = new Date(), maxAddresses = 1000, diskPath = null }) {
+export async function runDaily({ db, tron, wallets, layer = null, notify, now = new Date(), maxAddresses = 1000, diskPath = null, incompleteDays = 2 }) {
   const out = {};
   const enabled = new Set(layer?.enabledChains || []);
   const byChain = {};
@@ -85,7 +88,8 @@ export async function runDaily({ db, tron, wallets, layer = null, notify, now = 
     if (wallets?.cold) colds.push(legacyWal(wallets.cold));
     if (parent && parent !== wallets?.cold) colds.push(async () => toUnits(await tAd.tokenBalanceRaw(parent, tUsdt), 6));
     row.cold = await walletSum(row, colds);
-    byChain.tron = row;
+    // 什么都没配（生产现在就是这样）：不列这条链，免得明细表里多一行全是 0 的 TRON
+    if (tAd || legacy.length || wallets?.hot || wallets?.cold) byChain.tron = row;
   }
 
   // ---------- 以太坊、BSC（钱包层开通了才查） ----------
@@ -138,10 +142,31 @@ export async function runDaily({ db, tron, wallets, layer = null, notify, now = 
   const mismatch = await db.query(`select m.name from merchants m where coalesce((select sum(amount) from ledger l where l.merchant_id = m.id and l.type = 'deposit'), 0)
     <> coalesce((select sum(total) from customers c where c.merchant_id = m.id), 0)`);
   const msgs = [];
-  const badChains = Object.entries(byChain).filter(([, r]) => r.diff !== 0);
-  if ((diff !== 0 || badChains.length) && complete) {
-    const lines = Object.entries(byChain).map(([k, r]) => `${r.diff !== 0 ? '【对不上】' : ''}${CHAIN_NAMES[k]}：账本应收 ${fmtUsdt(r.receivable)}，链上 ${fmtUsdt(r.total)}（未归集地址 ${fmtUsdt(r.addresses)} + 热钱包 ${fmtUsdt(r.hot)} + 冷钱包 ${fmtUsdt(r.cold)}），差额 ${fmtUsdt(r.diff)}`);
-    msgs.push(`对账不一致（对不上的链在下面标出）：合计链上 ${fmtUsdt(chain)} USDT，应为 ${fmtUsdt(s.balances + fees)} USDT（商户余额 ${fmtUsdt(s.balances)} + 手续费和未入账 ${fmtUsdt(fees)}），差额 ${fmtUsdt(diff)}。如果你从热钱包或冷钱包转出过利润，差额会是负数，属于正常；在链之间调过钱（例如从 TRON 冷钱包换到以太坊热钱包）时，两条链的差额一正一负。\n各链：\n${lines.join('\n')}`);
+  // 查完的链对不上照常告警（别的链没查完不影响）；合计只在每条链都查完时比
+  const badChains = Object.entries(byChain).filter(([, r]) => r.complete && r.diff !== 0);
+  if ((diff !== 0 && complete) || badChains.length) {
+    const lines = Object.entries(byChain).map(([k, r]) => !r.complete
+      ? `【没查完】${CHAIN_NAMES[k]}：${incompleteText(r)}，这次不比`
+      : `${r.diff !== 0 ? '【对不上】' : ''}${CHAIN_NAMES[k]}：账本应收 ${fmtUsdt(r.receivable)}，链上 ${fmtUsdt(r.total)}（未归集地址 ${fmtUsdt(r.addresses)} + 热钱包 ${fmtUsdt(r.hot)} + 冷钱包 ${fmtUsdt(r.cold)}），差额 ${fmtUsdt(r.diff)}`);
+    const head = complete
+      ? `合计链上 ${fmtUsdt(chain)} USDT，应为 ${fmtUsdt(s.balances + fees)} USDT（商户余额 ${fmtUsdt(s.balances)} + 手续费和未入账 ${fmtUsdt(fees)}），差额 ${fmtUsdt(diff)}。`
+      : '有链没查完，三条链合计这次不比，只比查完的链。';
+    msgs.push(`对账不一致（对不上的链在下面标出）：${head}如果你从热钱包或冷钱包转出过利润，差额会是负数，属于正常；在链之间调过钱（例如从 TRON 冷钱包换到以太坊热钱包）时，两条链的差额一正一负。\n各链：\n${lines.join('\n')}`);
+  }
+  // 同一条链连续 N 天没查完（含今天）：对账一直没做成，提醒看节点
+  // N 最小 1；填 0、负数、不是数字（含没填）一律按默认 2 天
+  const parsedDays = Math.floor(Number(incompleteDays));
+  const n = Number.isFinite(parsedDays) && parsedDays >= 1 ? parsedDays : 2;
+  const stuck = Object.entries(byChain).filter(([, r]) => !r.complete);
+  if (stuck.length) {
+    // 往前数连续没查完的天数（日期要一天接一天，中间缺一天就断开），最多看 60 天
+    const prev = await db.query(`select day::text d, detail from recon where day < $1::date order by day desc limit 60`, [day]);
+    const dayBefore = (d, i) => new Date(Date.parse(`${d}T00:00:00Z`) - i * 86_400_000).toISOString().slice(0, 10);
+    for (const [k, r] of stuck) {
+      let days = 1;
+      while (days <= prev.length && prev[days - 1].d === dayBefore(day, days) && prev[days - 1].detail?.by_chain?.[k]?.complete === false) days++;
+      if (days >= n) msgs.push(`${CHAIN_NAMES[k]} 的对账已经连续 ${days} 天没查完（今天${incompleteText(r)}），这条链的对账一直没做成。请看系统状态里这条链的节点是否正常；节点恢复后，下一次对账（每天自动一次，也可以在运营后台点"立即对账"）会查全。`);
+    }
   }
   if (mismatch.length) msgs.push(`客户收款合计和商户收款合计不一致：${mismatch.map((x) => x.name).join('、')}`);
   if (found) msgs.push(`发现 ${found} 笔 USDT 以外的代币转入 TRON 客户地址，已记到"异常到账"。`);
