@@ -1,0 +1,74 @@
+# 测试环境（staging）真实验收用例：用测试管理员（server/pay/test-admin.js）对测试环境跑 e2e/staging-e2e/ 里的用例。
+#   - 只手动运行：Actions 页面选 staging-e2e → Run workflow（分支选 staging），或 gh workflow run staging-e2e.yml --ref staging
+#   - 用 GitHub 环境 staging-e2e：管理员在仓库设置里把它限定为只允许 staging 分支（别的分支拿不到它的密钥）
+#   - 令牌是这个环境的密钥 STAGING_TEST_ADMIN_TOKEN（管理员在服务器上 sudo topup gen-test-admin 生成后自己填；谁都看不到原文，日志里自动遮盖）
+#   - 可选：测试商户的开放 API Key（STAGING_E2E_MERCHANT_KEY、STAGING_E2E_MERCHANT_SECRET，同一个环境的密钥），用例用它造打款单；没填时这类用例跳过
+#   - 用例只到"待签名"为止：签名一律由管理员在浏览器里做，测试管理员不能签名、不能改钱包设置
+#   - 报告（junit）上传前检查：里面出现令牌或测试环境的域名就不上传、本次运行失败
+name: staging-e2e
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: 只跑这些用例文件（空格分隔，例如 e2e/staging-e2e/basics.test.mjs；空着跑全部）
+        required: false
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: staging-e2e
+  cancel-in-progress: false
+jobs:
+  e2e:
+    # 代码只用 staging 分支上的（合并过、CI 通过的）；环境本身也限定了 staging 分支，两道
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: staging-e2e
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
+        with:
+          node-version: 26
+      # 用例只用 Node 自带的 fetch 和 node:test，不装依赖；用例文件名在 run.mjs 里核对（只认 e2e/staging-e2e/*.test.mjs）
+      - name: 跑测试环境验收用例
+        env:
+          STAGING_URL: ${{ secrets.STAGING_URL }}
+          STAGING_TEST_ADMIN_TOKEN: ${{ secrets.STAGING_TEST_ADMIN_TOKEN }}
+          STAGING_E2E_MERCHANT_KEY: ${{ secrets.STAGING_E2E_MERCHANT_KEY }}
+          STAGING_E2E_MERCHANT_SECRET: ${{ secrets.STAGING_E2E_MERCHANT_SECRET }}
+          FILES: ${{ inputs.files }}
+        run: |
+          if [ -z "$STAGING_URL" ] || [ -z "$STAGING_TEST_ADMIN_TOKEN" ]; then
+            echo "::error::GitHub 环境 staging-e2e 的密钥 STAGING_TEST_ADMIN_TOKEN（或仓库密钥 STAGING_URL）还没有配置"; exit 1
+          fi
+          # FILES 只按空白拆开当文件名传给 run.mjs，不经过 shell 展开
+          read -r -a files <<< "$FILES"
+          node e2e/staging-e2e/run.mjs "${files[@]}"
+      - name: 报告里不能有令牌、商户密钥和测试环境的域名
+        if: always()
+        env:
+          STAGING_URL: ${{ secrets.STAGING_URL }}
+          STAGING_TEST_ADMIN_TOKEN: ${{ secrets.STAGING_TEST_ADMIN_TOKEN }}
+          STAGING_E2E_MERCHANT_SECRET: ${{ secrets.STAGING_E2E_MERCHANT_SECRET }}
+        run: |
+          out=e2e/staging-e2e/.out
+          [ -d "$out" ] || exit 0
+          host=$(node -e 'try { console.log(new URL(process.env.STAGING_URL).hostname) } catch { console.log("") }')
+          bad=0
+          for v in "$STAGING_TEST_ADMIN_TOKEN" "$STAGING_E2E_MERCHANT_SECRET"; do
+            if [ -n "$v" ] && grep -rqF -- "$v" "$out"; then bad=1; fi
+          done
+          if [ -n "$host" ] && grep -rqiF -- "$host" "$out"; then bad=1; fi
+          if [ "$bad" = 1 ]; then rm -rf "$out"; echo "::error::报告里出现了令牌、商户密钥或测试环境的域名，已删掉报告、不上传"; exit 1; fi
+          echo "报告检查通过"
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5（v5.0.0）
+        with:
+          name: staging-e2e-report
+          path: e2e/staging-e2e/.out/
+          if-no-files-found: ignore
+          retention-days: 14

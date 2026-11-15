@@ -6,6 +6,7 @@ site/dist/
 site/.astro/
 e2e/.tmp/
 e2e/test-results/
+e2e/staging-e2e/.out/
 contracts/out/
 contracts/cache/
 contracts/out-tron/
