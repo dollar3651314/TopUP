@@ -425,16 +425,21 @@ const CONTRACT_NAME: Record<string, string> = { factory: '转发合约工厂（F
 export async function walletStatus(ui: WalletUi): Promise<HTMLElement> {
   let r: any;
   try { r = await ui.call('wallet-chains', undefined, '&verify=1'); } catch (e) { return h('div', { class: 'alert', 'data-load-error': '' }, `每条链的状态读取失败：${err(ui, e)} `, h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => ui.rerender() }, '重试')); }
-  const evm = r.chains.filter((c: any) => c.status !== 'not_in_this_batch');
+  // 未开通（not_in_this_batch：TRON 没开通；not_enabled：config/wallets.json 里这条链的合约地址一个都没填）：灰着，不算问题
+  const isOff = (c: any) => c.status === 'not_in_this_batch' || c.status === 'not_enabled';
+  const evm = r.chains.filter((c: any) => !isOff(c));
   const bad = evm.filter((c: any) => !c.ok);
+  const offNames = r.chains.filter((c: any) => c.status === 'not_enabled').map((c: any) => CHAIN_NAME[c.chain]);
   const words = (c: any) => c.status === 'not_configured' ? `少 ${missing(c)} 项配置` : c.status === 'onchain_mismatch' ? '合约参数和链上不一致（已停用）' : c.status === 'scan_stalled' ? '扫块停了' : c.status === 'catching_up' ? '补扫追赶中' : '正常';
   const top = bad.length
     ? hero('bad', bad.map((c: any) => `${CHAIN_NAME[c.chain]}${words(c)}`).join('，'), '扫块停了到账会晚到（恢复后从停下的区块接着扫，不会漏账）；少配置、合约参数和链上不一致的链不能分配地址、不能归集。')
-    : hero('ok', '每条链都正常', '扫块、合约地址配置、链上合约参数核对都正常。');
+    : hero('ok', offNames.length ? '开通的链都正常' : '每条链都正常', `扫块、合约地址配置、链上合约参数核对都正常。${offNames.length ? `${offNames.join('、')}未开通。` : ''}`);
   const ck = (ok: boolean, text: string) => h('li', { class: ok ? 'y' : 'bad' }, `${text}：${ok ? '已配置' : '没配置'}`);
   const ONCHAIN: Record<string, [string, string]> = { ok: ['y', '一致'], mismatch: ['bad', '不一致（这条链已停用，需重新部署后重启；已发邮件）'], unverified: ['bad', '还没核对上（节点连不上，下一轮再核对）'] };
   const cards = r.chains.map((c: any) => c.status === 'not_in_this_batch'
     ? h('article', { class: 'card stack-sm chain-card later', 'data-chain-card': c.chain }, h('div', { class: 'batch-head' }, chainTag(c.chain), laterTag()), h('p', { class: 'muted m0' }, 'TRON 合约钱包没开通（config/wallets.json 的 tron 参数没填全，或链上核对没通过），不分配新的 TRON 地址；已有的老 TRON 地址照常入账。'))
+    : c.status === 'not_enabled'
+    ? h('article', { class: 'card stack-sm chain-card later', 'data-chain-card': c.chain }, h('div', { class: 'batch-head' }, chainTag(c.chain), laterTag()), h('p', { class: 'muted m0' }, `${CHAIN_NAME[c.chain]} 没开通（config/wallets.json 里这条链的合约地址都空着）：不分配地址、不扫块、不归集，不算出错。要开通时把合约地址全部填上（走 PR），只填一部分会显示"少几项配置"。`))
     : h('article', { class: `card stack-sm chain-card${c.ok ? '' : ' chain-bad'}`, 'data-chain-card': c.chain },
       h('div', { class: 'batch-head' }, chainTag(c.chain), c.ok ? status(c.status === 'catching_up' ? 'in' : 'approved', words(c)) : badStatus(words(c))),
       h('h3', { class: 'h-sm m0' }, '扫块'),
@@ -532,7 +537,7 @@ export async function walletBadges(ui: WalletUi): Promise<{ sweep: string | null
   const r = await walletTodoItems(ui);
   const sweepBad = r.items.some((x) => x.bad && x.tab === 'p-sweep');
   const waiting = r.items.filter((x) => !x.bad && x.tab === 'p-sweep').length;
-  const statusBad = (r.chains?.chains || []).some((c: any) => c.status !== 'not_in_this_batch' && !c.ok);
+  const statusBad = (r.chains?.chains || []).some((c: any) => c.status !== 'not_in_this_batch' && c.status !== 'not_enabled' && !c.ok);
   return {
     sweep: r.failed.includes('归集') ? null : sweepBad ? '!' : waiting ? String(waiting) : '',
     status: r.chains ? (statusBad ? '!' : '') : null,
