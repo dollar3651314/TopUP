@@ -44,6 +44,8 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 | `sudo topup set 变量名 值` | 填普通设置（收件人、确认数等） |
 | `sudo topup gen-operator` | 只用于测试环境：在服务器上随机生成两个归集发起账户（ETH/BSC 一把、TRON 一把，已有的不重新生成），私钥只写进 `.env`，屏幕上只显示地址（拿去领测试币、登记进合约） |
 | `sudo topup admin-token` | 在终端上显示一次运营后台的初始化口令（不进日志）；初始化完成后后台拒绝再次初始化，口令就没用了 |
+| `sudo topup gen-test-admin` | 只用于测试环境：生成测试管理员的令牌（给 GitHub 上的自动验收用例 `staging-e2e` 用，第 9 节）。服务器的 `.env` 只写它的 SHA-256（`TEST_ADMIN_TOKEN_SHA256`），令牌原文只在终端上显示一次、不进日志；再运行一次就换新令牌，旧的立刻作废 |
+| `sudo topup test-admin-off` | 关掉测试管理员：删掉 `TEST_ADMIN_TOKEN_SHA256`，令牌立刻作废 |
 | `sudo topup test-mail` | 发一封测试邮件到 `MAIL_TO` |
 | `sudo topup backup` | 立刻备份一次（本机加密保存，默认不传到别处） |
 | `sudo topup restore-drill` | 恢复演练：本机最近一份备份解密后恢复进临时容器，核对表、行数、Redis、开户文件、主密钥；不碰正在运行的数据，解密出的临时文件用完删除 |
@@ -84,7 +86,7 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 ## 6. 检查和告警
 - 自动更新只看"应用活着"：提交号对得上、数据库、Redis、主密钥、web 的收付款初始化成功（健康检查里有 `wallet` 一项）、换版本之后新的 worker 跑过一轮（扫链时间晚于开始等待的时间，旧 worker 留下的不算）。邮件、节点 Key 没填不算失败（换回旧版本也解决不了）。
 - web 和 worker 同时启动时都会建表：建表在数据库锁里做（`server/pay/schema.js` 的 `migrate`），不会互相撞。
-- `topup-watch` 每 5 分钟：web 没响应、健康检查 `ok=false`（列出哪几项）、worker 停了、磁盘 ≥ 85%、可用内存 < 100 MB、超过 26 小时没备份、上一次备份没加密、上传 R2 失败（只在打开异地时）、有版本更新失败被跳过、证书 14 天内过期。**状态变化时**用应用自己的发信设置发一封邮件给 `MAIL_TO`（问题不变不重复发，恢复时再发一封）。
+- `topup-watch` 每 5 分钟：web 没响应、健康检查 `ok=false`（列出哪几项）、worker 停了、磁盘 ≥ 85%、可用内存 < 100 MB、超过 26 小时没备份、上一次备份没加密、上传 R2 失败（只在打开异地时）、有版本更新失败被跳过、证书 14 天内过期、不是测试环境的服务器 `.env` 里有 `TEST_ADMIN_TOKEN_SHA256`。**状态变化时**用应用自己的发信设置发一封邮件给 `MAIL_TO`（问题不变不重复发，恢复时再发一封）。
 - 服务器整台宕机时它发不出邮件：要从外部定时探测，另外开（默认不开）。
 
 ## 7. 真实 IP
@@ -96,3 +98,35 @@ docker build --build-arg APP_ENV=staging -t topup-drill-base .
 sudo bash e2e/deploy-drill.sh topup-drill-base
 ```
 在临时目录里跑 11 个场景（外加发起账户生成、初始化口令）：第一次部署（另一个项目占着 80、443）、重复运行、经 Nginx 访问和真实 IP、填密钥（名字和值写错）、自动更新成功、新版本起不来自动换回、手动回滚和重试、备份和恢复演练、每 5 分钟检查、内存不够和 stop / start、新版本"没活"（web 初始化失败；新 worker 不扫链而旧 worker 的扫链时间还新鲜）也要换回。演练模式不装软件、不碰 systemd、证书自签名，所以这三样要在第一次真实部署时逐步确认。
+
+## 9. 测试管理员（只在测试环境）
+给测试经理在测试环境上跑大量运营后台操作（打款审核、驳回、改上限、凑批到"待签名"、归集确认、对账），不用管理员每次输动态码。代码在 `server/pay/test-admin.js`，用例在 `e2e/staging-e2e/`，流程是 `.github/workflows/staging-e2e.yml`。
+
+```mermaid
+flowchart LR
+  S["服务器：sudo topup gen-test-admin<br/>随机生成令牌"] -->|".env 只存 SHA-256"| APP["测试环境的 web<br/>只认 /api/wallet/ 白名单动作"]
+  S -->|"令牌只在终端上显示一次"| A["管理员"]
+  A -->|"自己填"| GH["GitHub 环境 staging-e2e<br/>只允许 staging 分支 + Required reviewers<br/>密钥 STAGING_TEST_ADMIN_TOKEN"]
+  T["测试经理：写用例、合并到 staging、<br/>手动运行 staging-e2e"] --> WF["staging-e2e 流程"]
+  A -->|"每次运行点批准"| WF
+  GH --> WF -->|"请求头带令牌"| APP
+```
+
+- 安全边界在哪里：只有 GitHub 环境 `staging-e2e` 自己的设置算数——Deployment branches 只允许 `staging`，Required reviewers 打开（管理员批准这一次运行，密钥才交给它）。流程文件里 job 上的 `if: staging` 只是防手误：有写权限的人可以在别的分支把它删掉再手动运行，挡住他的是环境的分支限制和审批。仓库是公开的、智能体也能把改动合并进 `staging`，所以 Required reviewers 默认要开。
+- 谁持有什么：令牌原文在管理员手里（生成时看一眼、填进 GitHub）和 GitHub 环境密钥里；服务器只有哈希；仓库里没有；运行日志里 GitHub 会遮盖原文。**但运行中的用例代码能读到令牌**：`run.mjs` 只给用例进程它要的几个环境变量，`lib.mjs` 读进令牌后马上从环境里删掉、用例只拿到请求函数，这只能防无意泄露，挡不住合并进 `staging` 的故意作恶的用例代码。真正的保护是 Required reviewers（每次运行前看一眼这次的提交）加上定期换令牌（`sudo topup gen-test-admin`）。
+- 日志公开：仓库是公开的，运行日志谁都能看。用例只输出通过 / 失败、HTTP 状态和错误码（`lib.mjs` 的 `ok()`、`expectError()`），不输出接口返回的内容，也不上传报告；写新用例时断言要带说明文字，不要打印接口返回。
+- 生产没有：应用只在 `APP_ENV=staging` 且 `TRON_NETWORK=nile` 时认它；配了以太坊 / BSC 节点的，还要核对节点的链 ID 不是主网（1、56），查不到时这次不认；生产的 `.env` 里有这个变量时 web、worker 拒绝启动（自动更新会换回旧版本），`topup-watch` 也会发邮件；`gen-test-admin` 在不是测试环境的服务器上直接拒绝。
+- 能做：读运营后台的数据；打款审核、驳回、解除挂起、凑批到"待签名"、作废没签名的批次、改打款上限（免动态码）；归集凑批、确认、作废；对账、异常到账标记。改东西的动作只收 POST。
+- 不能做（服务器返回 403）：签名、交签名、改授权额度、确认作废（已广播的批次）、改归集门槛、切换钱包提供方、开通商户、重发邀请、改商户、开户审核后台（`/api/kyb/`）的任何接口；以后新加的动作默认不给。
+- 开户和商户资料：商户列表（`merchants`，里面有联系人邮箱和待开通的开户申请）、客户列表和详情（`customers`、`customer`，里面有客户姓名）不给（403）。其余返回里带商户名、名称、邮箱、公司名的（打款审核、提币列表、归集地址、异常到账、概览的商户排行等）统一打码成"首字 + ***"（`maskForTestAdmin`，链名除外）；商户编号、客户编号、地址、金额照常给。
+- 审计：业务动作的操作人记成 `test-admin`；每个 POST 另记一条 `test_admin.request`（动作名、成功或错误码）。
+- 造打款单（可选）：用例要新建打款单时，用测试环境里一个测试商户的开放 API Key（同一个 GitHub 环境的密钥 `STAGING_E2E_MERCHANT_KEY`、`STAGING_E2E_MERCHANT_SECRET`，管理员在测试环境的商户后台生成后自己填）；没填时这类用例跳过。
+- 演练（`e2e/deploy-drill.sh`）里有测试管理员的生成和关闭两项检查。
+- 换令牌：再运行一次 `sudo topup gen-test-admin`，把新令牌填进 GitHub（旧令牌立刻作废）。怀疑泄露时先 `sudo topup test-admin-off`。
+
+### 管理员的设置顺序（先关卡、后密钥）
+1. GitHub 仓库 → Settings → Environments → New environment，名字 `staging-e2e`。
+2. **先**设 Deployment branches and tags：Selected branches，只加 `staging`。
+3. **再**打开 Required reviewers，加管理员自己。注意：审批只挡得住和审批人不是同一个 GitHub 账号的人。如果智能体用的就是管理员的账号（或有它的令牌），它也能通过接口自己批准，这时要让智能体换成单独的账号，或者不给它批准部署的权限。
+4. 最后才填密钥：服务器上 `sudo topup gen-test-admin`，把显示的令牌填进这个环境的 Environment secrets → `STAGING_TEST_ADMIN_TOKEN`，然后 `clear`。
+5. 以后每次有人运行 `staging-e2e`：先看这次运行用的提交（`e2e/staging-e2e/` 和流程文件有没有改动、改了什么），没问题再点批准。
