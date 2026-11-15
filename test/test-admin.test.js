@@ -9,6 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createTestDb } from '../server/pay/db.js';
+import { createMerchant } from '../server/pay/core.js';
 import { migrate } from '../server/pay/schema.js';
 import { createFakeTron } from '../server/pay/fake-trongrid.js';
 import { createWalletApi } from '../server/pay/wallet-api.js';
@@ -144,12 +145,15 @@ test('三、打码：商户名、名称、邮箱、公司名首字 + ***；链�
   assert.deepEqual(out, { items: [{ merchant: '某***', email: 'a***', amount: '1.00', to: '0xabc' }], cards: [{ name: 'eth', chain: 'eth' }], top_merchants: [{ name: 'A***', amount: 5 }], company: 'Z***' });
 });
 
-test('三、节点核对：以太坊 / BSC 节点是主网（1、56）或查不到时不认测试管理员；测试网照常', async () => {
+test('三、节点核对（测试网白名单）：以太坊 / BSC 节点不是认可的测试网（主网、别的链）或查不到时不认测试管理员；Sepolia、Holesky、Hoodi、BSC 测试网照常', async () => {
   const t = (ids) => createTestnetCheck(Object.fromEntries(ids.map((id, i) => [`c${i}`, { chainId: async () => { if (id === 'down') throw new Error('down'); return id; } }])));
   const err = console.error; console.error = () => {};
   try {
     assert.equal(await t([11155111])(), true);
     assert.equal(await t([11155111, 97])(), true);
+    assert.equal(await t([17000, 560048])(), true);
+    assert.equal(await t([137])(), false, '别的链（不是主网也不在白名单）：不认');
+    assert.equal(await t([31337])(), false, '本机链：不认');
     assert.equal(await t([1])(), false);
     assert.equal(await t([11155111, 56])(), false);
     assert.equal(await t(['down'])(), false);
@@ -158,6 +162,39 @@ test('三、节点核对：以太坊 / BSC 节点是主网（1、56）或查不�
   const { db, call } = await setup({ testnetCheck: t([1]) });
   assert.equal((await call('payout-limits')).status, 401, '主网节点：令牌对也不认');
   await db.end?.();
+});
+
+test('三、打码兜底：任何字段里的邮箱形式内容（客户编号、驳回原因、商户名）都打码；白名单里所有只读动作的返回都没有 @', async () => {
+  assert.equal(JSON.stringify(maskForTestAdmin({ customer_id: 'bob@x.com', reason: '联系 a.b@c.d 处理', list: ['z@y.x'] })), JSON.stringify({ customer_id: 'b***', reason: '联系 a*** 处理', list: ['z***'] }));
+  const { db, call } = await setup();
+  const m = await createMerchant(db, { name: 'shop@example.com 科技', feeIn: { ppm: 0, fixed: 0, min: 0 }, feeOut: { ppm: 0, fixed: 0, min: 0 } });
+  await db.query(`insert into customers (merchant_id, customer_id, name, address, hd_index, onchain) values ($1, 'cust@example.com', 'n@example.com', 'TQ-test-address', 1, 5)`, [m.id]);
+  await db.query(`insert into anomalies (type, merchant_id, customer_id, address, amount) values ('unknown', $1, 'anom@example.com', 'TQ-a', '1')`, [m.id]);
+  for (const [id, status] of [['WD-T1', 'pending'], ['WD-T2', 'rejected']]) {
+    await db.query(`insert into withdrawals (id, merchant_id, kind, customer_id, to_address, amount, fee, source, status, reason) values ($1, $2, 'payout', 'wd@example.com', 'TQ-to', 1000000, 0, 'api', $3, '已通知 ops@example.com')`, [id, m.id, status]);
+  }
+  const reads = [...TEST_ADMIN_ACTIONS].filter((a) => !TEST_ADMIN_WRITES.has(a));
+  const okOnes = [];
+  for (const a of reads) {
+    for (const qs of a === 'withdrawals' ? ['', '&all=1'] : ['']) {
+      const r = await call(a + qs);
+      if (r.status !== 200) continue;
+      okOnes.push(a);
+      assert.ok(!JSON.stringify(r.body).includes('@'), `${a}${qs} 的返回里有 @`);
+    }
+  }
+  for (const a of ['withdrawals', 'payout-overview', 'anomalies', 'sweep-list', 'overview']) assert.ok(okOnes.includes(a), `前提：${a} 读到了（${okOnes.join(',')}）`);
+  await db.end?.();
+});
+
+test('三、打码兜底的性能和写法：20 万字符的十六进制原文（没有 @）50 毫秒内原样返回；%40、全角＠也认', () => {
+  const raw = 'ab'.repeat(100_000);
+  const t = performance.now();
+  const out = maskForTestAdmin({ rawHex: raw, steps: [{ rawHex: raw }] });
+  const ms = performance.now() - t;
+  assert.ok(ms < 50, `用了 ${ms.toFixed(1)} 毫秒`);
+  assert.equal(out.rawHex, raw);
+  assert.deepEqual(maskForTestAdmin({ a: 'bob%40x.com', b: '甲＠乙.cn', c: 'x@y.z', d: '0xabc' }), { a: 'b***', b: '甲***', c: 'x***', d: '0xabc' });
 });
 
 // ---------- 五、健康检查 ----------

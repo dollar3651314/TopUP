@@ -3,7 +3,9 @@
 //   - 令牌、商户 Secret 在这个文件加载时读进来，随即从 process.env 删掉，用例拿不到变量本身，只能用下面的请求函数
 //     （这挡不住故意作恶的用例代码：同一个进程里总有办法读到；真正的防线是 GitHub 环境的 Required reviewers 和定期换令牌）
 //   - 这里的函数不打印、不返回请求头；出错信息只有动作名、HTTP 状态和接口返回的错误码（error.code），不含响应内容、地址和令牌：
-//     仓库是公开的，运行日志谁都能看。用例里的断言只用 assert.ok(条件, '说明') 和下面的 ok()、expectError()，不要 console.log 接口返回
+//     仓库是公开的，运行日志谁都能看。用例里只许用 assert.ok(条件, '说明') 和这里的 ok()、expectError()：
+//     assert.equal、deepEqual、strictEqual（还有 match）失败时，node 的输出会把实际值（接口返回）打印出来，test/staging-e2e-kit.test.js 会拦；
+//     也不要 console.log 接口返回
 //   - 用测试管理员调用运营后台接口：admin('payout-limits')、admin('payout-approve', { body: { ids: [...] } })
 //     要动态码的动作（改上限）照样传 code 字段（随便填，例如 '000000'），服务器对测试管理员免核对
 //   - 测试商户的开放 API（可选，造打款单用）：merchant('POST', 'payouts/', body)；要 GitHub 环境里另有

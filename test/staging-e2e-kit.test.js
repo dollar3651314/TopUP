@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -100,4 +100,22 @@ test('健康检查不是测试环境（或测试管理员没开）：run.mjs 一
   const r = await run({ STAGING_URL: 'http://example.invalid', STAGING_TEST_ADMIN_TOKEN: 'tta_x' });
   assert.notEqual(r.code, 0);
   assert.match(r.out, /https/);
+});
+
+// 运行日志公开：assert.equal / deepEqual / strictEqual 失败时 node 的 spec 输出会把实际值（接口返回）打印出来；console.log、JSON.stringify
+// 也会把接口返回带进日志。所以验收用例目录里的每个 .mjs 都只许用 assert.ok(条件, 说明) 和 lib.mjs 的 ok()、expectError()；
+// lib.mjs（发请求要 JSON.stringify 请求体）、run.mjs（打印一行"连的是哪个提交"）两处是认可的例外，只豁免打印和序列化这一条
+test('静态检查：e2e/staging-e2e/ 的 .mjs 里没有会把实际值打进日志的断言；用例文件里没有 console.*、JSON.stringify', () => {
+  const dir = join(ROOT, 'e2e/staging-e2e');
+  const BAD_ASSERT = /\b(equal|deepEqual|strictEqual|deepStrictEqual|notEqual|notDeepEqual|notStrictEqual|notDeepStrictEqual|partialDeepStrictEqual|match|doesNotMatch)\s*\(/;
+  const BAD_PRINT = /\bconsole\s*\.\s*(log|info|warn|error|debug|dir|table|trace)\b|\bJSON\s*\.\s*stringify\b|process\s*\.\s*std(out|err)\s*\.\s*write/;
+  const PRINT_OK = new Set(['lib.mjs', 'run.mjs']);
+  const files = readdirSync(dir).filter((f) => f.endsWith('.mjs'));
+  assert.ok(files.some((f) => f.endsWith('.test.mjs')));
+  for (const f of files) {
+    readFileSync(join(dir, f), 'utf8').split('\n').forEach((line, i) => {
+      assert.ok(!BAD_ASSERT.test(line), `${f}:${i + 1} 用了会打印实际值的断言，改成 assert.ok(条件, 说明) 或 ok()、expectError()`);
+      if (!PRINT_OK.has(f)) assert.ok(!BAD_PRINT.test(line), `${f}:${i + 1} 不要打印或序列化接口返回（console.*、JSON.stringify、process.stdout.write）`);
+    });
+  }
 });
