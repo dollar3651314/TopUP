@@ -89,7 +89,8 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
         if (f?.native) out.batches_left = Number(BigInt(wei) / BigInt(f.native));
         const [w] = await db.query(`select coalesce(max((fee_estimate->>'native')::numeric), 0)::text need from wallet_sweep_batches where chain = $1 and status = 'awaiting_approval'`, [chain]);
         const needWei = BigInt(String(w?.need || '0').split('.')[0] || '0');
-        out.low = (out.batches_left !== null && out.batches_left < LOW_GAS_BATCHES) || (needWei > 0n && BigInt(wei) < needWei);
+        // 余额为 0 一定标 low（估不出手续费、节点报的 gas 价为 0 时也照样提醒；这是真问题，归集发不出去）
+        out.low = BigInt(wei) === 0n || (out.batches_left !== null && out.batches_left < LOW_GAS_BATCHES) || (needWei > 0n && BigInt(wei) < needWei);
       }
     } catch { out.gas = null; out.error = 'rpc'; }
     // 第 2 批 TRON：发起账户现有能量、租能量平台的预存余额（没配平台为 null）
