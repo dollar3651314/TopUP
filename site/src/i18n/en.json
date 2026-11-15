@@ -10,7 +10,9 @@
     "switchAria": "切换到中文"
   },
   "footer": {
-    "notMainland": "TopUP services are not offered to residents or entities in Mainland China."
+    "notMainland": "TopUP services are not offered to residents or entities in Mainland China.",
+    "terms": "Terms of Service",
+    "privacy": "Privacy Policy"
   },
   "pages": {
     "home": {
@@ -25,6 +27,18 @@
       "heading": "Page not found",
       "body": "The page you are looking for may have moved.",
       "back": "Back to home"
+    },
+    "terms": {
+      "title": "Terms of Service - TopUP",
+      "description": "TopUP Terms of Service.",
+      "heading": "Terms of Service",
+      "body": "Content to be added."
+    },
+    "privacy": {
+      "title": "Privacy Policy - TopUP",
+      "description": "TopUP Privacy Policy.",
+      "heading": "Privacy Policy",
+      "body": "Content to be added."
     }
   }
 }

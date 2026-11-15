@@ -382,9 +382,16 @@ render.recon = async (p) => {
     try { await call('recon-run', {}); say('对账完成'); } catch (e) { say(errText(e)); }
     render.recon(p); counts();
   } }, '立即对账') as HTMLButtonElement;
-  p.replaceChildren(toolbar('对账', run), h('p', { class: 'hint muted' }, '每天核对一次：链上实际持有的 USDT（客户地址 + 热钱包 + 冷钱包）应该等于商户余额之和 + 平台收取的手续费 + 低于 1 USDT 没有入账的钱。你从热钱包或冷钱包转出利润后，差额会是负数，属于正常。'),
+  // 最近一次对账的各链明细（TRON、以太坊、BSC；没开通的链不查、不列）
+  const last = r.days[0];
+  const CN: Record<string, string> = { tron: 'TRON', eth: '以太坊', bsc: 'BSC' };
+  const perChain = last?.detail?.by_chain ? [h('h2', { class: 'h-sm' }, `各链链上明细（${last.day}）`),
+    table(['链', '未归集地址', '热钱包', '冷钱包', '合计', '查询'], Object.entries(last.detail.by_chain).map(([c, x]: [string, any]) => [CN[c] || c, usd(x.addresses), usd(x.hot), usd(x.cold), usd(x.total),
+      x.complete ? status('approved', `查了 ${x.checked} 个地址`) : status('submitted', x.wallet_errors ? `热钱包或冷钱包有 ${x.wallet_errors} 个没查到` : `只查了 ${x.checked}/${x.address_count} 个地址`)]), '暂无')] : [];
+  p.replaceChildren(toolbar('对账', run), h('p', { class: 'hint muted' }, '每天核对一次：三条链（TRON、以太坊、BSC，没开通的链不查）链上实际持有的 USDT（没归集的客户地址 + 热钱包 + 冷钱包）合计，应该等于商户余额之和 + 平台收取的手续费 + 低于 1 USDT 没有入账的钱。商户余额不分链，所以只按合计比；各链的链上数字列在下面。你从热钱包或冷钱包转出利润后，差额会是负数，属于正常。'),
     table(['日期', '商户余额合计', '链上合计', '手续费和未入账', '差额', '结果'], r.days.map((d: any) => [d.day, usd(d.balances), usd(d.chain), usd(d.fees), u(d.diff) ? h('b', { class: 'neg' }, usd(d.diff)) : '0.00',
-      !d.detail.complete ? status('submitted', `只查了 ${d.detail.checked}/${d.detail.address_count ?? '—'} 个地址`) : u(d.diff) ? status('needs_info', '不一致') : status('approved', '一致')]), '暂无对账记录（每天自动对账一次，也可以点右上角的"立即对账"）'),
+      !d.detail.complete ? status('submitted', d.detail.address_count !== undefined && d.detail.checked === d.detail.address_count ? '有热钱包或冷钱包没查到' : `只查了 ${d.detail.checked}/${d.detail.address_count ?? '—'} 个地址`) : u(d.diff) ? status('needs_info', '不一致') : status('approved', '一致')]), '暂无对账记录（每天自动对账一次，也可以点右上角的"立即对账"）'),
+    ...perChain,
     h('h2', { class: 'h-sm' }, '按商户核对客户合计'),
     table(['商户', '商户收款合计', '客户收款合计', '结果'], r.merchants.map((m: any) => [m.name, usd(m.deposits_total), usd(m.customers_total), status(m.ok ? 'approved' : 'needs_info', m.ok ? '一致' : '不一致')]), '暂无'));
 };

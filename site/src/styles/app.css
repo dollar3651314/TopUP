@@ -10,6 +10,7 @@
 .app-narrow { max-width: 880px; }
 .app-footer { font-size: 0.85rem; color: var(--text-muted); padding: 24px 0; border-top: 1px solid var(--border); }
 .app-footer a { color: inherit; }
+.footer-links { display: flex; flex-wrap: wrap; gap: 16px; margin: 8px 0 0; }
 
 .intro-card { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 24px; }
 .intro-card h1 { font-size: clamp(1.6rem, 3vw, 2.1rem); margin-bottom: 6px; }

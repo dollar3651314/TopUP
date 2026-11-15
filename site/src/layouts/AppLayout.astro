@@ -50,7 +50,8 @@ const d = t(lang);
     </main>
     <footer class="app-footer">
       <div class="container">
-        {d.footer.notMainland}
+        <p class="m0">{d.footer.notMainland}</p>
+        <p class="footer-links"><a href={href(lang, 'terms')} data-footer-terms>{d.footer.terms}</a><a href={href(lang, 'privacy')} data-footer-privacy>{d.footer.privacy}</a></p>
       </div>
     </footer>
   </body>

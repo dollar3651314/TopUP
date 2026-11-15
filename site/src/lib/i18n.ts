@@ -14,6 +14,8 @@ export const PAGES = {
   home: '',
   merchant: 'merchant/',
   docs: 'docs/',
+  terms: 'terms/',
+  privacy: 'privacy/',
 } as const;
 export type PageKey = keyof typeof PAGES;
 
