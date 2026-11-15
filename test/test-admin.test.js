@@ -187,6 +187,16 @@ test('三、打码兜底：任何字段里的邮箱形式内容（客户编号�
   await db.end?.();
 });
 
+test('三、打码兜底的性能和写法：20 万字符的十六进制原文（没有 @）50 毫秒内原样返回；%40、全角＠也认', () => {
+  const raw = 'ab'.repeat(100_000);
+  const t = performance.now();
+  const out = maskForTestAdmin({ rawHex: raw, steps: [{ rawHex: raw }] });
+  const ms = performance.now() - t;
+  assert.ok(ms < 50, `用了 ${ms.toFixed(1)} 毫秒`);
+  assert.equal(out.rawHex, raw);
+  assert.deepEqual(maskForTestAdmin({ a: 'bob%40x.com', b: '甲＠乙.cn', c: 'x@y.z', d: '0xabc' }), { a: 'b***', b: '甲***', c: 'x***', d: '0xabc' });
+});
+
 // ---------- 五、健康检查 ----------
 
 test('五、健康检查：测试环境有 test_admin（只给是否、没有哈希）；生产配了这个变量：起不来（503、没有 test_admin）', async () => {

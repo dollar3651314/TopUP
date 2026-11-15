@@ -44,8 +44,12 @@ const HEX64 = /^[0-9a-f]{64}$/;
 const MASK_KEYS = new Set(['merchant', 'email', 'company', 'name']);
 const mask = (v) => (typeof v === 'string' && v ? `${[...v][0]}***` : v);
 // 邮箱形式的内容（客户编号、驳回原因等自由文本里都可能有）：不管字段名，一律打码成"首字***"（不留 @）
-const EMAIL_LIKE = /[^\s@"'<>(),;:]+@[^\s@"'<>(),;:]+/gu;
-const scrubEmail = (v) => v.replace(EMAIL_LIKE, (m) => `${[...m][0]}***`);
+// 也认 %40（网址编码）和全角＠；两边限长（本地部分最多 64、域名部分最多 255），没有 @ 的字符串直接原样返回：
+// payout-plan 之类的返回里有很长的交易原文（十六进制），不能让正则在上面来回回溯拖住 web 进程。
+// 这只是兜底，不是完整的个人信息清洗（电话、地址、姓名这类不按内容识别）
+const AT_LIKE = /@|＠|%40/i;
+const EMAIL_LIKE = /[^\s@＠%"'<>(),;:]{1,64}(?:@|＠|%40)[^\s@＠%"'<>(),;:]{1,255}/giu;
+const scrubEmail = (v) => (AT_LIKE.test(v) ? v.replace(EMAIL_LIKE, (m) => `${[...m][0]}***`) : v);
 /**
  * 测试管理员拿到的返回：商户名、名称（链名除外）、邮箱、公司名打码；其余字符串里邮箱形式的内容也打码（customer_id、reason 这类自由文本，
  * 按字段名列不全，所以按内容兜底）；别的原样
