@@ -348,7 +348,8 @@ test.describe.serial('TC-K 在线开户', () => {
     await ctx.close();
   });
 
-  test('TC-K08 通过申请；保留期显示为"业务关系存续期间"；操作记录完整', async () => {
+  // 口径变更（依 TU-15：客户资料含开户资料永久保留、不删）：保留期原来期望"业务关系存续期间"（结束后 5 年删），改为"永久保留"
+  test('TC-K08 通过申请；保留期显示为"永久保留"；操作记录完整', async () => {
     await admin.click('[data-back-list]');
     const row = admin.locator(`[data-apps-body] tr[data-ref="${ref}"]`);
     await expect(row).toContainText('已提交');
@@ -359,7 +360,8 @@ test.describe.serial('TC-K 在线开户', () => {
     await expect(admin.locator('[data-toast]')).toContainText('已通过');
     // 审核后导航上的"待审核"数字马上更新，不需要刷新页面
     await expect(admin.locator('[data-count="apps"]')).toHaveText('0');
-    await expect(admin.locator('[data-side]')).toContainText('业务关系存续期间');
+    await expect(admin.locator('[data-side]')).toContainText('永久保留');
+    await expect(admin.locator('[data-side]')).not.toContainText('5 年');
     await expect(admin.locator('.timeline-mini')).toContainText('补件');
     await admin.fill('#rv-notes', 'e2e 内部备注');
     await admin.locator('#rv-notes').blur();
@@ -407,9 +409,14 @@ test.describe.serial('TC-K 在线开户', () => {
     expect(await fake.text()).not.toMatch(/"deleted"/);
     // 前面的 TC-K09 删掉了主流程那份申请：这里新发一份邀请，确认后台能列出来，再跑每日任务
     const company = `Retain Co ${Date.now()}`;
-    const inv = await admin.request.post('/api/kyb/?g=admin&a=invite', { data: { company, email: `retain-${Date.now()}@mekong.example` } });
-    expect(inv.status()).toBe(200);
-    const names = async () => ((await (await admin.request.get('/api/kyb/?g=admin&a=apps')).json()).apps as any[]).map((a) => a.company);
+    // 和 TC-K12 一样从测试端带上后台会话 Cookie 发请求
+    const c = (await adminCtx.cookies()).find((x) => x.name === 'topup_admin')!;
+    const api = (a: string, body?: object) => fetch(`http://127.0.0.1:8080/api/kyb/?g=admin&a=${a}`, body
+      ? { method: 'POST', headers: { 'content-type': 'application/json', cookie: `topup_admin=${c.value}` }, body: JSON.stringify(body) }
+      : { headers: { cookie: `topup_admin=${c.value}` } });
+    const inv = await api('invite', { company, email: `retain-${Date.now()}@mekong.example` });
+    expect(inv.status).toBe(200);
+    const names = async () => ((await (await api('apps')).json()).apps as any[]).map((a) => a.company);
     const before = await names();
     expect(before, '先确认后台能列出刚发的申请').toContain(company);
     await request.get('/__fake/daily/'); // 主实例没开收付款时返回什么都行，只看申请还在
