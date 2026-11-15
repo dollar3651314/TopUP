@@ -51,6 +51,7 @@ test('一、够 3 批不发；不够 3 批发一封"只够约 2 批"，同一状
   set(per * 3n);
   assert.equal((await run()).chains.eth, 'low', '补到正好 3 批：还没到恢复线（4 批），算偏低');
   assert.equal(mails.length, 3, 'out → low 是状态变化：发一封');
+  assert.match(mails[2].subject, /以太坊 归集发起账户的 ETH 仍偏低：只够约 3 批归集（补到 4 批算恢复）/, '从不够一批补上来、还没到恢复线：写仍偏低');
   set(per * 4n);
   assert.equal((await run()).chains.eth, 'ok');
   assert.equal(mails.length, 4);

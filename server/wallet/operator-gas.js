@@ -1,7 +1,7 @@
 // 归集发起账户的手续费币（ETH / BNB / TRX）够不够：后台"系统状态"、归集页、概览待处理和 worker 的提醒邮件共用同一个判断。
 //   - 按一批典型的归集（10 个地址、一半首次）估够几批；不够 LOW_GAS_BATCHES（3）批、余额为 0、或不够付待确认批次的手续费时算"偏低"（low）
 //   - worker 每 10 分钟查一次（只读余额和 gas 价，不签名、不发交易）：状态变了才发邮件（正常 → 偏低 → 不够一批 → 恢复），
-//     同一状态不重复发；重启不重发（状态记在 pay_meta）。恢复要够 LOW_GAS_BATCHES + 1 批，避免 gas 价来回波动时反复发信
+//     同一状态不重复发；重启不重发（状态记在 pay_meta）。发信成功了才记新状态：发信失败时下一次检查再发（notify 要在发失败时抛错）。恢复要够 LOW_GAS_BATCHES + 1 批，避免 gas 价来回波动时反复发信
 // 发起账户的地址是公开地址（补手续费要复制它），不是密钥；这里不碰私钥。
 import { getMeta, setMeta } from '../pay/core.js';
 
@@ -61,7 +61,7 @@ export function gasLevel(s, prev = 'ok') {
   return 'ok';
 }
 
-function mail(chain, level, s, adminUrl) {
+function mail(chain, level, s, adminUrl, prev = 'ok') {
   const name = NAMES[chain], sym = NATIVE[chain];
   const have = `${native(s.wei, chain)} ${sym}`;
   const per = s.perBatch ? `一批典型归集（10 个地址，一半第一次归集）约 ${native(s.perBatch, chain)} ${sym}` : '现在估不出一批的手续费（节点没给 gas 价）';
@@ -73,7 +73,10 @@ function mail(chain, level, s, adminUrl) {
   }
   const left = s.batches_left === null ? '' : `，按现在的 gas 价够约 ${s.batches_left} 批`;
   const pending = s.needWei > 0n && s.wei < s.needWei ? `\n待确认的归集批次估的手续费是 ${native(s.needWei, chain)} ${sym}，比余额多，现在确认会发不出去。` : '';
-  const head = level === 'out' ? `${name} 归集发起账户的 ${sym} 不够付一批归集` : `${name} 归集发起账户的 ${sym} 只够约 ${s.batches_left ?? '—'} 批归集`;
+  // 从"不够一批"补到 1～3 批多：还没到恢复线（4 批），写"仍偏低"，免得和"不够 3 批才提醒"对不上
+  const head = level === 'out' ? `${name} 归集发起账户的 ${sym} 不够付一批归集`
+    : prev === 'out' ? `${name} 归集发起账户的 ${sym} 仍偏低：只够约 ${s.batches_left ?? '—'} 批归集（补到 ${RECOVER_GAS_BATCHES} 批算恢复）`
+      : `${name} 归集发起账户的 ${sym} 只够约 ${s.batches_left ?? '—'} 批归集`;
   return [head,
     `${name} 归集发起账户现在有 ${have}${left}（${per}）。${pending}\n`
     + `请往发起账户转一些 ${sym}（只用来付归集手续费；钱只会进冷钱包，充值地址里的钱不受影响）。${addr}${where}\n\n`
@@ -103,9 +106,16 @@ export async function checkOperatorGas(db, { layer, notify, adminUrl = '', now =
     }
     out[chain] = level;
     if (level === prev) continue;
+    // 先发信、发成功了才记新状态：发信失败（SMTP 出错）时状态不变，下一次检查（10 分钟后）按同样的变化再发一次，直到发出去
+    if (notify) {
+      const [subject, text] = mail(chain, level, s, adminUrl, prev);
+      try { await notify(subject, text); } catch (e) {
+        console.error(`[operator-gas] ${chain}: mail failed, will retry on next check (${String(e?.code || e?.message || e).slice(0, 80)})`);
+        out[chain] = `${level}_mail_failed`; continue;
+      }
+    }
     if (level === 'ok') await db.query('delete from pay_meta where key = $1', [key]);
     else await setMeta(db, key, { level, since: new Date(now).toISOString(), batches_left: s.batches_left });
-    if (notify) { const [subject, text] = mail(chain, level, s, adminUrl); await notify(subject, text); }
   }
   return { chains: out };
 }

@@ -89,7 +89,8 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
         if (Object.keys(pchains).some((ch) => payoutSvc.onchain[ch]?.result !== 'ok' && payoutSvc.onchain[ch]?.result !== 'mismatch')) await payoutSvc.verify().catch(() => {});
         return payoutSvc.confirm();
       } : null,
-      operatorGas: layer.enabledChains.length ? () => checkOperatorGas(db, { layer, notify, adminUrl: `${origin}/admin/` }) : null,
+      // 发起账户提醒用发失败会抛错的发信函数：发成功才记状态，发失败下一次检查重发
+      operatorGas: layer.enabledChains.length ? () => checkOperatorGas(db, { layer, notify: notifyStrict, adminUrl: `${origin}/admin/` }) : null,
       // 归集：TRON 第 0 批的浏览器签名批次；ETH、BSC 合约钱包确认已发出的批次、到点凑批（东八区 10:00、20:00）
       confirmSweeps: async () => {
         const tronSweeps = await sweepProgress(db, tron, { notify });
