@@ -342,7 +342,7 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await admin.unroute(isWallet('wallet-chains'));
   });
 
-  test('TC-W09 商户客户（K1）：新建客户后没有地址，写明"客户发起充值时按链生成"；列表按链分列；TRON 标"未开通"、写新口径的说明，不写"第 2 批"', async () => {
+  test('TC-W09 商户客户（K1）：新建客户后没有地址，写明"客户发起充值时按链生成"；列表按链分列；列表的 TRON 一列标"未开通"，不写"第 2 批"', async () => {
     await merchant.goto('/zh/merchant/');
     await merchant.click('[data-mtab="customers"]');
     const panel = merchant.locator('[data-mpanel="customers"]');
@@ -361,9 +361,7 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(dlg).toBeVisible();
     await expect(dlg).not.toContainText(/0x[0-9a-fA-F]{40}/);
     await expect(dlg).toContainText('充值'); // 说明地址在客户发起充值时按链生成
-    const tron = dlg.locator('[data-addresses] [data-chain="tron"]');
-    await expect.soft(tron.locator('.later-tag')).toHaveText(OFF);
-    await expect.soft(tron).toContainText(TRON_LATER);
+    // 新客户没有地址时详情不画按链的地址卡（只写说明），TRON 一行的口径在 TC-W09B 断言；这里只断言不写"第 2 批"
     await expect.soft(dlg).not.toContainText(OLD);
     await expect.soft(dlg).not.toContainText('第 2 批上线');
     await merchant.keyboard.press('Escape');
