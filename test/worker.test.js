@@ -42,7 +42,8 @@ test('一轮：抢到租约才执行；扫链出错不影响每日任务；每�
   };
   const t = Date.parse('2026-11-13T19:30:00Z');
   const r1 = await runOnce({ ...deps, now: t });
-  assert.deepEqual(calls, ['tick', 'cleanup', 'daily']);
+  // 口径变更（依 TU-15：客户资料含开户资料永久保留、不删）：每日任务不再跑开户资料清理，原来期望 ['tick', 'cleanup', 'daily']
+  assert.deepEqual(calls, ['tick', 'daily']);
   assert.deepEqual(r1.tick, { error: 'failed' });
   calls.length = 0;
   await runOnce({ ...deps, now: t + 15_000 }); // 同一天：只扫链

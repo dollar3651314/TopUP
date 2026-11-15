@@ -1,13 +1,13 @@
 // worker 进程：常驻运行的定时任务。
 //   - 每 TICK_INTERVAL_MS（默认 15 秒）一次：扫链入账、订单过期、提币确认、发送回调、归集确认（pay/tick.js）
-//   - 每天 DAILY_AT_UTC（默认 19:15 UTC）一次：开户资料到期清理、收付款的对账和资产检查（kyb/admin.js、pay/daily.js）
+//   - 每天 DAILY_AT_UTC（默认 19:15 UTC）一次：收付款的对账和资产检查（pay/daily.js）。客户资料（含开户资料）永久保留，没有自动清理
 // 同一时间只有一个 worker 在跑：用数据库里的租约（pay_meta 的 worker_lease），租约过期才能被别的 worker 接手；
 // 正常退出时把租约到期时间设成 1970 年，新的 worker 不用等。
 // 用法：node server/worker.js（环境变量和 web 进程相同）
 import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
-import { createApp, refuseLocal } from './app.js';
+import { createApp, refuseConfig, refuseLocal } from './app.js';
 
 export const LEASE_MS = 60_000;
 
@@ -36,17 +36,16 @@ export function dailyDue(nowMs, atUtc, lastDay) {
 }
 
 /**
- * 跑一轮：抢到租约才执行。tick / daily / cleanup 各自出错只记日志，不影响下一轮。
+ * 跑一轮：抢到租约才执行。tick / daily 各自出错只记日志，不影响下一轮。
  * state.lastDaily 记在 pay_meta（worker_daily），重启后不会重复执行当天的每日任务。
  */
-export async function runOnce({ db, tick, daily, cleanup, owner, atUtc, now = Date.now(), log = console }) {
+export async function runOnce({ db, tick, daily, owner, atUtc, now = Date.now(), log = console }) {
   if (!(await takeLease(db, owner, { now }))) return { skipped: 'lease' };
   const out = {};
   try { out.tick = await tick(); } catch (e) { log.error(`[worker] tick: ${e.stack || e}`); out.tick = { error: 'failed' }; }
   const [r] = await db.query(`select value from pay_meta where key = 'worker_daily'`);
   const due = dailyDue(now, atUtc, r?.value?.day);
   if (due) {
-    try { out.cleanup = await cleanup(); } catch (e) { log.error(`[worker] cleanup: ${e.stack || e}`); out.cleanup = { error: 'failed' }; }
     try { out.daily = await daily(); } catch (e) { log.error(`[worker] daily: ${e.stack || e}`); out.daily = { error: 'failed' }; }
     await db.query(`insert into pay_meta (key, value) values ('worker_daily', $1::jsonb)
       on conflict (key) do update set value = excluded.value, updated_at = now()`, [JSON.stringify({ day: due, at: new Date(now).toISOString() })]);
@@ -55,12 +54,12 @@ export async function runOnce({ db, tick, daily, cleanup, owner, atUtc, now = Da
 }
 
 export async function startWorker(config = loadConfig(), { log = console } = {}) {
-  const refused = refuseLocal(config);
-  if (refused) throw Object.assign(new Error(refused), { missing: ['APP_ENV'] });
+  const refused = refuseConfig(config);
+  if (refused) throw Object.assign(new Error(refused), { missing: [refuseLocal(config) ? 'APP_ENV' : 'TEST_ADMIN_TOKEN_SHA256'] });
   const app = await createApp(config);
   const pay = await app.pay;
   const owner = `${process.pid}-${randomBytes(4).toString('hex')}`;
-  const deps = { db: pay.db, tick: pay.tick, daily: pay.daily, cleanup: app.kyb.cleanup, owner, atUtc: config.dailyAtUtc, log };
+  const deps = { db: pay.db, tick: pay.tick, daily: pay.daily, owner, atUtc: config.dailyAtUtc, log };
   let stopped = false, timer = null, running = null;
   const loop = async () => {
     if (stopped) return;

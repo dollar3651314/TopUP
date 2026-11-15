@@ -11,6 +11,7 @@ import { createMerchantApi } from './merchant-api.js';
 import { createPayApi } from './pay-api.js';
 import { createWalletApi, sweepProgress } from './wallet-api.js';
 import { createAdminGate } from './admin-gate.js';
+import { testAdminHash, createTestnetCheck } from './test-admin.js';
 import { runTick } from './tick.js';
 import { runDaily } from './daily.js';
 import { decryptJson } from '../kyb/crypto.js';
@@ -54,7 +55,8 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   const layer = createWalletLayer({ db, config, evm: wallets.evm || {}, tron: wallets.tron || null });
   const notify0 = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
   const ops = createOps({ db, keys, payBase: origin, keyPrefix, wallet: layer, notify: notify0 });
-  const gate = createAdminGate({ redis: kyb.redis, kybKeys: kyb.keys });
+  // 测试管理员只在测试环境、配了令牌哈希时开（server/pay/test-admin.js）
+  const gate = createAdminGate({ redis: kyb.redis, kybKeys: kyb.keys, testAdminHash: testAdminHash(config), testnetCheck: createTestnetCheck({ eth: layer.adapters?.eth, bsc: layer.adapters?.bsc }) });
   const notify = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
   // 启动时用 eth_call 核对链上批量合约的 parent、factory 和配置一致；不一致的链不开通并告警（最多等 8 秒，连不上下一轮再核对）
   await layer.verifyOnchain({ db, notify }).catch((e) => console.error(`[wallet] onchain check: ${e.message}`));
@@ -79,7 +81,7 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
     v1: createApiV1({ db, keys, ops, getIp, redis: kyb.redis }), // 限流计数和开户共用同一个 Redis
     merchant: createMerchantApi({ db, keys, ops, send }),
     pay: createPayApi({ db, layer, redis: kyb.redis, getIp }), // 按 IP 限流，和开放 API 共用 Redis
-    wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, notify, diskPath }), diskPath, payoutSvc, ...gate }),
+    wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, layer, notify, diskPath }), diskPath, payoutSvc, ...gate }),
     tick: () => runTick({
       db, tron, getTarget, notify, adminUrl: `${origin}/admin/`,
       scanEvm: () => scanEvm(db, { layer, notify }),
@@ -99,7 +101,7 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
       },
     }),
     daily: async () => {
-      const out = await runDaily({ db, tron, wallets, notify, diskPath });
+      const out = await runDaily({ db, tron, wallets, layer, notify, diskPath });
       // 租能量平台的预存余额每天查一次（超过 1,000 TRX 告警；没配不查）
       const rental = await checkRentalBalance(db, { renter: layer.tronEnergy, notify }).catch((e) => ({ status: 'error', error: e.message }));
       return out && typeof out === 'object' ? { ...out, energyRental: rental.status } : out;

@@ -17,6 +17,7 @@ import { walletAdminActions } from '../wallet/admin-actions.js';
 import { evmUnswept } from '../wallet/addresses.js';
 import { getSweepSettings } from '../wallet/sweep.js';
 import { payoutAdminActions } from './payout-admin.js';
+import { TEST_ADMIN_ACTIONS, TEST_ADMIN_WRITES, TEST_ADMIN_ACTOR, asTestAdmin, maskForTestAdmin } from './test-admin.js';
 import { createPayoutTxBatch, expirePayoutBatch, getPayoutLimits, planPayoutBatches, MAX_ITEMS_PER_REQUEST } from './payout.js';
 
 const TRX = 1_000_000;
@@ -149,7 +150,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     },
     'withdraw-reject': (b, actor) => core.rejectWithdrawal(db, String(b.id || ''), b.reason, actor),
     /** 为选中的提币构造待签名的交易（热钱包 → 收款地址） */
-    async 'withdraw-plan'(b) {
+    async 'withdraw-plan'(b, actor) {
       const ids = [...new Set((b.ids || []).map(String))];
       need(ids.length > 0 && ids.length <= MAX_ITEMS_PER_REQUEST, 'invalid_param', 422, 'ids');
       // 只收已审核、没凑进批次、没挂起的：审核只在"打款审核"的逐笔审核里做（单笔、每天上限、收款地址提示），签名不顺带审核
@@ -166,7 +167,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const total = Number(p.batches[0].total);
       // 之前凑了没签的 TRON 批次作废（单回到已审核）；已经交了签名的（不是 planned）不动
       for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) await voidTronBatch(x.id);
-      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: 'admin' });
+      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: actor || 'admin' });
       rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, coalesce(batch_line, 0), id', [[...pick]]);
       const steps = [];
       const seen = new Set();
@@ -450,6 +451,27 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     // 第 0 批的"初始化主助记词"（wallet-init）已去掉（2026-11-14 定）：新系统不再派生 TRON 地址
   };
 
+  /**
+   * 测试管理员（只在测试环境）：白名单外的动作 403；actor 记 test-admin；要动态码的动作免动态码（admin-gate.js）；
+   * 每个 POST 另记一条审计 test_admin.request（动作名、成功或错误码；不记请求内容）
+   */
+  async function asTestAdminCall(a, b, q, isPost) {
+    const note = (result) => audit(db, TEST_ADMIN_ACTOR, 'test_admin.request', a, { result }).catch(() => {});
+    if (!TEST_ADMIN_ACTIONS.has(a)) {
+      if (isPost) await note('forbidden');
+      return json(403, { error: { code: 'test_admin_forbidden' } });
+    }
+    if (TEST_ADMIN_WRITES.has(a) && !isPost) return json(405, { error: { code: 'method_not_allowed' } });
+    try {
+      const out = await asTestAdmin(() => actions[a](b, TEST_ADMIN_ACTOR, q));
+      if (isPost) await note('ok');
+      return json(200, maskForTestAdmin(money(out)));
+    } catch (e) {
+      if (isPost) await note(String(e?.code || 'error').slice(0, 60));
+      throw e;
+    }
+  }
+
   const handle = async function handle(request) {
     try {
       const url = new URL(request.url);
@@ -457,8 +479,9 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       if (!actions[a]) return json(404, { error: { code: 'not_found' } });
       const isPost = request.method === 'POST';
       if (isPost && request.headers.get('x-topup-csrf') !== '1') return json(403, { error: { code: 'csrf' } });
-      await requireAdmin(request);
+      const who = await requireAdmin(request);
       const b = isPost ? await readJson(request, 256 * 1024) : {};
+      if (who?.testAdmin) return await asTestAdminCall(a, b, url.searchParams, isPost);
       return json(200, money(await actions[a](b, 'admin', url.searchParams)));
     } catch (e) {
       if (e?.status === 401) return json(401, { error: { code: 'unauthorized' } });

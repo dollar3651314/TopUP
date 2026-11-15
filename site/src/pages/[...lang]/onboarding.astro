@@ -1,7 +1,7 @@
 ---
 import AppLayout from '../../layouts/AppLayout.astro';
 import Field from '../../components/app/Field.astro';
-import { langStaticPaths, type Lang } from '../../lib/i18n';
+import { langStaticPaths, href, type Lang } from '../../lib/i18n';
 import { o, onboardingHref, ACCEPT, MAX_FILE_BYTES, MAX_COMPANY_FILES, MAX_ID_FILES } from '../../lib/onboarding';
 import { IS_PROTOTYPE } from '../../lib/env';
 export const getStaticPaths = langStaticPaths;
@@ -186,6 +186,7 @@ const clientConfig = {
           <p class="err" data-err-for="signature"></p>
           <p class="hint">{c.s4.recorded}</p>
         </div>
+        <p class="hint m0" data-terms-note>{c.s4.agreeBefore}<a href={href(lang, 'terms')} target="_blank" rel="noopener">{c.s4.agreeTerms}</a>{c.s4.agreeAnd}<a href={href(lang, 'privacy')} target="_blank" rel="noopener">{c.s4.agreePrivacy}</a>{c.s4.agreeAfter}</p>
       </section>
 
       <div class="step-actions">

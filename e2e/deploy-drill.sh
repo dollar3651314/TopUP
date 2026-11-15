@@ -112,6 +112,12 @@ tk=$(sed -n 's/^SWEEP_OPERATOR_KEY_TRON=//p' "$TOPUP_DIR/.env")
 check "gen-operator：ETH/BSC 的已有、不重新生成；TRON 的新生成（64 位十六进制），只显示地址；健康检查 operator_tron = true" "grep -q 'SWEEP_OPERATOR_KEY 已经有了' <<< \"\$out\" && grep -qE '发起账户地址：0x[0-9a-fA-F]{40}$' <<< \"\$out\" && grep -qE '发起账户地址：T[1-9A-HJ-NP-Za-km-z]{33}$' <<< \"\$out\" && grep -qE '^0x[0-9a-f]{64}$' <<< '$tk' && ! grep -q '${tk#0x}' <<< \"\$out\" && ! grep -rq '${tk#0x}' '$TOPUP_DIR/logs' && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.wallet.operator_tron == true' > /dev/null"
 out2=$(T gen-operator 2>&1); check "gen-operator 再运行：两把都不重新生成、地址不变" "[ \"\$(grep -c '已经有了' <<< \"\$out2\")\" = 2 ] && [ \"\$(grep 地址 <<< \"\$out\")\" = \"\$(grep 地址 <<< \"\$out2\")\" ]"
 
+out=$(T gen-test-admin 2>&1); tta=$(grep -E '^tta_[0-9a-f]{64}$' <<< "$out" | tail -1); th=$(sed -n 's/^TEST_ADMIN_TOKEN_SHA256=//p' "$TOPUP_DIR/.env")
+W=http://127.0.0.1:18080/api/wallet/?a=payout-limits
+check "gen-test-admin：显示一次令牌，.env 里只有它的 SHA-256、日志里没有令牌；健康检查 test_admin = true；令牌能读运营后台、错令牌 401" "[ -n \"\$tta\" ] && [ \"\$(printf '%s' \"\$tta\" | sha256sum | cut -d' ' -f1)\" = \"\$th\" ] && ! grep -rqF \"\$tta\" '$TOPUP_DIR/logs' '$TOPUP_DIR/.env' && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.test_admin == true' > /dev/null && [ \"\$(curl -s -o /dev/null -w '%{http_code}' -H \"x-topup-test-admin: \$tta\" '$W')\" = 200 ] && [ \"\$(curl -s -o /dev/null -w '%{http_code}' -H 'x-topup-test-admin: x' '$W')\" = 401 ]"
+out=$(T test-admin-off 2>&1); check "test-admin-off：删掉哈希、健康检查 test_admin = false、刚才的令牌 401" "[ -z \"\$(sed -n 's/^TEST_ADMIN_TOKEN_SHA256=//p' '$TOPUP_DIR/.env')\" ] && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.test_admin == false' > /dev/null && [ \"\$(curl -s -o /dev/null -w '%{http_code}' -H \"x-topup-test-admin: \$tta\" '$W')\" = 401 ]"
+unset tta th
+
 echo "== 场景 5：自动更新到 v2（成功）"
 stage "$v2"; T update; rc=$?
 check "更新成功，健康检查提交号 = v2，上一个版本记为 v1" "[ $rc = 0 ] && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\"' > /dev/null && [ \"\$(cat '$TOPUP_DIR/state/previous')\" = '$v1' ]"

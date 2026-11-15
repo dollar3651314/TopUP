@@ -10,7 +10,7 @@ import { createWeb } from '../server/web.js';
 
 const quietly = async (fn) => { const e = console.error; console.error = () => {}; try { return await fn(); } finally { console.error = e; } };
 
-// 原 TC-K11 检查的是"清理接口要口令"；现在清理改由 worker 执行，本地用 /__fake/cleanup/ 代替。
+// 原 TC-K11 检查的是"清理接口要口令"；依 TU-15 开户资料永久保留，已没有清理，/__fake/cleanup/ 留在名单里确认它也不存在。
 // /__fake/ 下还有"立即扫链""执行任意 SQL"等入口，生产和测试环境必须不存在（即使误设了 FAKE_TRON、FAKE_SQL）。
 test('web：生产和测试环境没有 /__fake/ 入口（即使设置了 FAKE_TRON=1、FAKE_SQL=1）', async () => {
   const keep = process.env.FAKE_SQL;

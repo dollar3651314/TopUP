@@ -9,10 +9,11 @@ import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname, resolve, relative, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
-import { createApp, initReason, refuseLocal, ROOT } from './app.js';
+import { createApp, initReason, refuseConfig, ROOT } from './app.js';
 import { json } from './kyb/http.js';
 import { walletChainStatus } from './wallet/status.js';
 import { walletsWatchStatus } from './pay/wallets-change.js';
+import { testAdminHash } from './pay/test-admin.js';
 
 const getMetaSafe = async (db, key) => { try { const [r] = await db.query('select value from pay_meta where key = $1', [key]); return r ? r.value : null; } catch { return null; } };
 
@@ -98,7 +99,9 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
       } catch { wallet = { error: 'query_failed' }; }
     }
     const ok = storage && db && secret && blob && mail && payInfo.trongridKey && ready;
-    return json(ok ? 200 : 503, { ok, env: c.appEnv, commit, storage, db, mail, mailMode, secret, blob, pay: payInfo, worker, ...(wallet ? { wallet } : {}) });
+    // 测试环境：测试管理员开没开（只给是否；生产没有这一项，配了也起不来）
+    const testAdmin = c.appEnv === 'staging' ? { test_admin: Boolean(testAdminHash(c)) } : {};
+    return json(ok ? 200 : 503, { ok, env: c.appEnv, commit, storage, db, mail, mailMode, secret, blob, pay: payInfo, worker, ...(wallet ? { wallet } : {}), ...testAdmin });
   }
   async function fake(path, request) {
     const d = await pay();
@@ -118,7 +121,6 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
     }
     if (path === '/__fake/tick/') return Response.json(await d.tick());
     if (path === '/__fake/daily/') return Response.json(await d.daily());
-    if (path === '/__fake/cleanup/') return Response.json({ ok: true, ...(await (await app()).kyb.cleanup()) });
     if (path === '/__fake/sql/' && process.env.FAKE_SQL === '1') return Response.json(await d.db.query(body.sql, body.params || []));
     return null;
   }
@@ -178,7 +180,7 @@ async function toRequest(req, trustProxy) {
 }
 
 export function startWeb(config = loadConfig()) {
-  const refused = refuseLocal(config);
+  const refused = refuseConfig(config);
   if (refused) { console.error(`[web] ${refused}`); process.exit(1); }
   const web = createWeb(config);
   const server = http.createServer(async (req, res) => {

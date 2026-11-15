@@ -196,7 +196,12 @@
       "signHint": "Sign inside the box using your mouse, finger or stylus.",
       "clear": "Clear",
       "recorded": "The date, time and IP address of signing will be recorded.",
-      "repPrefill": "Pre-filled with the authorized contact person; you can change it."
+      "repPrefill": "Pre-filled with the authorized contact person; you can change it.",
+      "agreeBefore": "By submitting, you confirm that you have read the ",
+      "agreeTerms": "Terms of Service",
+      "agreeAnd": " and the ",
+      "agreePrivacy": "Privacy Policy",
+      "agreeAfter": "."
     },
     "files": {
       "upload": "Upload file",
@@ -475,7 +480,12 @@
       "signHint": "请用鼠标、手指或触控笔在框内签名。",
       "clear": "清除",
       "recorded": "系统会记录签署的日期、时间和 IP 地址。",
-      "repPrefill": "已自动填写授权联系人的姓名，可以修改。"
+      "repPrefill": "已自动填写授权联系人的姓名，可以修改。",
+      "agreeBefore": "提交即表示已阅读",
+      "agreeTerms": "《服务条款》",
+      "agreeAnd": "和",
+      "agreePrivacy": "《隐私政策》",
+      "agreeAfter": "。"
     },
     "files": {
       "upload": "上传文件",

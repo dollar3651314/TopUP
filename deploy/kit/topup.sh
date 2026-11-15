@@ -7,6 +7,8 @@
 #   sudo topup set 变量名 值      填一个不是密钥的设置（例如收件人邮箱），自动生效
 #   sudo topup gen-operator      测试环境：在服务器上生成两个归集发起账户（ETH/BSC 一个、TRON 一个），只显示地址
 #   sudo topup admin-token       显示一次运营后台的初始化口令（第一次进后台用，初始化后作废）
+#   sudo topup gen-test-admin    测试环境：生成测试管理员的令牌（给 GitHub 上的自动验收用例用），服务器只存它的哈希，令牌只在屏幕上显示一次
+#   sudo topup test-admin-off    关掉测试管理员（删掉令牌的哈希，旧令牌立刻作废）
 #   sudo topup test-mail         发一封测试邮件到 MAIL_TO
 #   sudo topup backup            立刻备份一次（每天的定时备份也是它）：本机加密保存，默认不传到别处
 #   sudo topup restore-drill     恢复演练：把本机最近一份备份解密、恢复进临时容器并核对，不碰正在运行的数据
@@ -638,6 +640,8 @@ watch_problems() {
     [ "$(jq -r .r2 "$TOPUP_DIR/state/last-backup.json")" != failed ] || p+=("上一次上传 R2 失败")
     [ "$(jq -r .local "$TOPUP_DIR/state/last-backup.json")" = encrypted ] || p+=("上一次备份没有加密（旧版本留下的，sudo topup backup 重做一次）")
   fi
+  # 测试管理员只在测试环境：不是测试环境的服务器 .env 里有它（应用会拒绝启动）
+  [ "$(dval TOPUP_ENV)" = staging ] || [ -z "$(envval TEST_ADMIN_TOKEN_SHA256)" ] || p+=(".env 里有 TEST_ADMIN_TOKEN_SHA256，但这台不是测试环境（应用会拒绝启动）：sudo topup test-admin-off")
   [ ! -f "$TOPUP_DIR/state/skip" ] || p+=("版本 $(cut -c1-7 "$TOPUP_DIR/state/skip") 更新失败、不再重试（sudo topup retry）")
   if [ -f "$LE_DIR/live/$CERT_NAME/fullchain.pem" ] && ! openssl x509 -checkend $((14 * 86400)) -noout -in "$LE_DIR/live/$CERT_NAME/fullchain.pem" > /dev/null 2>&1; then p+=("HTTPS 证书 14 天内过期"); fi
   printf '%s\n' "${p[@]}"
@@ -673,6 +677,7 @@ cmd_status() {
   body=$(health_json)
   detail "健康检查：$(jq -c '{ok, env, commit, db, storage, secret, blob, mail, mailMode, pay, worker}' <<< "$body" 2> /dev/null || echo 没有响应)"
   detail "钱包：$(jq -c '.wallet // {}' <<< "$body" 2> /dev/null)"
+  [ "$(dval TOPUP_ENV)" != staging ] || detail "测试管理员：$(jq -r 'if .test_admin == true then "开着（sudo topup test-admin-off 关）" else "关着（sudo topup gen-test-admin 开）" end' <<< "$body" 2> /dev/null)"
   detail "还没填的：$(missing_list)"
   detail "备份：$(cat "$TOPUP_DIR/state/last-backup.json" 2> /dev/null || echo 还没有)    恢复演练：$(cat "$TOPUP_DIR/state/last-drill.json" 2> /dev/null || echo 还没有)"
   [ -f "$LE_DIR/live/$CERT_NAME/fullchain.pem" ] && detail "证书到期：$(openssl x509 -enddate -noout -in "$LE_DIR/live/$CERT_NAME/fullchain.pem" | cut -d= -f2)"
@@ -694,6 +699,7 @@ cmd_keys() {
   say "普通设置（sudo topup set 变量名 值）："
   for k in $PLAIN_KEYS; do detail "$(printf '%-24s' "$k") $(key_value "$k")"; done
   detail "BACKUP_AGE_RECIPIENT     $([ -n "$(dval BACKUP_AGE_RECIPIENT)" ] && echo 已生成 || echo '未生成（只有打开异地备份才要：sudo topup backup-key）')"
+  detail "TEST_ADMIN_TOKEN_SHA256  $([ -n "$(envval TEST_ADMIN_TOKEN_SHA256)" ] && echo '已生成（测试管理员开着；sudo topup test-admin-off 关）' || echo '未生成（只在测试环境用：sudo topup gen-test-admin）')"
 }
 key_file() { case "$DEPLOY_KEYS" in *" $1 "*) echo "$TOPUP_DIR/deploy.env" ;; *) echo "$TOPUP_DIR/.env" ;; esac; }
 key_value() { envval "$1" "$(key_file "$1")"; }
@@ -713,6 +719,7 @@ apply_env() {
     ETH_RPC_URL | BSC_RPC_URL) detail "钱包：$(jq -c '[.wallet.chains[]? | {chain, rpc: .rpcConfigured}]' <<< "$body" 2> /dev/null)" ;;
     SWEEP_OPERATOR_KEY) detail "发起账户（ETH、BSC）：$(jq -r '.wallet.operator' <<< "$body")" ;;
     SWEEP_OPERATOR_KEY_TRON) detail "发起账户（TRON）：$(jq -r '.wallet.operator_tron' <<< "$body")" ;;
+    TEST_ADMIN_TOKEN_SHA256) detail "测试管理员：$(jq -r 'if .test_admin == true then "开着" else "关着" end' <<< "$body")" ;;
   esac
 }
 
@@ -832,6 +839,52 @@ cmd_gen_operator() {
   [ "$changed" = 0 ] || apply_env SWEEP_OPERATOR_KEY
 }
 
+# ---------- gen-test-admin / test-admin-off：测试环境的测试管理员（server/pay/test-admin.js）----------
+# 令牌在服务器上随机生成（tta_ + 64 位十六进制），.env 里只写它的 SHA-256（TEST_ADMIN_TOKEN_SHA256）；令牌原文只显示在终端上一次、不进日志。
+# 管理员把它填进 GitHub 环境 staging-e2e 的密钥 STAGING_TEST_ADMIN_TOKEN。再运行一次就换新令牌（旧的立刻作废）。
+# 只用于测试环境（TOPUP_ENV=staging）；生产的应用看到这个变量会拒绝启动。
+env_del() {
+  local key=$1 file=$2 tmp
+  tmp=$(mktemp "$file.XXXXXX")
+  chmod 600 "$tmp"
+  KEY="$key" awk 'index($0, ENVIRON["KEY"] "=") != 1' "$file" > "$tmp" && mv "$tmp" "$file"
+  chmod 600 "$file"
+}
+cmd_gen_test_admin() {
+  start_log gen-test-admin
+  [ -s "$TOPUP_DIR/state/image.env" ] || die "还没有部署过" "先粘贴第一次部署的那条命令"
+  [ "$(dval TOPUP_ENV)" = staging ] || die "只用于测试环境；生产不能有测试管理员（什么都没有改）"
+  [ -n "$DRILL" ] || [ -w /dev/tty ] || die "这里不能显示令牌（没有终端）" "在云控制台的'远程连接'终端里运行，不要用控制台的 AI 助手"
+  local tok hash
+  tok="tta_$(rand 32)"
+  hash=$(printf '%s' "$tok" | sha256sum | cut -d' ' -f1)
+  printf '%s' "$hash" | grep -Eq '^[0-9a-f]{64}$' || die "生成失败" "截图发运维"
+  VAL="$hash" env_write TEST_ADMIN_TOKEN_SHA256 "$TOPUP_DIR/.env"
+  unset hash
+  ok "已生成新的测试令牌（服务器只存它的哈希；以前的令牌已作废）"
+  apply_env TEST_ADMIN_TOKEN_SHA256
+  note "生成了一次测试令牌（值不记日志）"
+  if [ -n "$DRILL" ]; then echo "$tok"; unset tok; return 0; fi
+  {
+    echo
+    echo "测试令牌（只显示这一次；整行复制，不要带空格和换行）："
+    echo "$tok"
+    echo
+    echo "填到：GitHub 仓库 → Settings → Environments → staging-e2e → Environment secrets → STAGING_TEST_ADMIN_TOKEN。"
+    echo "填好后清屏（clear），不要截图、不要发给任何对话框。丢了就再运行一次 sudo topup gen-test-admin（换新令牌）。"
+  } > /dev/tty
+  unset tok
+}
+cmd_test_admin_off() {
+  start_log test-admin-off
+  [ -f "$TOPUP_DIR/.env" ] || die "还没有部署过" "先粘贴第一次部署的那条命令"
+  [ -n "$(envval TEST_ADMIN_TOKEN_SHA256)" ] || { ok "测试管理员本来就是关着的，没有改"; return 0; }
+  env_del TEST_ADMIN_TOKEN_SHA256 "$TOPUP_DIR/.env"
+  ok "已删掉 TEST_ADMIN_TOKEN_SHA256（测试令牌作废）"
+  apply_env TEST_ADMIN_TOKEN_SHA256
+  detail "GitHub 环境 staging-e2e 里的 STAGING_TEST_ADMIN_TOKEN 也可以删掉（不删也用不了）"
+}
+
 # ---------- stop / start（停：定时器 → 应用 → 备份 → 数据库）----------
 cmd_stop() {
   start_log stop
@@ -894,6 +947,8 @@ case "$cmd" in
   test-mail) cmd_test_mail ;;
   gen-operator) cmd_gen_operator ;;
   admin-token) cmd_admin_token ;;
+  gen-test-admin) cmd_gen_test_admin ;;
+  test-admin-off) cmd_test_admin_off ;;
   stop) cmd_stop ;;
   start) cmd_start ;;
   help | -h | --help) usage ;;

@@ -1,0 +1,16 @@
+---
+// 服务条款：先留位置（标题 + "内容待补充"），正文由产品定稿后补
+import AppLayout from '../../layouts/AppLayout.astro';
+import { langStaticPaths, href, t, type Lang } from '../../lib/i18n';
+export const getStaticPaths = langStaticPaths;
+const { lang } = Astro.props as { lang: Lang };
+const d = t(lang);
+const p = d.pages.terms;
+const other: Lang = lang === 'en' ? 'zh' : 'en';
+---
+<AppLayout lang={lang} title={p.title} description={p.description} switchHref={href(other, 'terms')} switchLabel={d.nav.switchLabel} switchAria={d.nav.switchAria}>
+  <section class="container nf" data-legal="terms">
+    <h1>{p.heading}</h1>
+    <p class="muted">{p.body}</p>
+  </section>
+</AppLayout>
