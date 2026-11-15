@@ -101,7 +101,7 @@ export async function notifyWithdrawals(db, notify, adminUrl) {
   return rows.length;
 }
 
-export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetchImpl, resolve, confirmSweeps, scanEvm, confirmPayouts, now = () => Date.now() }) {
+export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetchImpl, resolve, confirmSweeps, scanEvm, confirmPayouts, operatorGas, now = () => Date.now() }) {
   const t0 = Date.now();
   const out = {};
   const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = { error: e.message }; console.error(`[tick] ${name}: ${e.message}`); } };
@@ -119,6 +119,8 @@ export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetc
       else await clearAlert(db, 'sweep_step', notify, '归集已恢复', 'worker 的归集步骤已恢复正常。');
     } catch (e) { console.error(`[tick] sweep alert: ${e.message}`); }
   }
+  // 归集发起账户的手续费币（每 10 分钟查一次，只够约 3 批时发提醒，状态变了才发；server/wallet/operator-gas.js）
+  if (operatorGas) await step('operator_gas', () => operatorGas());
   await step('callbacks', () => deliverDue(db, { getTarget, fetchImpl, resolve }));
   await step('mail', () => notifyWithdrawals(db, notify, adminUrl));
   out.ms = Date.now() - t0;

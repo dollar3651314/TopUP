@@ -32,7 +32,8 @@ if (h?.env !== 'staging') fail(`健康检查的 env 不是 staging（${h?.env ??
 if (h?.test_admin !== true) fail('测试环境的测试管理员没开：服务器上运行 sudo topup gen-test-admin，把显示的令牌填进 GitHub 环境 staging-e2e');
 console.log(`✓ 测试环境（提交 ${h.commit || '未知'}），测试管理员已开；跑 ${files.length} 个文件`);
 
-const PASS = ['PATH', 'HOME', 'TMPDIR', 'STAGING_URL', 'STAGING_TEST_ADMIN_TOKEN', 'STAGING_E2E_MERCHANT_KEY', 'STAGING_E2E_MERCHANT_SECRET'];
+// GITHUB_RUN_ID、GITHUB_RUN_ATTEMPT 是运行号（不是密钥）：lib.mjs 拿它给 Idempotency-Key 和造的数据打标记
+const PASS = ['PATH', 'HOME', 'TMPDIR', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'STAGING_URL', 'STAGING_TEST_ADMIN_TOKEN', 'STAGING_E2E_MERCHANT_KEY', 'STAGING_E2E_MERCHANT_SECRET'];
 const env = Object.fromEntries(PASS.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]));
 const r = spawnSync(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=spec', ...files], { stdio: 'inherit', env });
 process.exit(r.status ?? 1);

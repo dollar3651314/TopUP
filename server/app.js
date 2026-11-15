@@ -11,7 +11,7 @@ import { deriveKeys } from './kyb/crypto.js';
 import { createRepo } from './kyb/repo.js';
 import { createLocalBlobs } from './kyb/blobs.js';
 import { createOnboardingHandler } from './kyb/onboarding.js';
-import { createAdminHandler, createCleanup } from './kyb/admin.js';
+import { createAdminHandler } from './kyb/admin.js';
 import { createPayDeps } from './pay/deps.js';
 import { approvedFromKyb, pendingKybCount } from './pay/kyb-link.js';
 import { refuseTestAdmin } from './pay/test-admin.js';
@@ -56,7 +56,7 @@ export function withLocalDefaults(config) {
 }
 
 /**
- * 组装全部依赖。返回 { config, redis, kyb: { onboarding, admin, cleanup }, pay: Promise<payDeps>, close() }。
+ * 组装全部依赖。返回 { config, redis, kyb: { onboarding, admin }, pay: Promise<payDeps>, close() }。
  * 配置不全时抛出错误（err.missing 是缺少的变量名）。
  */
 export async function createApp(rawConfig, { getIp = () => '' } = {}) {
@@ -75,7 +75,6 @@ export async function createApp(rawConfig, { getIp = () => '' } = {}) {
   const kyb = {
     onboarding: createOnboardingHandler({ repo, blobs, send, config, getIp }),
     admin: createAdminHandler({ repo, blobs, send, redis, keys, config }),
-    cleanup: createCleanup({ repo, blobs }),
   };
   const pay = createPayDeps({
     config, kyb: { redis, keys, listApproved: approvedFromKyb(repo), pendingKyb: pendingKybCount(repo) }, send, getIp, origin: config.publicUrl,

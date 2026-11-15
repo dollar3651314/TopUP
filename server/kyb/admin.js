@@ -25,7 +25,7 @@ export function createAdminHandler({ repo, blobs, send, redis, keys, config, now
     if (paths.length && blobs) await blobs.del(paths);
     await repo.remove(app);
   }
-  const summary = (a) => ({ id: a.id, ref: a.ref, company: a.company, status: repo.effectiveStatus(a), updatedAt: a.updatedAt, createdAt: a.createdAt, submittedAt: a.submittedAt, expiresAt: a.expiresAt, retentionUntil: a.retentionUntil, fileCount: a.fileCount, flags: a.flags || {} });
+  const summary = (a) => ({ id: a.id, ref: a.ref, company: a.company, status: repo.effectiveStatus(a), updatedAt: a.updatedAt, createdAt: a.createdAt, submittedAt: a.submittedAt, expiresAt: a.expiresAt, retentionUntil: null, fileCount: a.fileCount, flags: a.flags || {} });
   const need = async (request) => {
     const admin = await getAdmin();
     if (!admin || !readSession(keys.session, request.headers.get('cookie'), admin.version, now())) throw Object.assign(new Error('unauthorized'), { status: 401 });
@@ -177,7 +177,7 @@ export function createAdminHandler({ repo, blobs, send, redis, keys, config, now
       }
       await repo.seal(a, p);
       await repo.audit(a.id, 'admin', 'notes_updated');
-      return json(200, { ok: true, retentionUntil: a.retentionUntil });
+      return json(200, { ok: true, retentionUntil: null });
     },
     async delete(request) {
       const { id, confirmRef } = await readJson(request);
@@ -212,22 +212,4 @@ export function createAdminHandler({ repo, blobs, send, redis, keys, config, now
   // 接口入口文件（api/<分组>/<动作>.js）按这个列表逐个生成，测试会检查两边一致
   handle.actions = [...Object.keys(open), ...Object.keys(secured)];
   return handle;
-}
-
-/** 每日清理：删除超过保留期限的申请及其文件 */
-export function createCleanup({ repo, blobs, now = () => Date.now(), log = console }) {
-  return async function cleanup() {
-    let deleted = 0;
-    for (const a of await repo.list()) {
-      if (a.retentionUntil && Date.parse(a.retentionUntil) <= now()) {
-        const p = repo.open(a);
-        const paths = [...p.files.map((f) => f.pathname), ...(p.signature?.pathname ? [p.signature.pathname] : [])];
-        if (paths.length) await blobs.del(paths);
-        await repo.remove(a);
-        deleted++;
-        log.warn?.(`[kyb] retention cleanup deleted ${a.ref}`);
-      }
-    }
-    return { deleted };
-  };
 }

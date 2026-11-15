@@ -10,7 +10,9 @@
     "switchAria": "Switch to English"
   },
   "footer": {
-    "notMainland": "TopUP 不向中国大陆居民或机构提供服务。"
+    "notMainland": "TopUP 不向中国大陆居民或机构提供服务。",
+    "terms": "服务条款",
+    "privacy": "隐私政策"
   },
   "pages": {
     "home": {
@@ -25,6 +27,18 @@
       "heading": "页面不存在",
       "body": "您访问的页面可能已被移动。",
       "back": "返回首页"
+    },
+    "terms": {
+      "title": "服务条款 - TopUP",
+      "description": "TopUP 服务条款。",
+      "heading": "服务条款",
+      "body": "内容待补充。"
+    },
+    "privacy": {
+      "title": "隐私政策 - TopUP",
+      "description": "TopUP 隐私政策。",
+      "heading": "隐私政策",
+      "body": "内容待补充。"
     }
   }
 }

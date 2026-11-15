@@ -10,21 +10,13 @@ import {
 } from './sweep.js';
 import { walletChainStatus } from './status.js';
 import { RENT_MAX_PRICE_SUN } from './energy.js';
+import { operatorGasStatus, native, NATIVE, LOW_GAS_BATCHES } from './operator-gas.js';
 
 const TRON_TYPICAL_BATCH_ENERGY = 1_300_000; // 一批 20 个地址的典型能量（推断值，Nile 实测后再调），只用来判断预存余额够不够一批
 
 const usdt = (u) => fmtUsdt(Number(u)).replace(/,/g, '');
-/** 原生币最小单位 → 小数字符串：ETH、BNB 18 位（wei），TRX 6 位（sun） */
-const NATIVE_DECIMALS = { eth: 18, bsc: 18, tron: 6 };
-export const native = (wei, chain = 'eth') => {
-  if (wei === null || wei === undefined || wei === '') return null;
-  const w = BigInt(wei), d = NATIVE_DECIMALS[chain] ?? 18, u = 10n ** BigInt(d);
-  const int = w / u, frac = (w % u).toString().padStart(d, '0').slice(0, 6).replace(/0+$/, '');
-  return `${int}${frac ? '.' + frac : ''}`;
-};
-const NATIVE = { eth: 'ETH', bsc: 'BNB', tron: 'TRX' };
-/** 发起账户的手续费币少于够付几批典型归集时告警 */
-export const LOW_GAS_BATCHES = 3;
+/** 发起账户的手续费币少于够付几批典型归集时告警（定义在 operator-gas.js，这里照旧导出） */
+export { native, LOW_GAS_BATCHES };
 
 function batchOut(b, extra = {}) {
   return {
@@ -74,25 +66,13 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
   const providers = () => need().providers;
   const enabled = () => (layer ? layer.enabledChains : []);
 
-  /** 发起账户的手续费币：余额、按一批典型的归集（10 个地址、一半首次）估够几批；不够 3 批或不够付待确认批次时 low = true */
+  /** 发起账户的手续费币：余额、按一批典型的归集（10 个地址、一半首次）估够几批；判断和 worker 的提醒邮件共用（operator-gas.js） */
   async function operatorGas(chain) {
-    const configured = chain === 'tron' ? Boolean(layer?.tronOperatorConfigured) : Boolean(layer?.operatorConfigured);
-    const out = { configured, gas: null, symbol: NATIVE[chain], batches_left: null, low: false };
-    if (!enabled().includes(chain) || !configured) return out;
-    const p = providers().contract;
-    out.address = (chain === 'tron' ? p.tronOperator : p.operator) || null; // 发起账户的公开地址（补手续费时要复制它；不是密钥）
-    try {
-      const wei = await p.operatorGas(chain);
-      out.gas = native(wei, chain);
-      if (wei !== null && wei !== undefined) {
-        const f = await p.estimateFee(chain, 'sweep', 10, { deploy: 5 }).catch(() => null);
-        if (f?.native) out.batches_left = Number(BigInt(wei) / BigInt(f.native));
-        const [w] = await db.query(`select coalesce(max((fee_estimate->>'native')::numeric), 0)::text need from wallet_sweep_batches where chain = $1 and status = 'awaiting_approval'`, [chain]);
-        const needWei = BigInt(String(w?.need || '0').split('.')[0] || '0');
-        // 余额为 0 一定标 low（估不出手续费、节点报的 gas 价为 0 时也照样提醒；这是真问题，归集发不出去）
-        out.low = BigInt(wei) === 0n || (out.batches_left !== null && out.batches_left < LOW_GAS_BATCHES) || (needWei > 0n && BigInt(wei) < needWei);
-      }
-    } catch { out.gas = null; out.error = 'rpc'; }
+    const s = await operatorGasStatus({ db, layer, chain });
+    const out = { configured: s.configured, gas: null, symbol: NATIVE[chain], batches_left: null, low: false };
+    if (!s.enabled || !s.configured) return out;
+    out.address = s.address; // 发起账户的公开地址（补手续费时要复制它；不是密钥）
+    if (s.error) { out.error = s.error; } else { out.gas = native(s.wei, chain); out.batches_left = s.batches_left; out.low = s.low; }
     // 第 2 批 TRON：发起账户现有能量、租能量平台的预存余额（没配平台为 null）
     if (chain === 'tron') {
       const a = layer?.adapters?.tron;
