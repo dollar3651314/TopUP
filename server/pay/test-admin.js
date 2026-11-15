@@ -6,6 +6,10 @@
 //     确认作废、开通商户（会给任意邮箱发信）都不在里面。要动态码的动作（改打款上限）对测试管理员免动态码。
 //   - 审计：业务动作的 actor 记成 test-admin；另外每个 POST 再记一条 test_admin.request（动作名、成功或错误码）。
 //   - 生产（APP_ENV=production）配了 TEST_ADMIN_TOKEN_SHA256：web、worker 拒绝启动（server/app.js 的 refuseConfig）；本地忽略。
+//   - 只在测试网开：APP_ENV=staging 且 TRON_NETWORK=nile；配了以太坊 / BSC 节点的，节点的链 ID 不能是主网（1、56），查不到时这次不认（server/pay/deps.js）。
+//   - 开户和商户资料：商户列表（merchants，含联系人邮箱和待开通的开户申请）、客户列表和客户详情（customers、customer，含客户姓名）不在白名单；
+//     其余返回里的商户名（merchant）、名称（name，链名除外）、邮箱（email）、公司名（company）一律打码成"首字 + ***"（maskForTestAdmin）。
+//   - 改东西的动作只收 POST（GET 调改东西的动作 405）。
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
@@ -15,8 +19,8 @@ export const TEST_ADMIN_ENV = 'TEST_ADMIN_TOKEN_SHA256';
 
 /** 测试管理员能调用的运营后台动作（/api/wallet/?a=…）。只读的和"到待签名为止"的操作；签名、钱包设置不在里面 */
 export const TEST_ADMIN_ACTIONS = Object.freeze(new Set([
-  // 只读
-  'status', 'merchants', 'customers', 'customer', 'withdrawals', 'batches', 'anomalies', 'recon', 'overview', 'overview-chain', 'wallet',
+  // 只读（merchants、customers、customer 不给：里面是开户联系人邮箱、开户申请、客户姓名）
+  'status', 'withdrawals', 'batches', 'anomalies', 'recon', 'overview', 'overview-chain', 'wallet',
   'sweep-list', 'payout-overview', 'payout-plans', 'payout-tx-batch', 'payout-limits', 'payout-wallets',
   'wallet-chains', 'wallet-sweep', 'wallet-sweep-addresses', 'wallet-sweep-batches', 'wallet-sweep-batch', 'wallet-sweep-settings', 'wallet-routes',
   // 打款：审核、驳回、挂起解除、凑批到"待签名"、作废没签名的批次、改上限（测试币）
@@ -28,13 +32,54 @@ export const TEST_ADMIN_ACTIONS = Object.freeze(new Set([
   'recon-run', 'anomaly-handle',
 ]));
 
+/** 白名单里改东西的动作：只收 POST */
+export const TEST_ADMIN_WRITES = Object.freeze(new Set([
+  'payout-approve', 'payout-review', 'payout-reject-approved', 'withdraw-reject', 'payout-unhold', 'payout-plan', 'payout-resume', 'payout-void',
+  'withdraw-plan', 'payout-limits-save', 'wallet-sweep-propose', 'wallet-sweep-approve', 'wallet-sweep-cancel', 'sweep-plan', 'recon-run', 'anomaly-handle',
+]));
+
 const HEX64 = /^[0-9a-f]{64}$/;
+const MASK_KEYS = new Set(['merchant', 'email', 'company', 'name']);
+const mask = (v) => (typeof v === 'string' && v ? `${[...v][0]}***` : v);
+/** 测试管理员拿到的返回：商户名、名称（链名除外）、邮箱、公司名打码；别的字段原样 */
+export function maskForTestAdmin(x) {
+  if (Array.isArray(x)) return x.map(maskForTestAdmin);
+  if (!x || typeof x !== 'object') return x;
+  const out = {};
+  for (const [k, v] of Object.entries(x)) {
+    if (MASK_KEYS.has(k) && typeof v === 'string' && !(k === 'name' && (v === x.chain || ['eth', 'bsc', 'tron'].includes(v)))) out[k] = mask(v);
+    else out[k] = maskForTestAdmin(v);
+  }
+  return out;
+}
 const sha256 = (s) => createHash('sha256').update(String(s)).digest();
 
 /** 这个环境的测试管理员是否开着：只有测试环境、配了 64 位十六进制的哈希才开 */
 export function testAdminHash(config) {
   const h = String(config?.testAdminTokenSha256 || '').toLowerCase();
-  return config?.appEnv === 'staging' && HEX64.test(h) ? h : '';
+  return config?.appEnv === 'staging' && config?.tronNetwork === 'nile' && HEX64.test(h) ? h : '';
+}
+
+/** 以太坊、BSC 主网的链 ID：配的节点是这两个时不认测试管理员 */
+export const MAINNET_CHAIN_IDS = Object.freeze([1, 56]);
+/**
+ * 核对配了的以太坊 / BSC 节点都不是主网（chainId 不是 1、56）。都核对过返回 true；是主网返回 false 并记住；
+ * 节点查不到返回 false（这次不认），下次再查。adapters：{ eth?, bsc? }，每个有 chainId()
+ */
+export function createTestnetCheck(adapters = {}) {
+  let result = null;
+  return async () => {
+    if (result !== null) return result;
+    for (const a of Object.values(adapters)) {
+      if (!a || typeof a.chainId !== 'function') continue;
+      let id;
+      try { id = Number(await a.chainId()); } catch { return false; }
+      if (!Number.isFinite(id)) return false;
+      if (MAINNET_CHAIN_IDS.includes(id)) { result = false; console.error('[test-admin] EVM node is mainnet, test admin disabled'); return false; }
+    }
+    result = true;
+    return true;
+  };
 }
 
 /** 生产配了测试管理员变量：返回拒绝启动的说明（只有变量名，没有值）；否则 null */

@@ -1,6 +1,9 @@
 // 测试环境验收用例（e2e/staging-e2e/）共用的小工具：只用 Node 自带的 fetch，不需要 npm 安装。
 //   - 地址、令牌只从环境变量来（STAGING_URL、STAGING_TEST_ADMIN_TOKEN，GitHub 环境 staging-e2e 的密钥），不写在用例里
-//   - 这里的函数不打印、不返回请求头；出错信息只有动作名、HTTP 状态和接口返回的错误码，不含地址和令牌
+//   - 令牌、商户 Secret 在这个文件加载时读进来，随即从 process.env 删掉，用例拿不到变量本身，只能用下面的请求函数
+//     （这挡不住故意作恶的用例代码：同一个进程里总有办法读到；真正的防线是 GitHub 环境的 Required reviewers 和定期换令牌）
+//   - 这里的函数不打印、不返回请求头；出错信息只有动作名、HTTP 状态和接口返回的错误码（error.code），不含响应内容、地址和令牌：
+//     仓库是公开的，运行日志谁都能看。用例里的断言也要带说明文字（assert.equal(a, b, '说明')），不要 console.log 接口返回
 //   - 用测试管理员调用运营后台接口：admin('payout-limits')、admin('payout-approve', { body: { ids: [...] } })
 //     要动态码的动作（改上限）照样传 code 字段（随便填，例如 '000000'），服务器对测试管理员免核对
 //   - 测试商户的开放 API（可选，造打款单用）：merchant('POST', 'payouts/', body)；要 GitHub 环境里另有
@@ -10,6 +13,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto';
 
 export const BASE = String(process.env.STAGING_URL || '').replace(/\/+$/, '');
 const TOKEN = String(process.env.STAGING_TEST_ADMIN_TOKEN || '').trim();
+delete process.env.STAGING_TEST_ADMIN_TOKEN;
 const HEADER = 'x-topup-test-admin';
 
 if (!BASE || !TOKEN) throw new Error('需要环境变量 STAGING_URL 和 STAGING_TEST_ADMIN_TOKEN（GitHub 环境 staging-e2e 的密钥）');
@@ -30,7 +34,7 @@ async function req(path, { method = 'GET', body, headers = {}, token = TOKEN, ra
   const text = await res.text();
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch { json = null; }
-  return { status: res.status, body: json, text: json ? '' : text.slice(0, 200) };
+  return { status: res.status, body: json };
 }
 
 /**
@@ -42,23 +46,26 @@ export function admin(action, { body, query = {}, token } = {}) {
   return req(`/api/wallet/?${qs}`, { method: body === undefined ? 'GET' : 'POST', body, token });
 }
 
-/** 不带令牌（或带指定的令牌）请求任意接口：req('/api/health/') */
-export const raw = (path, opts = {}) => req(path, { token: '', ...opts });
+/** 请求任意接口，默认不带令牌：raw('/api/health/')；withToken: true 时带测试管理员的令牌（例如核对开户后台不认它） */
+export const raw = (path, { withToken = false, ...opts } = {}) => req(path, { ...opts, token: withToken ? TOKEN : '' });
+
+/** 失败说明只给 HTTP 状态和错误码（不带响应内容） */
+const why = (r) => `HTTP ${r.status}${r.body?.error?.code ? ` ${r.body.error.code}` : ''}`;
 
 /** 断言 200 并返回 body；不是 200 时报出动作名、状态和错误码 */
 export function ok(r, what = '') {
-  assert.equal(r.status, 200, `${what} 返回 ${r.status}：${JSON.stringify(r.body?.error || r.body || r.text)}`);
+  if (r.status !== 200) assert.fail(`${what} 返回 ${why(r)}`);
   return r.body;
 }
 
 /** 断言是某个错误：expectError(r, 403, 'test_admin_forbidden') */
 export function expectError(r, status, code, what = '') {
-  assert.equal(r.status, status, `${what} 期望 ${status}，实际 ${r.status}：${JSON.stringify(r.body?.error || r.body || r.text)}`);
-  if (code) assert.equal(r.body?.error?.code, code, `${what} 错误码`);
+  if (r.status !== status || (code && r.body?.error?.code !== code)) assert.fail(`${what} 期望 HTTP ${status}${code ? ` ${code}` : ''}，实际 ${why(r)}`);
 }
 
 const MKEY = String(process.env.STAGING_E2E_MERCHANT_KEY || '').trim();
 const MSECRET = String(process.env.STAGING_E2E_MERCHANT_SECRET || '').trim();
+delete process.env.STAGING_E2E_MERCHANT_SECRET;
 /** 配了测试商户的 API Key 才能用 merchant()；用例里没有时 test(..., { skip: !hasMerchant && '没有测试商户的 API Key' }) */
 export const hasMerchant = Boolean(MKEY && MSECRET);
 

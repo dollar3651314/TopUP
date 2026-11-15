@@ -17,7 +17,7 @@ import { walletAdminActions } from '../wallet/admin-actions.js';
 import { evmUnswept } from '../wallet/addresses.js';
 import { getSweepSettings } from '../wallet/sweep.js';
 import { payoutAdminActions } from './payout-admin.js';
-import { TEST_ADMIN_ACTIONS, TEST_ADMIN_ACTOR, asTestAdmin } from './test-admin.js';
+import { TEST_ADMIN_ACTIONS, TEST_ADMIN_WRITES, TEST_ADMIN_ACTOR, asTestAdmin, maskForTestAdmin } from './test-admin.js';
 import { createPayoutTxBatch, expirePayoutBatch, getPayoutLimits, planPayoutBatches, MAX_ITEMS_PER_REQUEST } from './payout.js';
 
 const TRX = 1_000_000;
@@ -456,16 +456,18 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
    * 每个 POST 另记一条审计 test_admin.request（动作名、成功或错误码；不记请求内容）
    */
   async function asTestAdminCall(a, b, q, isPost) {
+    const note = (result) => audit(db, TEST_ADMIN_ACTOR, 'test_admin.request', a, { result }).catch(() => {});
     if (!TEST_ADMIN_ACTIONS.has(a)) {
-      if (isPost) await audit(db, TEST_ADMIN_ACTOR, 'test_admin.request', a, { result: 'forbidden' }).catch(() => {});
+      if (isPost) await note('forbidden');
       return json(403, { error: { code: 'test_admin_forbidden' } });
     }
+    if (TEST_ADMIN_WRITES.has(a) && !isPost) return json(405, { error: { code: 'method_not_allowed' } });
     try {
       const out = await asTestAdmin(() => actions[a](b, TEST_ADMIN_ACTOR, q));
-      if (isPost) await audit(db, TEST_ADMIN_ACTOR, 'test_admin.request', a, { result: 'ok' });
-      return json(200, money(out));
+      if (isPost) await note('ok');
+      return json(200, maskForTestAdmin(money(out)));
     } catch (e) {
-      if (isPost) await audit(db, TEST_ADMIN_ACTOR, 'test_admin.request', a, { result: String(e?.code || 'error').slice(0, 60) }).catch(() => {});
+      if (isPost) await note(String(e?.code || 'error').slice(0, 60));
       throw e;
     }
   }

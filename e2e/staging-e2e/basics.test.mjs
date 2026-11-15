@@ -7,15 +7,25 @@ import { admin, raw, ok, expectError } from './lib.mjs';
 
 test('连的是测试环境，测试管理员开着', async () => {
   const h = (await raw('/api/health/')).body;
-  assert.equal(h?.env, 'staging', '不是测试环境：停止');
-  assert.equal(h?.test_admin, true, '测试管理员没开（服务器上 sudo topup gen-test-admin）');
+  assert.ok(h?.env === 'staging', '不是测试环境：停止');
+  assert.ok(h?.test_admin === true, '测试管理员没开（服务器上 sudo topup gen-test-admin）');
+});
+
+test('改东西的动作用 GET 调：405', async () => {
+  expectError(await admin('payout-approve'), 405, 'method_not_allowed', 'GET payout-approve');
+});
+
+test('商户列表、客户列表不给：403；打款审核页里的商户名打码', async () => {
+  for (const a of ['merchants', 'customers', 'customer']) expectError(await admin(a), 403, 'test_admin_forbidden', a);
+  const o = ok(await admin('payout-overview'), 'payout-overview');
+  for (const x of [...(o.singles || []), ...(o.approved || [])]) assert.ok(!x.merchant || /^.\*\*\*$/u.test(x.merchant), '商户名已打码');
 });
 
 test('令牌对：能读打款上限、每条链的状态、归集设置', async () => {
   const limits = ok(await admin('payout-limits'), 'payout-limits');
-  assert.ok(limits.perItem && limits.perDay);
+  assert.ok(limits.perItem && limits.perDay, '有单笔、每天上限');
   const chains = ok(await admin('wallet-chains'), 'wallet-chains');
-  assert.ok(Array.isArray(chains.chains));
+  assert.ok(Array.isArray(chains.chains), '有每条链的卡片');
   ok(await admin('wallet-sweep-settings'), 'wallet-sweep-settings');
 });
 
@@ -31,12 +41,11 @@ test('签名、交签名、改授权额度、改钱包设置、确认作废、�
 });
 
 test('开户审核后台不认测试令牌：401', async () => {
-  const r = await raw('/api/kyb/?g=admin&a=apps', { headers: { 'x-topup-test-admin': process.env.STAGING_TEST_ADMIN_TOKEN } });
-  assert.equal(r.status, 401);
+  expectError(await raw('/api/kyb/?g=admin&a=apps', { withToken: true }), 401, '', '开户后台');
 });
 
 test('改打款上限免动态码：现在的值原样写回，返回的值不变', async () => {
   const before = ok(await admin('payout-limits'), 'payout-limits');
   const after = ok(await admin('payout-limits-save', { body: { values: before, reason: 'staging-e2e 自检：原值写回', code: '000000' } }), 'payout-limits-save');
-  assert.deepEqual(after, before);
+  assert.ok(Object.keys(before).every((k) => after[k] === before[k]), '写回后的值和原来一样');
 });

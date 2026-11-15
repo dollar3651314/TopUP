@@ -19,7 +19,7 @@ import { createMemRedis } from '../server/kyb/memredis.js';
 import { loadConfig } from '../server/config.js';
 import { refuseConfig, createApp } from '../server/app.js';
 import { createWeb } from '../server/web.js';
-import { testAdminHash, refuseTestAdmin, TEST_ADMIN_ACTIONS, TEST_ADMIN_HEADER, isTestAdmin } from '../server/pay/test-admin.js';
+import { testAdminHash, refuseTestAdmin, TEST_ADMIN_ACTIONS, TEST_ADMIN_WRITES, TEST_ADMIN_HEADER, isTestAdmin, maskForTestAdmin, createTestnetCheck } from '../server/pay/test-admin.js';
 
 const TOKEN = randomBytes(32).toString('hex');
 const HASH = createHash('sha256').update(TOKEN).digest('hex');
@@ -28,12 +28,14 @@ const SECRET = 'test-app-secret-test-app-secret-0123456789';
 // ---------- 一、开关 ----------
 
 test('一、只有 staging + 64 位十六进制哈希才开；生产、本地、格式不对都不开', () => {
-  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging', TEST_ADMIN_TOKEN_SHA256: HASH })), HASH);
-  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging', TEST_ADMIN_TOKEN_SHA256: ` ${HASH.toUpperCase()}\n` })), HASH, '复制时带的空白、大写都认');
+  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging', TRON_NETWORK: 'nile', TEST_ADMIN_TOKEN_SHA256: HASH })), HASH);
+  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging', TRON_NETWORK: 'nile', TEST_ADMIN_TOKEN_SHA256: ` ${HASH.toUpperCase()}\n` })), HASH, '复制时带的空白、大写都认');
   assert.equal(testAdminHash(loadConfig({ APP_ENV: 'production', TEST_ADMIN_TOKEN_SHA256: HASH })), '');
   assert.equal(testAdminHash(loadConfig({ APP_ENV: 'local', TEST_ADMIN_TOKEN_SHA256: HASH })), '');
-  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging', TEST_ADMIN_TOKEN_SHA256: TOKEN.slice(0, 63) })), '');
-  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging' })), '');
+  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging', TRON_NETWORK: 'nile', TEST_ADMIN_TOKEN_SHA256: TOKEN.slice(0, 63) })), '');
+  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging', TEST_ADMIN_TOKEN_SHA256: HASH })), '', 'TRON 不是 Nile（默认主网）：不开');
+  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging', TRON_NETWORK: 'mainnet', TEST_ADMIN_TOKEN_SHA256: HASH })), '');
+  assert.equal(testAdminHash(loadConfig({ APP_ENV: 'staging', TRON_NETWORK: 'nile' })), '');
 });
 
 test('一、生产配了 TEST_ADMIN_TOKEN_SHA256：refuseConfig 拒绝（说明里只有变量名、没有值），createApp 也拒绝；测试环境、本地不拒绝', async () => {
@@ -49,9 +51,9 @@ test('一、生产配了 TEST_ADMIN_TOKEN_SHA256：refuseConfig 拒绝（说明�
 
 // ---------- 二～四、运营后台接口 ----------
 
-async function setup({ hash = HASH } = {}) {
+async function setup({ hash = HASH, testnetCheck = null } = {}) {
   const db = await createTestDb(); await migrate(db);
-  const gate = createAdminGate({ redis: createMemRedis(), kybKeys: deriveKeys(SECRET), testAdminHash: hash });
+  const gate = createAdminGate({ redis: createMemRedis(), kybKeys: deriveKeys(SECRET), testAdminHash: hash, testnetCheck });
   const api = createWalletApi({ db, tron: createFakeTron(), keys: derivePayKeys(SECRET), wallets: { hot: '', cold: '' }, ...gate });
   const call = async (a, { token = TOKEN, body, headers = {} } = {}) => {
     const h = { 'x-topup-csrf': '1', ...(token === null ? {} : { [TEST_ADMIN_HEADER]: token }), ...headers };
@@ -79,10 +81,11 @@ test('二、带对令牌：能读；带错令牌：401；这个环境没开（�
 test('三、白名单外的动作一律 403（签名、交签名、改授权额度、改钱包设置、确认作废、开通商户），并记一条审计', async () => {
   const { db, call, audits } = await setup();
   const forbidden = ['sign-verify', 'sign-submit', 'payout-submit', 'payout-void-confirmed', 'allowance-plan', 'allowance-submit',
-    'wallet-sweep-settings-save', 'wallet-route-set', 'merchant-open', 'merchant-save', 'merchant-reinvite'];
+    'wallet-sweep-settings-save', 'wallet-route-set', 'merchant-open', 'merchant-save', 'merchant-reinvite', 'merchants', 'customers', 'customer'];
   for (const a of forbidden) {
     assert.ok(!TEST_ADMIN_ACTIONS.has(a), `${a} 不在白名单里`);
     const r = await call(a, { body: { code: '000000', reason: 'x' } });
+    if (r.status !== 403) assert.fail(`${a}: ${r.status}`);
     assert.equal(r.status, 403, a);
     assert.equal(r.body.error.code, 'test_admin_forbidden');
   }
@@ -126,15 +129,46 @@ test('四、并发：测试管理员和没登录的请求同时进来，没登�
   await db.end?.();
 });
 
+test('三、改东西的动作只收 POST（GET 405）；白名单里的改动作都在 TEST_ADMIN_WRITES', async () => {
+  const { db, call } = await setup();
+  for (const a of TEST_ADMIN_WRITES) {
+    assert.ok(TEST_ADMIN_ACTIONS.has(a), a);
+    const r = await call(a);
+    assert.equal(r.status, 405, a);
+  }
+  await db.end?.();
+});
+
+test('三、打码：商户名、名称、邮箱、公司名首字 + ***；链名、地址、金额不动', () => {
+  const out = maskForTestAdmin({ items: [{ merchant: '某某科技有限公司', email: 'a@b.c', amount: '1.00', to: '0xabc' }], cards: [{ name: 'eth', chain: 'eth' }], top_merchants: [{ name: 'Acme', amount: 5 }], company: 'Zed' });
+  assert.deepEqual(out, { items: [{ merchant: '某***', email: 'a***', amount: '1.00', to: '0xabc' }], cards: [{ name: 'eth', chain: 'eth' }], top_merchants: [{ name: 'A***', amount: 5 }], company: 'Z***' });
+});
+
+test('三、节点核对：以太坊 / BSC 节点是主网（1、56）或查不到时不认测试管理员；测试网照常', async () => {
+  const t = (ids) => createTestnetCheck(Object.fromEntries(ids.map((id, i) => [`c${i}`, { chainId: async () => { if (id === 'down') throw new Error('down'); return id; } }])));
+  const err = console.error; console.error = () => {};
+  try {
+    assert.equal(await t([11155111])(), true);
+    assert.equal(await t([11155111, 97])(), true);
+    assert.equal(await t([1])(), false);
+    assert.equal(await t([11155111, 56])(), false);
+    assert.equal(await t(['down'])(), false);
+    assert.equal(await createTestnetCheck({})(), true, '没配以太坊 / BSC 节点：只看 TRON_NETWORK');
+  } finally { console.error = err; }
+  const { db, call } = await setup({ testnetCheck: t([1]) });
+  assert.equal((await call('payout-limits')).status, 401, '主网节点：令牌对也不认');
+  await db.end?.();
+});
+
 // ---------- 五、健康检查 ----------
 
 test('五、健康检查：测试环境有 test_admin（只给是否、没有哈希）；生产配了这个变量：起不来（503、没有 test_admin）', async () => {
-  const st = createWeb(loadConfig({ APP_ENV: 'staging', TEST_ADMIN_TOKEN_SHA256: HASH }));
+  const st = createWeb(loadConfig({ APP_ENV: 'staging', TRON_NETWORK: 'nile', TEST_ADMIN_TOKEN_SHA256: HASH }));
   st.app.catch(() => {});
   const h = await (await st.handle(new Request('http://x/api/health/'))).json();
   assert.equal(h.test_admin, true);
   assert.ok(!JSON.stringify(h).includes(HASH));
-  const st2 = createWeb(loadConfig({ APP_ENV: 'staging' }));
+  const st2 = createWeb(loadConfig({ APP_ENV: 'staging', TRON_NETWORK: 'nile' }));
   st2.app.catch(() => {});
   assert.equal((await (await st2.handle(new Request('http://x/api/health/'))).json()).test_admin, false);
   const pr = createWeb(loadConfig({ APP_ENV: 'production', TEST_ADMIN_TOKEN_SHA256: HASH }));

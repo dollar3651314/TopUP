@@ -1,13 +1,13 @@
 // 测试环境验收用例的工具（e2e/staging-e2e/run.mjs、lib.mjs、basics.test.mjs）在本机整套跑一遍：
 // 起一个 APP_ENV=staging 的 web（真实 Postgres、Redis，独立 schema），配上随机生成的测试令牌的哈希，用 run.mjs 跑 basics.test.mjs，
-// 要全部通过，输出和报告里不能有令牌；健康检查不是 staging 的地址，run.mjs 一个用例都不跑。
+// 要全部通过，输出里不能有令牌、不另存报告；用例进程只拿到白名单里的环境变量；健康检查不是 staging 的地址，run.mjs 一个用例都不跑。
 // 需要 TEST_DATABASE_URL、TEST_REDIS_URL（CI 的第二轮单元测试有）；没有时跳过。不连任何外部服务（TRON 节点指向本机关着的端口）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,7 +43,7 @@ function run(env, args = []) {
   });
 }
 
-test('run.mjs 对本机的测试环境跑 basics.test.mjs：全部通过，输出和报告里没有令牌', { skip, timeout: 120_000 }, async () => {
+test('run.mjs 对本机的测试环境跑 basics.test.mjs：全部通过，输出里没有令牌、不另存报告', { skip, timeout: 120_000 }, async () => {
   const token = `tta_${randomBytes(32).toString('hex')}`;
   const hash = createHash('sha256').update(token).digest('hex');
   const schema = `t_e2ekit_${Date.now().toString(36)}`;
@@ -63,9 +63,15 @@ test('run.mjs 对本机的测试环境跑 basics.test.mjs：全部通过，输�
     assert.equal(r.code, 0, r.out.replace(token, '<令牌>'));
     assert.match(r.out, /测试管理员已开/);
     assert.ok(!r.out.includes(token), '输出里没有令牌');
-    const report = join(ROOT, 'e2e/staging-e2e/.out/report.xml');
-    assert.ok(existsSync(report));
-    assert.ok(!readFileSync(report, 'utf8').includes(token), '报告里没有令牌');
+    assert.ok(!existsSync(join(ROOT, 'e2e/staging-e2e/.out')), '不另存报告');
+    // 用例进程：拿不到父进程的其他环境变量；加载 lib.mjs 后令牌已从环境里删掉（用例只能用请求函数）
+    const probe = join(ROOT, 'e2e/staging-e2e/zz-kit-env-probe.test.mjs');
+    writeFileSync(probe, "import test from 'node:test'; import assert from 'node:assert/strict'; import './lib.mjs';\n"
+      + "test('env', () => { assert.ok(process.env.OTHER_PARENT_VAR === undefined, 'other'); assert.ok(process.env.STAGING_TEST_ADMIN_TOKEN === undefined, 'token'); });\n");
+    try {
+      const pr = await run({ STAGING_URL: url, STAGING_TEST_ADMIN_TOKEN: token, OTHER_PARENT_VAR: 'x' }, ['e2e/staging-e2e/zz-kit-env-probe.test.mjs']);
+      assert.equal(pr.code, 0, pr.out.replace(token, '<令牌>'));
+    } finally { rmSync(probe, { force: true }); }
     // 令牌错：第一个用例之后照样跑，但 401 → 失败（退出码不是 0），输出里也没有令牌
     const bad = await run({ STAGING_URL: url, STAGING_TEST_ADMIN_TOKEN: 'tta_wrong' }, ['e2e/staging-e2e/basics.test.mjs']);
     assert.notEqual(bad.code, 0);

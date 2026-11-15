@@ -7,13 +7,17 @@ import { matchTestAdmin, isTestAdmin } from './test-admin.js';
 import { decryptJson } from '../kyb/crypto.js';
 import { totpStep } from '../kyb/totp.js';
 
-export function createAdminGate({ redis, kybKeys, testAdminHash = '', now = () => Date.now() }) {
+export function createAdminGate({ redis, kybKeys, testAdminHash = '', testnetCheck = null, now = () => Date.now() }) {
   const getAdmin = async () => { const raw = await redis.get('topup:admin'); return raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null; };
   return {
     /** 返回 { testAdmin }：管理员会话 → false；测试环境带对了测试令牌 → true。带了测试令牌请求头但不对（或这个环境没开）一律 401，不再看 Cookie */
     async requireAdmin(request) {
       const t = matchTestAdmin(request, testAdminHash);
-      if (t === true) return { testAdmin: true };
+      if (t === true) {
+        // 节点是主网或查不到：这次不认（testnetCheck 见 test-admin.js）
+        if (testnetCheck && !(await testnetCheck())) throw Object.assign(new Error('unauthorized'), { status: 401 });
+        return { testAdmin: true };
+      }
       if (t === false) throw Object.assign(new Error('unauthorized'), { status: 401 });
       const admin = await getAdmin();
       if (!admin || !readSession(kybKeys.session, request.headers.get('cookie'), admin.version, now())) throw Object.assign(new Error('unauthorized'), { status: 401 });

@@ -106,17 +106,27 @@ sudo bash e2e/deploy-drill.sh topup-drill-base
 flowchart LR
   S["服务器：sudo topup gen-test-admin<br/>随机生成令牌"] -->|".env 只存 SHA-256"| APP["测试环境的 web<br/>只认 /api/wallet/ 白名单动作"]
   S -->|"令牌只在终端上显示一次"| A["管理员"]
-  A -->|"自己填"| GH["GitHub 环境 staging-e2e<br/>密钥 STAGING_TEST_ADMIN_TOKEN<br/>只允许 staging 分支"]
-  T["测试经理：写用例、合并到 staging、<br/>手动运行 staging-e2e"] --> WF["staging-e2e 流程<br/>请求头带令牌"]
-  GH --> WF --> APP
+  A -->|"自己填"| GH["GitHub 环境 staging-e2e<br/>只允许 staging 分支 + Required reviewers<br/>密钥 STAGING_TEST_ADMIN_TOKEN"]
+  T["测试经理：写用例、合并到 staging、<br/>手动运行 staging-e2e"] --> WF["staging-e2e 流程"]
+  A -->|"每次运行点批准"| WF
+  GH --> WF -->|"请求头带令牌"| APP
 ```
 
-- 谁持有什么：令牌原文只在管理员手里（生成时看一眼、填进 GitHub）和 GitHub 环境密钥里；服务器只有哈希；仓库、日志、报告里都没有（日志自动遮盖，报告上传前检查）。测试经理和智能体只能触发运行、看结果，看不到令牌。
-- 生产没有：应用只在 `APP_ENV=staging` 时认它；生产的 `.env` 里有这个变量时 web、worker 拒绝启动（自动更新会换回旧版本），`topup-watch` 也会发邮件；`gen-test-admin` 在不是测试环境的服务器上直接拒绝。
-- 能做：读运营后台的数据；打款审核、驳回、解除挂起、凑批到"待签名"、作废没签名的批次、改打款上限（免动态码）；归集凑批、确认、作废；对账、异常到账标记。
-- 不能做（服务器返回 403）：签名、交签名、改授权额度、确认作废（已广播的批次）、改归集门槛、切换钱包提供方、开通商户和重发邀请（会给任意邮箱发信）、开户审核后台（`/api/kyb/`）的任何接口；以后新加的动作默认不给。
+- 安全边界在哪里：只有 GitHub 环境 `staging-e2e` 自己的设置算数——Deployment branches 只允许 `staging`，Required reviewers 打开（管理员批准这一次运行，密钥才交给它）。流程文件里 job 上的 `if: staging` 只是防手误：有写权限的人可以在别的分支把它删掉再手动运行，挡住他的是环境的分支限制和审批。仓库是公开的、智能体也能把改动合并进 `staging`，所以 Required reviewers 默认要开。
+- 谁持有什么：令牌原文在管理员手里（生成时看一眼、填进 GitHub）和 GitHub 环境密钥里；服务器只有哈希；仓库里没有；运行日志里 GitHub 会遮盖原文。**但运行中的用例代码能读到令牌**：`run.mjs` 只给用例进程它要的几个环境变量，`lib.mjs` 读进令牌后马上从环境里删掉、用例只拿到请求函数，这只能防无意泄露，挡不住合并进 `staging` 的故意作恶的用例代码。真正的保护是 Required reviewers（每次运行前看一眼这次的提交）加上定期换令牌（`sudo topup gen-test-admin`）。
+- 日志公开：仓库是公开的，运行日志谁都能看。用例只输出通过 / 失败、HTTP 状态和错误码（`lib.mjs` 的 `ok()`、`expectError()`），不输出接口返回的内容，也不上传报告；写新用例时断言要带说明文字，不要打印接口返回。
+- 生产没有：应用只在 `APP_ENV=staging` 且 `TRON_NETWORK=nile` 时认它；配了以太坊 / BSC 节点的，还要核对节点的链 ID 不是主网（1、56），查不到时这次不认；生产的 `.env` 里有这个变量时 web、worker 拒绝启动（自动更新会换回旧版本），`topup-watch` 也会发邮件；`gen-test-admin` 在不是测试环境的服务器上直接拒绝。
+- 能做：读运营后台的数据；打款审核、驳回、解除挂起、凑批到"待签名"、作废没签名的批次、改打款上限（免动态码）；归集凑批、确认、作废；对账、异常到账标记。改东西的动作只收 POST。
+- 不能做（服务器返回 403）：签名、交签名、改授权额度、确认作废（已广播的批次）、改归集门槛、切换钱包提供方、开通商户、重发邀请、改商户、开户审核后台（`/api/kyb/`）的任何接口；以后新加的动作默认不给。
+- 开户和商户资料：商户列表（`merchants`，里面有联系人邮箱和待开通的开户申请）、客户列表和详情（`customers`、`customer`，里面有客户姓名）不给（403）。其余返回里带商户名、名称、邮箱、公司名的（打款审核、提币列表、归集地址、异常到账、概览的商户排行等）统一打码成"首字 + ***"（`maskForTestAdmin`，链名除外）；商户编号、客户编号、地址、金额照常给。
 - 审计：业务动作的操作人记成 `test-admin`；每个 POST 另记一条 `test_admin.request`（动作名、成功或错误码）。
 - 造打款单（可选）：用例要新建打款单时，用测试环境里一个测试商户的开放 API Key（同一个 GitHub 环境的密钥 `STAGING_E2E_MERCHANT_KEY`、`STAGING_E2E_MERCHANT_SECRET`，管理员在测试环境的商户后台生成后自己填）；没填时这类用例跳过。
 - 演练（`e2e/deploy-drill.sh`）里有测试管理员的生成和关闭两项检查。
 - 换令牌：再运行一次 `sudo topup gen-test-admin`，把新令牌填进 GitHub（旧令牌立刻作废）。怀疑泄露时先 `sudo topup test-admin-off`。
 
+### 管理员的设置顺序（先关卡、后密钥）
+1. GitHub 仓库 → Settings → Environments → New environment，名字 `staging-e2e`。
+2. **先**设 Deployment branches and tags：Selected branches，只加 `staging`。
+3. **再**打开 Required reviewers，加管理员自己。注意：审批只挡得住和审批人不是同一个 GitHub 账号的人。如果智能体用的就是管理员的账号（或有它的令牌），它也能通过接口自己批准，这时要让智能体换成单独的账号，或者不给它批准部署的权限。
+4. 最后才填密钥：服务器上 `sudo topup gen-test-admin`，把显示的令牌填进这个环境的 Environment secrets → `STAGING_TEST_ADMIN_TOKEN`，然后 `clear`。
+5. 以后每次有人运行 `staging-e2e`：先看这次运行用的提交（`e2e/staging-e2e/` 和流程文件有没有改动、改了什么），没问题再点批准。

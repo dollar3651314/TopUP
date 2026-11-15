@@ -1,8 +1,9 @@
 // 跑测试环境验收用例：node e2e/staging-e2e/run.mjs [用例文件 ...]（不写文件就跑这个目录下全部 *.test.mjs）
 // 由 .github/workflows/staging-e2e.yml 运行；地址和令牌从环境变量来（STAGING_URL、STAGING_TEST_ADMIN_TOKEN），不打印。
-// 先确认连的是测试环境、测试管理员开着，否则一个用例都不跑。结果：屏幕上逐条（spec），另存 junit 报告到 e2e/staging-e2e/.out/。
+// 先确认连的是测试环境、测试管理员开着，否则一个用例都不跑。结果只在屏幕上逐条（spec），不另存报告：仓库公开，日志和报告谁都能看，
+// 所以不输出接口返回的内容。用例进程只拿到它要的环境变量（地址、令牌、商户 Key），不继承整个环境；令牌由 lib.mjs 读进去后从环境里删掉。
 import { spawnSync } from 'node:child_process';
-import { readdirSync, mkdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -31,8 +32,7 @@ if (h?.env !== 'staging') fail(`健康检查的 env 不是 staging（${h?.env ??
 if (h?.test_admin !== true) fail('测试环境的测试管理员没开：服务器上运行 sudo topup gen-test-admin，把显示的令牌填进 GitHub 环境 staging-e2e');
 console.log(`✓ 测试环境（提交 ${h.commit || '未知'}），测试管理员已开；跑 ${files.length} 个文件`);
 
-mkdirSync(join(DIR, '.out'), { recursive: true });
-const r = spawnSync(process.execPath, ['--test', '--test-concurrency=1',
-  '--test-reporter=spec', '--test-reporter-destination=stdout',
-  '--test-reporter=junit', `--test-reporter-destination=${join(DIR, '.out', 'report.xml')}`, ...files], { stdio: 'inherit', env: process.env });
+const PASS = ['PATH', 'HOME', 'TMPDIR', 'STAGING_URL', 'STAGING_TEST_ADMIN_TOKEN', 'STAGING_E2E_MERCHANT_KEY', 'STAGING_E2E_MERCHANT_SECRET'];
+const env = Object.fromEntries(PASS.filter((k) => process.env[k] !== undefined).map((k) => [k, process.env[k]]));
+const r = spawnSync(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=spec', ...files], { stdio: 'inherit', env });
 process.exit(r.status ?? 1);
