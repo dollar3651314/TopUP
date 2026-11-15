@@ -448,4 +448,38 @@ test.describe.serial('TC-P 收付款（正式接口）', () => {
     if (pb.batch_id) expect(await post('payout-void', { id: pb.batch_id })).toBe(200);
     expect(await post('payout-reject-approved', { id: w.id, reason: '测试收尾' })).toBe(200);
   });
+
+  test('TC-P12 运营后台对账：各链明细表固定按 TRON、以太坊、BSC 排（接口 by_chain 按 bsc、eth、tron 的顺序给也一样）', async () => {
+    // 数据库 jsonb 按字段名排序存（bsc、eth、tron）：接口用替身改写最近一次对账的 by_chain，三条链都有，字段顺序 bsc、eth、tron
+    const recon = /\/api\/wallet\/\?a=recon(&|$)/;
+    // 金额和真实接口一样是字符串（USDT）
+    const row = (v: string, complete = true) => ({ receivable: v, addresses: v, hot: '0.00', cold: '0.00', total: v, diff: '0.00', checked: 1, address_count: 1, wallet_errors: complete ? 0 : 1, complete });
+    let served = '';
+    await admin.route(recon, async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      const day = body.days[0] ?? { day: new Date().toISOString().slice(0, 10), balances: 0, chain: 0, fees: 0, diff: 0, detail: { complete: true } };
+      day.detail = { ...day.detail, by_chain: { bsc: row('3.00', false), eth: row('2.00'), tron: row('1.00') } };
+      body.days[0] = day;
+      served = JSON.stringify(body);
+      await route.fulfill({ response: res, body: served, headers: { ...res.headers(), 'content-type': 'application/json' } });
+    });
+    const loaded = admin.waitForResponse(recon);
+    await admin.click('[data-tab="p-recon"]');
+    await loaded;
+    // 先确认替身生效：页面拿到的 by_chain 字段顺序是 bsc、eth、tron
+    expect(Object.keys(JSON.parse(served).days[0].detail.by_chain)).toEqual(['bsc', 'eth', 'tron']);
+    const panel = admin.locator('[data-panel="p-recon"]');
+    const head = panel.locator('h2', { hasText: '各链链上明细' });
+    await expect(head).toBeVisible();
+    const rows = head.locator('xpath=following-sibling::*[1]').locator('tbody tr');
+    await expect(rows).toHaveCount(3);
+    expect(await rows.locator('td:first-child').allTextContents()).toEqual(['TRON', '以太坊', 'BSC']);
+    // 每行的数据跟着链走（不是只换了链名）：TRON 1.00、以太坊 2.00、BSC 3.00 且没查完
+    await expect(rows.nth(0)).toContainText('1.00');
+    await expect(rows.nth(1)).toContainText('2.00');
+    await expect(rows.nth(2)).toContainText('3.00');
+    await expect(rows.nth(2)).toContainText('没查到');
+    await admin.unroute(recon);
+  });
 });
