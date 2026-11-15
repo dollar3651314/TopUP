@@ -451,7 +451,7 @@ export async function renderWalletCards(ui: WalletUi, p: HTMLElement, legacy: { 
         // 系统状态那份数据整份读不到：发起账户手续费写"暂时查不到"，不整行去掉
         c.operator && !ch ? h('span', { class: 'muted', 'data-operator-gas': c.chain }, '手续费币暂时查不到（读取失败，稍后刷新）')
           : c.operator && opOf(c.chain)?.configured ? h('span', { class: opOf(c.chain).low ? 'bad' : '', 'data-operator-gas': c.chain }, gasText(opOf(c.chain))) : null),
-      sec('合约', '', h('span', {}, evm ? `转发合约工厂、批量归集合约（SweepBatcher）：${c.contracts_configured ? '已配置 ✓' : '没配置'}；批量打款合约（BatchPayout）：${c.payout ? '已配置 ✓' : '没配置'}` : `TRON 版工厂、批量归集合约：${c.contracts_configured ? '已配置 ✓' : '没配置（第 2 批合约上线后开通）'}`)),
+      sec('合约', '', h('span', {}, evm ? `转发合约工厂、批量归集合约（SweepBatcher）：${c.contracts_configured ? '已配置 ✓' : '没配置'}；批量打款合约（BatchPayout）：${c.payout ? '已配置 ✓' : '没配置'}` : `TRON 版工厂、批量归集合约：${c.contracts_configured ? '已配置 ✓' : '没配置'}`)),
       evm ? null : sec('租能量', '', h('span', {}, `${c.rental ? 'TronSave 已配置（只用于归集），预存余额和每一单在"系统状态"' : '没配置 TronSave：归集时直接烧 TRX'}；打款不租能量，直接烧 TRX`)),
       evm ? null : h('div', { class: 'wl-sec', 'data-legacy-addresses': '' }, h('b', {}, '旧地址（第 0 批）'),
         h('span', {}, `${c.legacy_addresses} 个旧 TRON 地址，照常入账、照常归集。`, legacy.initialized ? ` 主助记词已初始化（公钥末 8 位 ${legacy.xpub_fingerprint}）。` : '')));

@@ -325,7 +325,7 @@ render.sweep = async (p) => {
     h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, '归集'), h('span', { class: 'muted' }, '把收款地址里的 USDT 一批批转进冷钱包 · 半自动：系统凑批，你确认才执行')),
     evm,
     h('h2', { class: 'h-sm', id: 'sw-tron' }, 'TRON 已有地址（第 0 批方式：助记词签名、逐个地址）'),
-    h('div', { class: 'toolbar tron-toolbar' }, h('span', { class: 'muted' }, 'TRON 合约钱包第 2 批上线；在那之前，已有 TRON 地址里的钱用这里归集。'), h('div', { class: 'tool-actions' }, h('label', { class: 'inline-label' }, '金额 ≥', minInput),
+    h('div', { class: 'toolbar tron-toolbar' }, h('span', { class: 'muted' }, '这里归集第 0 批老 TRON 地址里的钱；TRON 合约地址（开通后）和以太坊、BSC 一起在上面归集。'), h('div', { class: 'tool-actions' }, h('label', { class: 'inline-label' }, '金额 ≥', minInput),
       h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => { const all = rows.every((x: any) => swSel.has(x.address)); rows.forEach((x: any) => (all ? swSel.delete(x.address) : swSel.add(x.address))); render.sweep(p); } }, '全选 / 取消'))),
     h('div', { class: 'stats' }, stat('未归集总额（按账本）', fmtUsdt(total), `USDT · ${r.items.length} 个地址`), stat('热钱包可借出能量', r.energy_left === null ? '—' : Number(r.energy_left).toLocaleString('en'), `大约够 ${r.energy_left === null ? '—' : Math.floor(r.energy_left / r.energy_per_sweep)} 笔归集`)),
     running.length ? h('p', { class: 'note-box' }, `有 ${running.length} 批归集正在进行（每一步链上确认后自动进行下一步，大约每分钟推进一次）。`) : h('span'),

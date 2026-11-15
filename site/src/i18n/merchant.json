@@ -369,8 +369,9 @@
       "netHint": {
         "eth": "Higher network fee",
         "bsc": "BNB Smart Chain",
-        "tron": "Coming soon"
+        "tron": "TRON network"
       },
+      "netOff": "Not available yet",
       "stepChoose": "Network",
       "stepPay": "Pay",
       "paidNote": "If you have already paid, do not pay again; this page updates when it arrives."
@@ -932,8 +933,9 @@
       "netHint": {
         "eth": "网络手续费较高",
         "bsc": "BNB Smart Chain",
-        "tron": "即将开通"
+        "tron": "波场网络"
       },
+      "netOff": "暂未开通",
       "stepChoose": "选网络",
       "stepPay": "转账",
       "paidNote": "已付款的请不要重复付款，到账后这里会自动更新。"

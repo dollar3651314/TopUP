@@ -161,7 +161,7 @@ export async function renderEvmSweep(ui: WalletUi): Promise<HTMLElement> {
   const settings = sec('settings', '门槛和上限', h('span', { class: 'muted' }, '后台可改：要输动态码、写原因、记审计'),
     h('div', { class: 'card stack' },
       kv([
-        ['归集门槛', h('span', {}, `以太坊 ${usd(st.thresholds.eth)} · BSC ${usd(st.thresholds.bsc)} · TRON ${usd(st.thresholds.tron)} `, laterTag(), ' USDT（地址余额达到才放进批次）')],
+        ['归集门槛', h('span', {}, `以太坊 ${usd(st.thresholds.eth)} · BSC ${usd(st.thresholds.bsc)} · TRON ${usd(st.thresholds.tron)} USDT（地址余额达到才放进批次）`)],
         ['每个地址每次上限', `${usd(st.capPerAddress)} USDT（超过的这次跳过，用冷钱包多签手动处理）`],
         ['每批上限', `${usd(st.capPerBatch)} USDT、${st.maxAddresses} 个地址（超过就自动拆成几批）`],
         ['手续费占比', h('span', {}, `一个地址的手续费超过金额的 ${st.maxFeeRatioPct}% 就先不归集。`, h('b', { 'data-no-price': '' }, `${NO_PRICE_TEXT}。`))],
@@ -344,7 +344,7 @@ function editSettings(ui: WalletUi, st: any) {
   const code = h('input', { inputmode: 'numeric', maxlength: '6', autocomplete: 'one-time-code' }) as HTMLInputElement;
   const errBox = h('p', { class: 'alert', hidden: true });
   const body = h('div', { class: 'stack' },
-    h('div', { class: 'fgrid' }, field('ss-eth', '以太坊门槛（USDT）', f.eth), field('ss-bsc', 'BSC 门槛（USDT）', f.bsc), field('ss-tron', 'TRON 门槛（USDT，第 2 批用）', f.tron),
+    h('div', { class: 'fgrid' }, field('ss-eth', '以太坊门槛（USDT）', f.eth), field('ss-bsc', 'BSC 门槛（USDT）', f.bsc), field('ss-tron', 'TRON 门槛（USDT）', f.tron),
       field('ss-cap1', '每个地址每次上限（USDT，0 = 不限）', f.capPerAddress), field('ss-capb', '每批上限（USDT，0 = 不限）', f.capPerBatch), field('ss-maxa', '每批最多地址数（1–200）', f.maxAddresses),
       field('ss-fee', '手续费占比上限（%）', f.maxFeeRatioPct)),
     h('p', { class: 'hint muted m0' }, `手续费占比：${NO_PRICE_TEXT}；有币价来源后按这里的上限检查。`),

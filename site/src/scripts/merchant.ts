@@ -25,15 +25,17 @@ const pct = (ppm: number) => String(ppm / 10000);
 const errText = (e: unknown) => (c.errors as Record<string, string>)[(e as ApiErr)?.code] || c.errors.generic;
 let me: NonNullable<Me['merchant']>;
 
-// ---------- 多链（第 1 批：以太坊、BSC；TRON 第 2 批） ----------
+// ---------- 多链（以太坊、BSC、TRON；开不开通按服务器返回的 chains） ----------
 const CHAINS = ['eth', 'bsc', 'tron'] as const;
 let enabledChains: string[] = [];
 const netName = (ch: string) => (c.chain.names as Record<string, string>)[ch] || ch.toUpperCase();
 const netStd = (ch: string) => (c.chain.std as Record<string, string>)[ch] || '';
 const chainTag = (ch: string) => h('span', { class: `chain-tag c-${ch}` }, netName(ch));
 const laterTag = () => h('span', { class: 'later-tag' }, c.chain.later);
+/** TRON 合约钱包没开通（服务器返回的 chains 里没有 tron）：TRON 地址处标"第 2 批"；开通了和以太坊、BSC 一样 */
+const tronOff = (ch: string) => ch === 'tron' && !enabledChains.includes('tron');
 const addrOf = (list: ChainAddr[] | undefined, ch: string) => (list || []).find((a) => a.chain === ch)?.address || null;
-/** 每条链一张地址卡：地址、复制按钮、"只收某网络的 USDT"；TRON 没有地址时标"第 2 批" */
+/** 每条链一张地址卡：地址、复制按钮、"只收某网络的 USDT"；没有地址时写"客户在这条链发起充值时生成"（TRON 没开通时标"第 2 批"） */
 function addressCards(list: ChainAddr[] | undefined) {
   // 以太坊、BSC 同一串时就近说明一句（免得商户以为只能收一条链）
   const e = addrOf(list, 'eth'), b = addrOf(list, 'bsc');
@@ -42,9 +44,9 @@ function addressCards(list: ChainAddr[] | undefined) {
     const a = addrOf(list, ch);
     if (!a && ch !== 'tron' && !enabledChains.includes(ch)) return null;
     return h('div', { class: 'addr-card', 'data-chain': ch }, chainTag(ch),
-      a ? mono(a) : ch === 'tron' ? laterTag() : h('span', { class: 'muted', 'data-not-yet': '' }, '—'),
+      a ? mono(a) : tronOff(ch) ? laterTag() : h('span', { class: 'muted', 'data-not-yet': '' }, '—'),
       a ? copyBtn(() => { say(tpl(c.chain.copiedNote, { net: netName(ch), std: netStd(ch) })); return a; }, tpl(c.chain.copy, { net: netName(ch) }), c.common.copied) : null,
-      h('span', { class: 'hint muted' }, a ? tpl(c.chain.only, { net: netName(ch), std: netStd(ch) }) : ch === 'tron' ? c.chain.tronLater : c.chain.notYet));
+      h('span', { class: 'hint muted' }, a ? tpl(c.chain.only, { net: netName(ch), std: netStd(ch) }) : tronOff(ch) ? c.chain.tronLater : c.chain.notYet));
   }));
   return same ? h('div', { class: 'stack-sm' }, same, grid) : grid;
 }
@@ -173,7 +175,7 @@ render.customers = async (p) => {
     const k = cc.cols;
     // 多链：每条链一列地址（以太坊、BSC 是同一串，分两列显示）；没有多链数据的（原型）照旧一列
     const multi = list.some((x) => x.addresses?.length) || enabledChains.length > 0;
-    const addrCell = (x: Cust, ch: string) => { const a = addrOf(x.addresses, ch); return a ? mono(shortAddr(a), a) : ch === 'tron' ? laterTag() : '—'; };
+    const addrCell = (x: Cust, ch: string) => { const a = addrOf(x.addresses, ch); return a ? mono(shortAddr(a), a) : tronOff(ch) ? laterTag() : '—'; };
     const unm = (x: Cust) => (units(x.unmatched) ? h('b', {}, usd(x.unmatched)) : '0.00');
     // 多链：照原型，客户一列（标识 + 名称 · 邮箱），每条链一列地址；手续费、最近付款在客户详情里看
     const cols = multi ? [k.id, ...CHAINS.map((ch) => `${netName(ch)} ${k.address}`), `${k.total}（${k.count}）`, k.unmatched] : [k.id, `${k.name} · ${k.email}`, k.address, `${k.total}（${k.count}）`, k.fees, k.last, k.unmatched];
@@ -380,7 +382,8 @@ async function createOrder() {
   const chainBox = enabledChains.length ? h('fieldset', { class: 'f chain-choices', 'data-chain-choice': '' }, h('legend', { class: 'lbl' }, cc.chain),
     choice('', cc.chainAny, cc.chainAnyHint),
     ...['eth', 'bsc'].filter((ch) => enabledChains.includes(ch)).map((ch) => choice(ch, tpl(cc.chainOnly, { net: netName(ch), std: netStd(ch) }), ch === 'eth' ? cc.ethHint : '')),
-    choice('tron', tpl(cc.chainOnly, { net: netName('tron'), std: netStd('tron') }), c.chain.laterNote, true, laterTag())) : null;
+    // TRON：服务器返回开通了就能选；没开通时灰着、标"第 2 批"
+    tronOff('tron') ? choice('tron', tpl(cc.chainOnly, { net: netName('tron'), std: netStd('tron') }), c.chain.laterNote, true, laterTag()) : choice('tron', tpl(cc.chainOnly, { net: netName('tron'), std: netStd('tron') }), '')) : null;
   const body = h('div', { class: 'stack' }, pickerField('mo-cust', cc.customer, picker, cc.customerHint), who,
     h('div', { class: 'fgrid' }, field('mo-cname', `${cc.customerName} (${c.common.optional})`, cname), field('mo-cemail', `${cc.customerEmail} (${c.common.optional})`, cemail)),
     field('mo-no', cc.merchantNo, no, cc.merchantNoHint), field('mo-amt', cc.amount, amt), chainBox, h('p', { class: 'hint muted m0' }, settingsNote()));

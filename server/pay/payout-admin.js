@@ -209,11 +209,17 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
         cards.push(card);
       }
       const [legacy] = await db.query('select count(*)::int n from customers where address is not null');
-      const tcard = { chain: 'tron', enabled: Boolean(layer?.enabledChains?.includes('tron')), cold: wallets.cold || null, hot: wallets.hot || null, payout: null, payout_enabled: Boolean(wallets.hot),
+      // TRON 冷钱包：配了合约钱包（config/wallets.json 的 tron.parent）就以它为准、USDT 按 tron.usdt 读（和以太坊、BSC 一样走合约提供方）；
+      // 没配合约钱包时才用第 0 批的 cold（老 USDT 合约）
+      const tronOn = Boolean(layer?.enabledChains?.includes('tron'));
+      const tronParent = layer?.config?.tron?.scheme?.parent || null;
+      const tcard = { chain: 'tron', enabled: tronOn, cold: tronParent || wallets.cold || null, hot: wallets.hot || null, payout: null, payout_enabled: Boolean(wallets.hot),
         contracts_configured: Boolean(layer?.config?.tron?.complete), operator: layer?.providers?.contract?.tronOperator || null, legacy_addresses: legacy.n, hot_balance: null, hot_max: usdt(limits.hotMax), hot_low: usdt(limits.hotLow), allowance: null, rental: Boolean(layer?.tronEnergy) };
       // 冷钱包 USDT、热钱包 TRX：读不到给 null（字段一直在，页面写"暂时查不到"）
       if (wallets.hot) { tcard.hot_gas = null; try { const acc = await tron.account(wallets.hot); tcard.hot_balance = usdt(acc.trc20[tron.contract] || 0); tcard.low = Number(acc.trc20[tron.contract] || 0) < limits.hotLow; tcard.hot_gas = native(acc.trx || 0, 'tron'); } catch { tcard.error = 'rpc'; } }
-      if (wallets.cold) { tcard.cold_balance = null; try { const acc = await tron.account(wallets.cold); tcard.cold_balance = usdt(acc.trc20[tron.contract] || 0); } catch { tcard.cold_balance = null; } }
+      // 合约钱包冷钱包：和以太坊、BSC 一样，链开通了才读余额（停用的链不读）
+      if (tronParent && tronOn) { try { tcard.cold_balance = usdt(await layer.providers.contract.balance('tron', { vault: 'cold' })); } catch { tcard.cold_balance = null; } }
+      else if (!tronParent && wallets.cold) { tcard.cold_balance = null; try { const acc = await tron.account(wallets.cold); tcard.cold_balance = usdt(acc.trc20[tron.contract] || 0); } catch { tcard.cold_balance = null; } }
       cards.push(tcard);
       return { cards, limits: limitsOut(limits), xpub: Boolean(await getMeta(db, 'xpub')) };
     },
