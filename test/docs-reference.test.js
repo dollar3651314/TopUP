@@ -138,3 +138,22 @@ test('开发者文档：每个接口实际返回的字段、类型和文档一�
   }
   await db.end();
 });
+
+// 多链口径（TRON、以太坊、BSC）：建单的 chain 参数、订单对象的 chain 字段都写 eth、bsc 或 tron（TRON 开通后可以按 TRON 建单）
+test('开发者文档：建单的 chain 参数和订单的 chain 字段写明可填 eth、bsc 或 tron', () => {
+  const ep = ENDPOINTS.find((e) => e.method === 'POST' && e.path === 'orders/');
+  const param = (ep.body || []).find((p) => p[0] === 'chain');
+  assert.ok(param, 'POST orders/ 要有 chain 参数');
+  const [en, zh] = param[3];
+  for (const ch of ['eth', 'bsc', 'tron']) {
+    assert.match(en, new RegExp(`\\b${ch}\\b`), `POST orders/ 的 chain 参数（英文）要写到 ${ch}：${en}`);
+    assert.match(zh, new RegExp(`\\b${ch}\\b`), `POST orders/ 的 chain 参数（中文）要写到 ${ch}：${zh}`);
+  }
+  assert.doesNotMatch(zh, /^eth 或 bsc[：:]/, '不能还只写"eth 或 bsc"');
+  const fields = Object.values(OBJECTS).flat().filter((f) => f[0] === 'chain' && /创建订单时/.test(f[2][1]));
+  assert.ok(fields.length > 0, '前提：订单对象有"创建订单时指定的链"字段');
+  for (const f of fields) for (const ch of ['eth', 'bsc', 'tron']) {
+    assert.match(f[2][0], new RegExp(`\\b${ch}\\b`), `订单的 chain 字段（英文）要写到 ${ch}：${f[2][0]}`);
+    assert.match(f[2][1], new RegExp(`\\b${ch}\\b`), `订单的 chain 字段（中文）要写到 ${ch}：${f[2][1]}`);
+  }
+});
