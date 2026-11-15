@@ -140,9 +140,8 @@ export async function runDaily({ db, tron, wallets, layer = null, notify, now = 
   const msgs = [];
   const badChains = Object.entries(byChain).filter(([, r]) => r.diff !== 0);
   if ((diff !== 0 || badChains.length) && complete) {
-    const lines = Object.entries(byChain).map(([k, r]) => `${CHAIN_NAMES[k]}：账本应收 ${fmtUsdt(r.receivable)}，链上 ${fmtUsdt(r.total)}（未归集地址 ${fmtUsdt(r.addresses)} + 热钱包 ${fmtUsdt(r.hot)} + 冷钱包 ${fmtUsdt(r.cold)}），差额 ${fmtUsdt(r.diff)}`);
-    const which = badChains.length ? `对不上的链：${badChains.map(([k]) => CHAIN_NAMES[k]).join('、')}。` : '';
-    msgs.push(`对账不一致：${which}合计链上 ${fmtUsdt(chain)} USDT，应为 ${fmtUsdt(s.balances + fees)} USDT（商户余额 ${fmtUsdt(s.balances)} + 手续费和未入账 ${fmtUsdt(fees)}），差额 ${fmtUsdt(diff)}。如果你从热钱包或冷钱包转出过利润，差额会是负数，属于正常；在链之间调过钱（例如从 TRON 冷钱包换到以太坊热钱包）时，两条链的差额一正一负。\n各链：\n${lines.join('\n')}`);
+    const lines = Object.entries(byChain).map(([k, r]) => `${r.diff !== 0 ? '【对不上】' : ''}${CHAIN_NAMES[k]}：账本应收 ${fmtUsdt(r.receivable)}，链上 ${fmtUsdt(r.total)}（未归集地址 ${fmtUsdt(r.addresses)} + 热钱包 ${fmtUsdt(r.hot)} + 冷钱包 ${fmtUsdt(r.cold)}），差额 ${fmtUsdt(r.diff)}`);
+    msgs.push(`对账不一致（对不上的链在下面标出）：合计链上 ${fmtUsdt(chain)} USDT，应为 ${fmtUsdt(s.balances + fees)} USDT（商户余额 ${fmtUsdt(s.balances)} + 手续费和未入账 ${fmtUsdt(fees)}），差额 ${fmtUsdt(diff)}。如果你从热钱包或冷钱包转出过利润，差额会是负数，属于正常；在链之间调过钱（例如从 TRON 冷钱包换到以太坊热钱包）时，两条链的差额一正一负。\n各链：\n${lines.join('\n')}`);
   }
   if (mismatch.length) msgs.push(`客户收款合计和商户收款合计不一致：${mismatch.map((x) => x.name).join('、')}`);
   if (found) msgs.push(`发现 ${found} 笔 USDT 以外的代币转入 TRON 客户地址，已记到"异常到账"。`);

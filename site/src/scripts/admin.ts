@@ -379,7 +379,7 @@ function renderSide(r: any) {
   const info: Record<string, string> = {
     编号: a.ref, 客户邮箱: a.email, 发送链接: day(a.invitedAt), 链接有效期至: day(a.expiresAt), 提交时间: dt(a.submittedAt),
     收件日期: day(r.review?.received), 审核人: r.review?.reviewer || '—', 审核日期: day(r.review?.reviewDate),
-    保留期: '永久保留（含开户资料，不自动删除）',
+    保留期: '永久保留（含开户资料；业务关系存续期间和结束后都不删除）',
   };
   for (const [k, v] of Object.entries(info)) dl.append(el('dt', '', k), el('dd', '', v));
   side.appendChild(dl);
