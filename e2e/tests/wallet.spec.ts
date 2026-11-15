@@ -78,6 +78,22 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
   }
   const usdtOf = (s: string) => Number(s.replace(/[^\d.]/g, ''));
 
+  // ---- 第 2 批（TRON 合约钱包）开通后的收尾：本地（config/wallets.json 的 local）不开通 TRON 合约钱包，
+  // "开通"用浏览器拦截接口模拟：商户页看概览接口的 chains、付款页看 /api/pay/ 的 chains。每个用例用新开的页面，不影响 merchant 页面里已读到的开通列表。
+  const mMatchers: Record<string, (url: URL) => boolean> = {};
+  const isMerchant = (name: string) => (mMatchers[name] ||= (url: URL) => url.pathname === '/api/merchant/' && url.searchParams.get('a') === name);
+  const withTron = (j: any) => { j.chains = [...new Set([...(j.chains || []), 'tron'])]; };
+  /** 新开一个商户页面，概览接口的 chains 带上 tron（TRON 已开通） */
+  async function merchantTronOn() {
+    const mp = await mctx.newPage();
+    let seen = false;
+    await mp.route(isMerchant('overview'), patchJson((j) => { expect(j.chains, '前提：概览接口返回 chains').toBeTruthy(); withTron(j); seen = true; }));
+    await mp.goto('/zh/merchant/');
+    await expect(mp.locator('[data-merchant-name]')).toHaveText('Wallet E2E Ltd');
+    await expect.poll(() => seen, { message: '前提：页面读过（被改成开通 TRON 的）概览接口' }).toBe(true);
+    return mp;
+  }
+
   test('TC-W00 准备：后台初始化并登录、初始化 TRON 主助记词；开通商户 → 设置密码和验证码 → 登录', async () => {
     await admin.goto('/admin/');
     await admin.fill('#s-token', KYB_ENV.ADMIN_SETUP_TOKEN); await admin.fill('#s-pw', ADMIN_PW); await admin.fill('#s-pw2', ADMIN_PW);
@@ -349,6 +365,31 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await merchant.keyboard.press('Escape');
   });
 
+  test('TC-W09C 商户客户（TRON 开通后）：概览 chains 带 tron、客户还没有 TRON 地址时，客户详情的 TRON 一行和以太坊一样写"客户在这条链发起充值时生成"，不标"第 2 批"；列表的 TRON 一列同样不标', async () => {
+    const mp = await merchantTronOn();
+    await mp.click('[data-mtab="customers"]');
+    const panel = mp.locator('[data-mpanel="customers"]');
+    const row = panel.locator('[data-customer="ui_multi_2"]');
+    await expect(row).toBeVisible();
+    // 列表：TRON 那一列（表头含 TRON）是"—"，整行没有"第 2 批"
+    const heads = (await panel.locator('thead th').allInnerTexts()).map((x) => x.trim());
+    const ti = heads.findIndex((x) => x.includes('TRON'));
+    expect(ti, `前提：列表按链分列、有 TRON 一列（表头 ${heads.join(' | ')}）`).toBeGreaterThan(0);
+    await expect(row.locator('td').nth(ti)).toHaveText('—');
+    await expect(row).not.toContainText('第 2 批');
+    await expect(panel.locator('tbody')).not.toContainText('第 2 批');
+    // 详情
+    await row.click();
+    const dlg = mp.locator('[data-mdialog]');
+    const tron = dlg.locator('[data-addresses] [data-chain="tron"]');
+    await expect(dlg.locator('[data-addresses] [data-chain="eth"] .mono')).toBeVisible(); // 前提：详情已显示（以太坊有地址）
+    await expect(tron).toBeVisible();
+    await expect(tron).toContainText('客户在这条链发起充值时生成');
+    await expect(tron).not.toContainText('第 2 批');
+    await expect(dlg).not.toContainText('第 2 批');
+    await mp.close();
+  });
+
   test('TC-W10 订单选链（K1）：可选"不指定 / 以太坊 / BSC"，TRON 灰（第 2 批）；不指定时不给地址（付款人选了链才生成）；指定 BSC 时生成并只给 BSC 地址', async () => {
     const create = async (no: string, chain: string) => {
       await merchant.click('[data-mtab="orders"]');
@@ -390,6 +431,48 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     expect.soft((await mcall('customer-addresses', undefined, '&customer_id=ui_multi_1')).body.addresses.map((a: any) => a.chain)).toEqual(['bsc']);
   });
 
+  test('TC-W10B 订单选链（TRON 开通后）：概览 chains 带 tron 时 TRON 可选、不标"第 2 批"；选 TRON 能建单，请求带 chain=tron，建好后订单详情写 TRON', async () => {
+    const mp = await merchantTronOn();
+    // 本地服务器不开通 TRON 合约钱包（按 TRON 建单会 409）：建单请求先核对页面发的是 chain=tron，再去掉 chain 交给真服务器建一张真订单，
+    // 订单详情接口把这张单改成服务器开通 TRON 时会返回的样子（chain=tron、TRON 地址）。服务器按 TRON 建单在单元测试里测。
+    const TADDR = 'TJCnKsPa7y5okkXvQAidZBzqx3QyQ6sxMW';
+    let sent: any = null, made = '';
+    await mp.route(isMerchant('order-create'), async (r) => {
+      sent = r.request().postDataJSON();
+      const { chain, ...rest } = sent;
+      let res, j;
+      try { res = await r.fetch({ postData: JSON.stringify(rest) }); j = await res.json(); } catch { await r.abort().catch(() => {}); return; }
+      if (res.ok()) { made = j.order_no; Object.assign(j, { chain: 'tron', network: 'TRON', address: TADDR }); }
+      await r.fulfill({ response: res, json: j }).catch(() => {});
+    });
+    await mp.route(isMerchant('order'), patchJson((j) => { if (j.order && j.order.order_no === made) Object.assign(j.order, { chain: 'tron', network: 'TRON', address: TADDR }); }));
+    await mp.click('[data-mtab="orders"]');
+    await mp.click('[data-mpanel="orders"] .toolbar .btn-primary');
+    const box = mp.locator('[data-mdialog] [data-chain-choice]');
+    await expect(box).toBeVisible();
+    await expect(box.locator('input[value="eth"]')).toBeEnabled(); // 前提：选链已显示
+    await expect(box.locator('input[value="tron"]')).toBeEnabled();
+    await expect(box).not.toContainText('第 2 批');
+    await expect(box.locator('.later-tag')).toHaveCount(0);
+    await mp.fill('#mo-cust', 'ui_multi_1');
+    await expect(mp.locator('#mo-cust-list')).toBeVisible();
+    await mp.press('#mo-cust', 'Escape');
+    await expect(mp.locator('#mo-cust-list')).toBeHidden();
+    await expect(box).toBeVisible();
+    await mp.fill('#mo-no', `CHAIN-TRON-${Date.now().toString(36).toUpperCase()}`); await mp.fill('#mo-amt', '20');
+    await box.locator('input[value="tron"]').check();
+    await mp.click('[data-mdialog-ok]');
+    const dlg = mp.locator('[data-mdialog]');
+    await expect(dlg).toContainText('等待付款');
+    expect(sent?.chain, '页面发出的建单请求要带 chain=tron').toBe('tron');
+    expect(made).toMatch(/^ORD-\d{8}-[0-9A-F]{8}$/);
+    await expect(mp.locator('[data-mdialog-title]')).toContainText(made);
+    await expect(dlg.locator('.chain-tag')).toHaveText(['TRON']);
+    await expect(dlg).toContainText(TADDR);
+    await expect(dlg).not.toContainText('第 2 批');
+    await mp.close();
+  });
+
   test('TC-W11 付款页：没指定链时先选网络（TRON 灰）→ 显示这条链的地址和警示 → 可以换网络；指定了链时直接显示', async () => {
     const pay = await mctx.newPage();
     await pay.goto(`/zh/pay/${st.orderAny}/`);
@@ -414,6 +497,33 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(pay.locator('[data-pay-choose]')).toBeHidden();
     await expect(pay.locator('[data-pay-change]')).toBeHidden();
     await pay.close();
+  });
+
+  test('TC-W11B 付款页 TRON 按钮的小字：没开通时灰着、写"暂未开通"；开通后（/api/pay/ 的 chains 带 tron）可点、写"波场网络"、不写"即将开通"', async () => {
+    expect(st.orderAny, '前提：TC-W10 建了不指定链的订单').toMatch(/^ORD-/);
+    // 没开通（本地服务器的真实返回）
+    const off = await mctx.newPage();
+    await off.goto(`/zh/pay/${st.orderAny}/`);
+    await expect(off.locator('[data-pay-choose]')).toBeVisible();
+    await expect(off.locator('[data-net="eth"]')).toBeEnabled(); // 前提：选网络的按钮已画出
+    await expect(off.locator('[data-net="tron"]')).toBeDisabled();
+    await expect(off.locator('[data-net="tron"]')).toContainText('暂未开通');
+    await expect(off.locator('[data-net="tron"]')).not.toContainText('即将开通');
+    await off.close();
+    // 开通：付款页接口的 chains 带上 tron
+    const on = await mctx.newPage();
+    let seen = false;
+    await on.route((url: URL) => url.pathname === '/api/pay/', patchJson((j) => { if (Array.isArray(j.chains)) { withTron(j); seen = true; } }));
+    await on.goto(`/zh/pay/${st.orderAny}/`);
+    await expect(on.locator('[data-pay-choose]')).toBeVisible();
+    await expect.poll(() => seen, { message: '前提：付款页读过（被改成开通 TRON 的）接口' }).toBe(true);
+    const t = on.locator('[data-net="tron"]');
+    await expect(t).toBeEnabled();
+    await expect(t).not.toHaveClass(/disabled/);
+    await expect(t).toContainText('波场网络');
+    await expect(t).not.toContainText('即将开通');
+    await expect(t).not.toContainText('暂未开通');
+    await on.close();
   });
 
   test('TC-W12 付款页：查询接口出错（500）时显示"暂时查不到状态"并提醒已付请不要重复付，不显示"订单不存在"；恢复后自动接着查', async () => {
@@ -535,6 +645,22 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     // 过了这一秒，同一个 IP 又能查（后面的用例不受影响）
     await new Promise((ok) => setTimeout(ok, 1100));
     expect((await fetch(url)).status).not.toBe(429);
+  });
+
+  test('TC-W17 归集"门槛和上限"（TRON 开通后的收尾）：#sw-settings 不再标"第 2 批"；修改弹窗的 TRON 一项叫"TRON 门槛（USDT）"', async () => {
+    await adminTab('p-sweep');
+    const set = admin.locator('[data-panel="p-sweep"] #sw-settings');
+    await expect(set).toBeVisible();
+    await expect(set).toContainText('归集门槛'); // 前提：门槛一行已显示
+    await expect(set).toContainText('TRON');
+    await expect(set).not.toContainText('第 2 批');
+    await set.locator('[data-edit-settings]').click();
+    const dlg = admin.locator('[data-pdialog]');
+    await expect(dlg.locator('#ss-tron')).toBeVisible();
+    await expect(dlg.locator('label[for="ss-tron"]')).toHaveText('TRON 门槛（USDT）');
+    await expect(dlg).not.toContainText('第 2 批');
+    await admin.keyboard.press('Escape');
+    await expect(dlg).toBeHidden();
   });
 
 });

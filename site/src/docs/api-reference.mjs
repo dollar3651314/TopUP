@@ -318,7 +318,7 @@ export const ERRORS = [
   ['409', 'request_in_progress', ['A request with this Idempotency-Key is still running; retry shortly', '同一个 Idempotency-Key 的请求还在处理中，请稍后重试']],
   ['409', 'cannot_match', ['The deposit cannot be matched to this order (other customer, already matched, not credited, or order closed)', '这笔到账不能匹配到这个订单（不是同一个客户、已经匹配过、没有入账或订单已关闭）']],
   ['409', 'not_matched', ['The deposit is not matched to this order', '这笔到账没有匹配在这个订单上']],
-  ['409', 'chain_not_enabled', ['This chain is not open for new addresses yet (TRON comes in a later release)', '这条链还没有开放分配新地址（TRON 在后续版本开放）']],
+  ['409', 'chain_not_enabled', ['This chain is not enabled on this platform, so no address can be assigned on it', '这条链在本平台没有开通，不能在这条链分配地址']],
   ['409', 'invalid_state', ['Not allowed in the current state (e.g. cancelling a withdrawal that is no longer pending)', '当前状态不允许这个操作（例如取消已经不是待审核的提币）']],
   ['409', 'batch_item_cancel', ['The withdrawal belongs to a batch payout and cannot be cancelled on its own; cancel the batch instead', '这笔属于批量打款，不能单笔取消，请整批取消（只取消还没审核的部分）']],
   ['413', 'too_large', ['Request body over 32 KB (256 KB for POST payouts/batch/)', '请求体超过 32 KB（POST payouts/batch/ 是 256 KB）']],

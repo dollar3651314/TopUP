@@ -67,7 +67,7 @@ function paintChoose(s: PayState) {
     const dot = document.createElement('span'); dot.className = `chain-tag c-${ch}`; dot.textContent = netName(ch);
     const txt = document.createElement('span'); txt.className = 'stack-sm';
     const std = document.createElement('span'); std.className = 'muted'; std.textContent = netStd(ch);
-    const hint = document.createElement('span'); hint.className = 'hint muted'; hint.textContent = (c.netHint as Record<string, string>)[ch] || '';
+    const hint = document.createElement('span'); hint.className = 'hint muted'; hint.textContent = n ? (c.netHint as Record<string, string>)[ch] || '' : c.netOff; // 没开通的链（灰着）写"暂未开通"，开通的写这条链的说明
     txt.append(std, hint);
     b.append(dot, txt);
     if (!n) { const later = document.createElement('span'); later.className = 'later-tag'; later.textContent = cn.later; b.append(later); }
