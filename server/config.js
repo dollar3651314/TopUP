@@ -36,6 +36,8 @@ export function loadConfig(rawEnv = process.env) {
     adminSetupToken: env.ADMIN_SETUP_TOKEN || '',
     // 测试管理员（只在 APP_ENV=staging 且 TRON_NETWORK=nile 时生效）：测试令牌的 SHA-256（64 位十六进制），由 sudo topup gen-test-admin 生成；生产配了它 web、worker 拒绝启动
     testAdminTokenSha256: env.TEST_ADMIN_TOKEN_SHA256 || '',
+    // 测试商户免开放 API 的 IP 白名单（一个商户编号；条件和测试管理员相同，server/pay/test-admin.js 的 testMerchantIpBypass）；生产配了它 web、worker 拒绝启动
+    testMerchantIpBypass: env.TEST_MERCHANT_IP_BYPASS || '',
     // 开户文件：服务器本地目录（加密保存，备份由部署脚本负责）
     blobDir: env.BLOB_DIR || '',
     // 收付款

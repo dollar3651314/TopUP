@@ -46,6 +46,8 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 | `sudo topup admin-token` | 在终端上显示一次运营后台的初始化口令（不进日志）；初始化完成后后台拒绝再次初始化，口令就没用了 |
 | `sudo topup gen-test-admin` | 只用于测试环境：生成测试管理员的令牌（给 GitHub 上的自动验收用例 `staging-e2e` 用，第 9 节）。服务器的 `.env` 只写它的 SHA-256（`TEST_ADMIN_TOKEN_SHA256`），令牌原文只在终端上显示一次、不进日志；再运行一次就换新令牌，旧的立刻作废 |
 | `sudo topup test-admin-off` | 关掉测试管理员：删掉 `TEST_ADMIN_TOKEN_SHA256`，令牌立刻作废 |
+| `sudo topup set TEST_MERCHANT_IP_BYPASS 商户编号` | 只用于测试环境：打开"测试商户免 IP 白名单"（第 9 节末尾），这个商户调开放 API 提币、批量打款时不查 IP 白名单；不是测试环境的服务器上直接拒绝 |
+| `sudo topup test-merchant-ip-off` | 关掉"测试商户免 IP 白名单"：删掉 `TEST_MERCHANT_IP_BYPASS` |
 | `sudo topup test-mail` | 发一封测试邮件到 `MAIL_TO` |
 | `sudo topup backup` | 立刻备份一次（本机加密保存，默认不传到别处） |
 | `sudo topup restore-drill` | 恢复演练：本机最近一份备份解密后恢复进临时容器，核对表、行数、Redis、开户文件、主密钥；不碰正在运行的数据，解密出的临时文件用完删除 |
@@ -86,7 +88,7 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 ## 6. 检查和告警
 - 自动更新只看"应用活着"：提交号对得上、数据库、Redis、主密钥、web 的收付款初始化成功（健康检查里有 `wallet` 一项）、换版本之后新的 worker 跑过一轮（扫链时间晚于开始等待的时间，旧 worker 留下的不算）。邮件、节点 Key 没填不算失败（换回旧版本也解决不了）。
 - web 和 worker 同时启动时都会建表：建表在数据库锁里做（`server/pay/schema.js` 的 `migrate`），不会互相撞。
-- `topup-watch` 每 5 分钟：web 没响应、健康检查 `ok=false`（列出哪几项）、worker 停了、磁盘 ≥ 85%、可用内存 < 100 MB、超过 26 小时没备份、上一次备份没加密、上传 R2 失败（只在打开异地时）、有版本更新失败被跳过、证书 14 天内过期、不是测试环境的服务器 `.env` 里有 `TEST_ADMIN_TOKEN_SHA256`。**状态变化时**用应用自己的发信设置发一封邮件给 `MAIL_TO`（问题不变不重复发，恢复时再发一封）。
+- `topup-watch` 每 5 分钟：web 没响应、健康检查 `ok=false`（列出哪几项）、worker 停了、磁盘 ≥ 85%、可用内存 < 100 MB、超过 26 小时没备份、上一次备份没加密、上传 R2 失败（只在打开异地时）、有版本更新失败被跳过、证书 14 天内过期、不是测试环境的服务器 `.env` 里有 `TEST_ADMIN_TOKEN_SHA256` 或 `TEST_MERCHANT_IP_BYPASS`。**状态变化时**用应用自己的发信设置发一封邮件给 `MAIL_TO`（问题不变不重复发，恢复时再发一封）。
 - 服务器整台宕机时它发不出邮件：要从外部定时探测，另外开（默认不开）。
 
 ## 7. 真实 IP
@@ -131,3 +133,14 @@ flowchart LR
 3. **再**打开 Required reviewers，加管理员自己。注意：审批只挡得住和审批人不是同一个 GitHub 账号的人。**现在智能体就是用仓库所有者（管理员）自己的 GitHub 账号操作的**，它也能通过接口自己批准这次运行，所以 Required reviewers 在技术上挡不住智能体，只能挡住别的账号和手误；测试网部署用的 GitHub 环境 `testnet` 也是同一个问题。智能体批不批准部署、要不要换成单独账号，按公司制度仓库里的规则处理（另行请管理员定）。
 4. 最后才填密钥：服务器上 `sudo topup gen-test-admin`，把显示的令牌填进这个环境的 Environment secrets → `STAGING_TEST_ADMIN_TOKEN`，然后 `clear`。
 5. 以后每次有人运行 `staging-e2e`（智能体推送触发后会把运行链接发给管理员）：先看这次运行用的提交（`e2e/staging-e2e/` 和流程文件有没有改动、改了什么），没问题再点批准。
+
+### 测试商户免 IP 白名单（只在测试环境）
+开放 API 的提币（`POST /api/v1/withdrawals/`）和批量打款（`POST /api/v1/payouts/batch/`）要求请求 IP 在商户的 IP 白名单里。GitHub 上跑 `staging-e2e` 的机器每次 IP 都不一样，白名单写不进去，所以给**一个**测试商户免这一项检查。代码在 `server/pay/test-admin.js`（`testMerchantIpBypass`）和 `server/pay/api-v1.js`（`needIp`）。
+
+- 怎么开：服务器上 `sudo topup set TEST_MERCHANT_IP_BYPASS 商户编号`（商户编号是运营后台商户列表里 `m_` 开头的那一列，就是用例用的那个测试商户，也就是 `STAGING_E2E_MERCHANT_KEY` 所属的商户）。写进 `.env` 后自动重建 web、worker，最后一行显示"测试商户免 IP 白名单：开着"。
+- 怎么关：`sudo topup test-merchant-ip-off`（删掉这一行，自动生效）。
+- 怎么看：`sudo topup status` 里有一行"测试商户免 IP 白名单：开着 / 关着"（读健康检查的 `test_merchant_ip_bypass`，只给是否，不给商户编号）；`sudo topup keys` 的普通设置里能看到商户编号。web、worker 启动时日志里有一行 `TEST_MERCHANT_IP_BYPASS on`。
+- 生效条件和测试管理员完全一样：`APP_ENV=staging` 且 `TRON_NETWORK=nile`；配了以太坊 / BSC 节点的，链 ID 要在测试网白名单里（11155111、17000、560048、97），不在或查不到时这次不免。条件不满足就当没配。
+- 只免 IP 白名单这一项：签名、时间戳、幂等键、余额、打款上限、逐行校验都照旧；别的商户不受影响（白名单为空照样 403）。
+- 生产没有：生产的 `.env` 里有这个变量时 web、worker 拒绝启动（说明里只有变量名），`topup-watch` 也会发邮件；`set` 在不是测试环境的服务器上直接拒绝。
+- 风险：拿到这个测试商户 API Key 和 Secret 的人可以从任何 IP 用它提币、批量打款（测试网的币）。Key、Secret 只在 GitHub 环境 `staging-e2e` 的密钥里，怀疑泄露时先 `sudo topup test-merchant-ip-off`，再在商户后台重新生成密钥。

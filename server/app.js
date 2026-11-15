@@ -14,7 +14,7 @@ import { createOnboardingHandler } from './kyb/onboarding.js';
 import { createAdminHandler } from './kyb/admin.js';
 import { createPayDeps } from './pay/deps.js';
 import { approvedFromKyb, pendingKybCount } from './pay/kyb-link.js';
-import { refuseTestAdmin } from './pay/test-admin.js';
+import { refuseTestAdmin, refuseTestMerchantIpBypass } from './pay/test-admin.js';
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LOCAL_SECRET = 'local-dev-secret-local-dev-secret-0123456789';
@@ -36,9 +36,9 @@ export function refuseLocal(config) {
   return config.nodeEnv === 'production' && config.appEnv === 'local' ? 'NODE_ENV=production 时不能以 APP_ENV=local 运行，请设置 APP_ENV=production 或 staging' : null;
 }
 
-/** 启动前的拒绝条件（web、worker 都检查）：镜像里以本地模式运行、生产配了测试管理员。返回错误说明（只有变量名）或 null */
+/** 启动前的拒绝条件（web、worker 都检查）：镜像里以本地模式运行、生产配了测试管理员或测试商户免 IP 白名单。返回错误说明（只有变量名）或 null */
 export function refuseConfig(config) {
-  return refuseLocal(config) || refuseTestAdmin(config);
+  return refuseLocal(config) || refuseTestAdmin(config) || refuseTestMerchantIpBypass(config);
 }
 
 /** 本地运行时的默认值：数据目录、内嵌数据库、开发用主密钥 */
@@ -60,9 +60,11 @@ export function withLocalDefaults(config) {
  * 配置不全时抛出错误（err.missing 是缺少的变量名）。
  */
 export async function createApp(rawConfig, { getIp = () => '' } = {}) {
-  // 生产配了测试管理员：不初始化（web、worker 启动时已经拒绝；这里再挡一次，接口一律 503）
+  // 生产配了测试管理员或测试商户免 IP 白名单：不初始化（web、worker 启动时已经拒绝；这里再挡一次，接口一律 503）
   const refused = refuseTestAdmin(rawConfig);
   if (refused) throw Object.assign(new Error(refused), { code: 'test_admin_in_production' });
+  const refusedIp = refuseTestMerchantIpBypass(rawConfig);
+  if (refusedIp) throw Object.assign(new Error(refusedIp), { code: 'test_merchant_ip_bypass_in_production' });
   if (rawConfig.appEnv === 'local' && rawConfig.testAdminTokenSha256) console.warn('[app] TEST_ADMIN_TOKEN_SHA256 is ignored outside staging');
   const miss = missingConfig(rawConfig);
   if (miss.length) throw Object.assign(new Error(`not configured: ${miss.join(', ')}`), { missing: miss });

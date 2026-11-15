@@ -11,7 +11,7 @@ import { createMerchantApi } from './merchant-api.js';
 import { createPayApi } from './pay-api.js';
 import { createWalletApi, sweepProgress } from './wallet-api.js';
 import { createAdminGate } from './admin-gate.js';
-import { testAdminHash, createTestnetCheck } from './test-admin.js';
+import { testAdminHash, createTestnetCheck, testMerchantIpBypass, TEST_MERCHANT_IP_BYPASS_ENV } from './test-admin.js';
 import { runTick } from './tick.js';
 import { runDaily } from './daily.js';
 import { decryptJson } from '../kyb/crypto.js';
@@ -55,8 +55,12 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   const layer = createWalletLayer({ db, config, evm: wallets.evm || {}, tron: wallets.tron || null });
   const notify0 = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
   const ops = createOps({ db, keys, payBase: origin, keyPrefix, wallet: layer, notify: notify0 });
-  // 测试管理员只在测试环境、配了令牌哈希时开（server/pay/test-admin.js）
-  const gate = createAdminGate({ redis: kyb.redis, kybKeys: kyb.keys, testAdminHash: testAdminHash(config), testnetCheck: createTestnetCheck({ eth: layer.adapters?.eth, bsc: layer.adapters?.bsc }) });
+  // 测试管理员只在测试环境、配了令牌哈希时开（server/pay/test-admin.js）；测试商户免 IP 白名单用同一套条件和同一个链 ID 核对
+  const testnetCheck = createTestnetCheck({ eth: layer.adapters?.eth, bsc: layer.adapters?.bsc });
+  const gate = createAdminGate({ redis: kyb.redis, kybKeys: kyb.keys, testAdminHash: testAdminHash(config), testnetCheck });
+  const ipBypassId = testMerchantIpBypass(config);
+  if (ipBypassId) console.warn(`[pay] ${TEST_MERCHANT_IP_BYPASS_ENV} on: one test merchant skips the open-API IP whitelist (staging + nile only; configured EVM nodes must be testnets)`);
+  else if (config.testMerchantIpBypass && config.appEnv !== 'production') console.warn(`[pay] ${TEST_MERCHANT_IP_BYPASS_ENV} is ignored (needs APP_ENV=staging and TRON_NETWORK=nile)`);
   const notify = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
   // 启动时用 eth_call 核对链上批量合约的 parent、factory 和配置一致；不一致的链不开通并告警（最多等 8 秒，连不上下一轮再核对）
   await layer.verifyOnchain({ db, notify }).catch((e) => console.error(`[wallet] onchain check: ${e.message}`));
@@ -78,7 +82,7 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   const pendingKyb = kyb.pendingKyb || (async () => 0);
   return {
     db, tron, keys, ops, wallets, layer,
-    v1: createApiV1({ db, keys, ops, getIp, redis: kyb.redis }), // 限流计数和开户共用同一个 Redis
+    v1: createApiV1({ db, keys, ops, getIp, redis: kyb.redis, ipBypass: ipBypassId ? { merchantId: ipBypassId, testnetCheck } : null }), // 限流计数和开户共用同一个 Redis
     merchant: createMerchantApi({ db, keys, ops, send }),
     pay: createPayApi({ db, layer, redis: kyb.redis, getIp }), // 按 IP 限流，和开放 API 共用 Redis
     wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, layer, notify, diskPath }), diskPath, payoutSvc, ...gate }),

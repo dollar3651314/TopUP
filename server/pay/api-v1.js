@@ -58,7 +58,11 @@ export function createRateLimiter({ redis, log = console, timeoutMs = 1000, pref
   };
 }
 
-export function createApiV1({ db, keys, ops, getIp = () => '', now = () => Date.now(), redis, log = console, allow = createRateLimiter({ redis, log }) }) {
+/**
+ * ipBypass：测试环境的测试商户免 IP 白名单（server/pay/test-admin.js 的 testMerchantIpBypass）。{ merchantId, testnetCheck } 或 null；
+ * 只对 merchantId 这一个商户、且 testnetCheck()（以太坊 / BSC 节点是测试网）通过时跳过 needIp，其余检查照旧
+ */
+export function createApiV1({ db, keys, ops, getIp = () => '', now = () => Date.now(), redis, log = console, allow = createRateLimiter({ redis, log }), ipBypass = null }) {
   async function auth(request, raw) {
     const key = request.headers.get('x-topup-key') || '';
     const ts = request.headers.get('x-topup-timestamp') || '';
@@ -97,7 +101,9 @@ export function createApiV1({ db, keys, ops, getIp = () => '', now = () => Date.
       throw e;
     }
   }
-  const needIp = (m, request) => {
+  // 开放 API 里每一处 IP 白名单检查都走这里（提币、批量打款）
+  const needIp = async (m, request) => {
+    if (ipBypass?.merchantId && m.id === ipBypass.merchantId && typeof ipBypass.testnetCheck === 'function' && (await ipBypass.testnetCheck())) return;
     const ip = getIp(request);
     if (!m.ip_whitelist.length || !m.ip_whitelist.includes(ip)) throw new PayError('ip_not_allowed', 403);
   };
@@ -115,12 +121,12 @@ export function createApiV1({ db, keys, ops, getIp = () => '', now = () => Date.
     'GET balance': (m) => ops.balance(m),
     'GET ledger': (m, q) => ops.ledger(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '' }),
     'GET deposits': (m, q) => ops.deposits(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '', matched: q.get('matched') || '' }),
-    'POST withdrawals': (m, q, b, request) => { needIp(m, request); return ops.withdraw(m, b, 'api'); },
+    'POST withdrawals': async (m, q, b, request) => { await needIp(m, request); return ops.withdraw(m, b, 'api'); },
     'GET withdrawals': (m, q) => ops.getWithdrawal(m, q.get('withdrawal_no')),
     'POST withdrawals/cancel': (m, q, b) => ops.cancelWithdrawal(m, b.withdrawal_no),
     // 批量打款（第 3 批）：一次最多 500 笔；有一行不对整个请求 422 invalid_rows（error.rows 列出 index 和原因），不做"只收没问题的"
     'POST payouts/batch': async (m, q, b, request) => {
-      needIp(m, request);
+      await needIp(m, request);
       if (!Array.isArray(b.items) || !b.items.length) throw new PayError('invalid_param', 422, 'items');
       if (b.items.length > 500) throw new PayError('too_many_items', 422, 'items');
       const r = await ops.payoutSubmit(m, b.items.map((x, i) => ({ ...(x && typeof x === 'object' ? x : {}), line: i + 1 })), 'api', false, now());

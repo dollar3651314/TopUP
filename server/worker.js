@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { createApp, refuseConfig, refuseLocal } from './app.js';
+import { refuseTestAdmin, TEST_ADMIN_ENV, TEST_MERCHANT_IP_BYPASS_ENV } from './pay/test-admin.js';
 
 export const LEASE_MS = 60_000;
 
@@ -55,7 +56,7 @@ export async function runOnce({ db, tick, daily, owner, atUtc, now = Date.now(),
 
 export async function startWorker(config = loadConfig(), { log = console } = {}) {
   const refused = refuseConfig(config);
-  if (refused) throw Object.assign(new Error(refused), { missing: [refuseLocal(config) ? 'APP_ENV' : 'TEST_ADMIN_TOKEN_SHA256'] });
+  if (refused) throw Object.assign(new Error(refused), { missing: [refuseLocal(config) ? 'APP_ENV' : refuseTestAdmin(config) ? TEST_ADMIN_ENV : TEST_MERCHANT_IP_BYPASS_ENV] });
   const app = await createApp(config);
   const pay = await app.pay;
   const owner = `${process.pid}-${randomBytes(4).toString('hex')}`;
