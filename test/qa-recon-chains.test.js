@@ -193,7 +193,7 @@ function failBalanceOf(adapter, address) {
 }
 const mismatchMails = (s) => s.mails.filter((m) => /对账不一致/.test(m));
 
-test('六、热钱包或冷钱包查不到：这条链 complete = false，对账没查完，不发对账不一致告警；存进 recon 表（后台对账页读它）的也是"没查完"', async () => {
+test('六、热钱包或冷钱包查不到：这条链 complete = false，对账没查完，这条链标【没查完】不比、查完的链对不上照常告警、不比合计；存进 recon 表（后台对账页读它）的也是"没查完"', async () => {
   for (const [label, pick] of [['以太坊热钱包', (s) => ['eth', s.hot.eth]], ['TRON 冷钱包（parent）', (s) => ['tron', s.parent.tron]]]) {
     const s = await setup();
     await s.deposit('eth', 100 * U);
@@ -211,7 +211,14 @@ test('六、热钱包或冷钱包查不到：这条链 complete = false，对账
     assert.ok(num(pc[chain].wallet_errors) >= 1, `${label}：要记下钱包没查到（${JSON.stringify(pc[chain])}）`);
     for (const c of CHAINS.filter((x) => x !== chain)) assert.equal(pc[c].complete, true, `${label}：别的链（${c}）照常查完`);
     assert.equal(out.recon.complete, false, `${label}：整份对账没查完`);
-    assert.equal(mismatchMails(s).length, 0, `${label}：没查完时不发对账不一致告警：${s.mails.join('\n---\n')}`);
+    // 口径变更（对账小改，产品验收定）：没查完的链不比、不拿它的数字告警；查完的 BSC 真的少了 5，照常告警；合计这次不比
+    const alert = mismatchMails(s)[0];
+    assert.ok(alert, `${label}：查完的 BSC 少了 5，要告警：${s.mails.join('\n---\n')}`);
+    const line = (c) => alert.split('\n').find((l) => new RegExp(`^(【[^】]+】)?(?:${LABEL[c].source})[：:]`).test(l)) || '';
+    assert.match(line(chain), /^【没查完】/, `${label}：没查完的链标【没查完】：${alert}`);
+    assert.doesNotMatch(line(chain), /差额/, `${label}：没查完的链不写差额：${alert}`);
+    assert.match(line('bsc'), /^【对不上】/, `${label}：BSC 标【对不上】：${alert}`);
+    assert.doesNotMatch(alert, /合计链上/, `${label}：有链没查完时不比合计：${alert}`);
     // 后台"对账"页和概览读的是 recon 表：存进去的也必须是没查完
     const [row] = await s.db.query('select detail from recon order by day desc limit 1');
     assert.equal(row.detail.complete, false, `${label}：存进 recon 表的是"没查完"`);
