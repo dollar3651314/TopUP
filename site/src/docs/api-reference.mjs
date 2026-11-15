@@ -35,7 +35,7 @@ export const OBJECTS = {
   OrderPay: [
     ['address', 'string', ["Address to pay to on the order's chain; null when no chain was given (the payer picks one on the payment page)", '付款地址：指定了链时是这条链的地址；没有指定时为 null（付款人在付款页选链）'], true],
     ['network', 'string', ['Network of address: ETH, BSC or TRON; null when no chain was given', 'address 所在的网络：ETH、BSC 或 TRON；没有指定链时为 null'], true],
-    ['chain', 'string', ['Chain given when the order was created (eth or bsc); null = the payer chooses on the payment page', '创建订单时指定的链（eth 或 bsc）；null 表示付款人在付款页自己选'], true],
+    ['chain', 'string', ['Chain given when the order was created: eth, bsc or tron (only a chain enabled on this platform can be given); null = the payer chooses on the payment page', '创建订单时指定的链：eth、bsc 或 tron（这条链在本平台开通了才能指定）；null 表示付款人在付款页自己选'], true],
     ['addresses', 'array', ['Addresses already generated for this customer: [{ chain, address }] (only the order\'s chain when one was given). ETH and BSC use the same address; pay only on the chain you choose', '这个客户已经生成过的地址：[{ chain, address }]（指定了链时只给这条链）。ETH 和 BSC 是同一串地址，只按选定的网络转账'], true],
     ['token', 'string', ['Always USDT', '固定为 USDT']],
     ['pay_url', 'string', ['Hosted payment page for this order', '这个订单的付款页面']],
@@ -168,7 +168,7 @@ export const ENDPOINTS = [
       ['amount', 'amount', true, ['Order amount in USDT, up to 6 decimals, e.g. "100.5"', '订单金额（USDT），最多 6 位小数，例如 "100.5"']],
       ['customer_name', 'string', false, ['Used only when the customer is new', '只在新建客户时使用']],
       ['customer_email', 'string', false, ['Used only when the customer is new', '只在新建客户时使用']],
-      ['chain', 'string', false, ['eth or bsc: the payer can only pay on this chain, and the customer\'s address on this chain is generated now. Leave out to let the payer choose on the payment page (recommended); the address is generated when they choose', 'eth 或 bsc：付款人只能用这条链付款，创建订单时生成客户在这条链的地址。不传时由付款人在付款页选择（推荐），选了才生成那条链的地址']],
+      ['chain', 'string', false, ['eth, bsc or tron (only a chain enabled on this platform can be given): the payer can only pay on this chain, and the customer\'s address on this chain is generated now. Leave out to let the payer choose on the payment page (recommended); the address is generated when they choose', 'eth、bsc 或 tron（这条链在本平台开通了才能指定）：付款人只能用这条链付款，创建订单时生成客户在这条链的地址。不传时由付款人在付款页选择（推荐），选了才生成那条链的地址']],
     ],
     returns: ['OrderCore', 'OrderPay'],
     errors: ['order_mode_disabled', 'duplicate_merchant_order_no', 'chain_not_enabled', 'invalid_param'],

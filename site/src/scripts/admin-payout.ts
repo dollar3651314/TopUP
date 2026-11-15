@@ -443,6 +443,7 @@ export async function renderWalletCards(ui: WalletUi, p: HTMLElement, legacy: { 
       sec('热钱包', '打款从这里付，只放小额；私钥不上服务器', addr(c.hot), c.hot_balance !== null ? h('span', { class: c.low ? 'bad' : '' }, `USDT ${usd(c.hot_balance)} / 上限 ${usd(c.hot_max)}${c.low ? `（低于 ${usd(c.hot_low)}，请补款）` : ''}`) : null,
         c.hot_balance !== null && u(c.hot_balance) > u(c.hot_max) ? h('p', { class: 'warn-box m0', 'data-hot-over': c.chain }, `热钱包超过上限 ${fmtUsdt(u(c.hot_balance) - u(c.hot_max))} USDT：热钱包只放小额，请把多出来的转回冷钱包。`) : null,
         c.hot && c.hot_gas !== undefined ? h('span', { class: 'hint muted', 'data-hot-gas': c.chain }, `手续费币 ${c.hot_gas === null ? '暂时查不到' : `${c.hot_gas} ${SYM[c.chain]}`}${evm ? '（签打款、改额度的网络费从这里付）' : '（打款直接烧 TRX）'}`) : null,
+        c.payout_usdt ? h('span', { class: 'hint muted', 'data-payout-usdt': c.chain }, `打款用的 USDT 合约：${c.payout_usdt}（与收款合约不同）`) : null,
         c.hot_balance !== null ? meter(c.hot_balance, c.hot_max) : null),
       evm ? sec('授权额度', '热钱包允许批量打款合约（BatchPayout）动用的上限', h('span', { 'data-allowance': c.chain }, c.allowance === null ? (c.payout_enabled ? '—' : '没开通批量打款') : `${usd(c.allowance)} / ${usd(c.hot_max)}`),
         c.payout_enabled ? h('div', {}, h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-allowance-edit': c.chain, onclick: () => editAllowance(ui, c) }, '改额度')) : null,

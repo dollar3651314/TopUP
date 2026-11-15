@@ -104,10 +104,10 @@ X-TopUP-Signature: 5f1c…
 
       <h2 id="overview">{T('Overview', '概览')}</h2>
       <ul>
-        <li>{T('Network and token: USDT on TRON (TRC20) only. Amounts are decimal strings with up to 6 decimals, e.g. "100.5".', '网络和币种：只支持 TRON 上的 USDT（TRC20）。金额用字符串表示，最多 6 位小数，例如 "100.5"。')}</li>
+        <li>{T('Network and token: USDT only, on TRON (TRC20), Ethereum (ERC20) and BSC (BEP20); only the networks enabled on this platform are available, and a network that is not enabled returns chain_not_enabled. Amounts are decimal strings with up to 6 decimals, e.g. "100.5".', '网络和币种：只支持 USDT，可用的网络是 TRON（TRC20）、以太坊（ERC20）、BSC（BEP20）；以本平台实际开通的为准，没开通的链会返回 chain_not_enabled。金额用字符串表示，最多 6 位小数，例如 "100.5"。')}</li>
         <li>{T('Base URL: ', '接口地址：')}<code>{'https://{BASE_URL}/api/v1/'}</code>{T(' — every path ends with "/". Requests without the trailing slash are redirected, which some HTTP clients do not follow for POST.', '，所有路径都以 "/" 结尾。不带结尾斜杠的请求会被跳转，有些 HTTP 工具在 POST 被跳转时会出错。')}</li>
-        <li>{T('Collect by customer: each of your customers gets one permanent address (deposit callbacks). With order mode on, create orders for a customer and deposits are matched to them automatically (order-matched callbacks).', '按客户收款：你的每个客户有一个永久地址（发到账通知）。开启订单模式后，可以给客户创建订单，系统自动把到账匹配到订单（发订单匹配通知）。')}</li>
-        <li>{T('A deposit counts after 19 confirmations (about 1 minute). Callbacks are normally sent within 2 minutes of payment.', '到账达到 19 个确认（大约 1 分钟）后才算入账，一般在付款后 2 分钟内发出回调。')}</li>
+        <li>{T('Collect by customer: each of your customers gets one permanent address on each chain, generated the first time the customer makes a deposit on that chain; Ethereum and BSC use the same address (deposit callbacks). With order mode on, create orders for a customer and deposits are matched to them automatically (order-matched callbacks).', '按客户收款：你的每个客户在每条链上有一个永久地址，客户第一次在这条链发起充值时生成；以太坊和 BSC 是同一串地址（发到账通知）。开启订单模式后，可以给客户创建订单，系统自动把到账匹配到订单（发订单匹配通知）。')}</li>
+        <li>{T('A deposit counts once it reaches the required confirmations: TRON 19 (about 1 minute), Ethereum 12 (about 3 minutes), BSC 15 (under 1 minute). Callbacks are normally sent within 1 minute after that.', '到账达到确认数后才算入账：TRON 19 个（约 1 分钟）、以太坊 12 个（约 3 分钟）、BSC 15 个（不到 1 分钟）；达到确认数后一般 1 分钟内发出回调。')}</li>
         <li>{T('Every withdrawal is reviewed manually. Working hours are 8:00–23:00 (UTC+8): requests in working hours are processed within 1 hour; others at the start of the next working period.', '每一笔提币都经过人工审核。工作时间为东八区 8:00–23:00：工作时间内的申请 1 小时内处理，其余的顺延到下一个工作时间。')}</li>
       </ul>
       <div class="table-scroll"><table class="data-table">
@@ -227,7 +227,7 @@ X-TopUP-Signature: 5f1c…
       </table></div>
 
       <h2 id="sandbox">{T('Sandbox', '沙箱')}</h2>
-      <p>{T('A sandbox is not available yet. During the early-access period, integrate on production with small amounts (for example 1 USDT).', '暂时不提供沙箱。试用阶段请在正式环境用小金额（例如 1 USDT）联调。')}</p>
+      <p>{T('The test environment uses testnets (Ethereum Sepolia, BSC Testnet, TRON Nile) with test tokens only.', '测试环境用测试网（以太坊 Sepolia、BSC 测试网、TRON Nile），只有测试币。')}</p>
     </article>
   </div>
 </AppLayout>

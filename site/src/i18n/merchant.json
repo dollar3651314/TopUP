@@ -468,12 +468,12 @@
         "bsc": "BEP20",
         "tron": "TRC20"
       },
-      "later": "Release 2",
+      "later": "Not enabled",
       "only": "USDT on {net} ({std}) only · never changes",
       "copy": "Copy {net} address",
-      "laterNote": "Assigned automatically when release 2 goes live; nothing to do.",
+      "laterNote": "TRON is not enabled on this platform yet.",
       "notYet": "Not generated yet: created when the customer makes a deposit on this network.",
-      "tronLater": "After release 2 goes live, generated when the customer makes a deposit on TRON.",
+      "tronLater": "TRON is not enabled on this platform yet; once it is, generated when the customer makes a deposit on TRON.",
       "sameNote": "The Ethereum and BSC addresses are the same string: this customer can receive USDT on both networks. Tell the payer which network to use.",
       "copiedNote": "Copied. Tell the payer to use the {net} ({std}) network only."
     },
@@ -1032,12 +1032,12 @@
         "bsc": "BEP20",
         "tron": "TRC20"
       },
-      "later": "第 2 批",
+      "later": "未开通",
       "only": "只收 {net}（{std}）网络的 USDT · 永久不变",
       "copy": "复制 {net} 地址",
-      "laterNote": "第 2 批上线后自动分配，不用你操作。",
+      "laterNote": "平台还没开通 TRON 收款，暂时不能选。",
       "notYet": "还没有生成：客户在这条链发起充值时生成。",
-      "tronLater": "第 2 批上线后，客户在 TRON 发起充值时生成。",
+      "tronLater": "平台还没开通 TRON 收款；开通后，客户在 TRON 发起充值时生成。",
       "sameNote": "以太坊和 BSC 的地址是同一串：这个客户两条链都能收 USDT。付款时按付款人用的网络告诉他。",
       "copiedNote": "已复制。告诉付款人只用 {net}（{std}）网络转账。"
     },

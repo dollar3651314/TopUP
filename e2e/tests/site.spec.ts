@@ -225,3 +225,35 @@ test('TC-V71-4 sitemap 不包含 /merchant/、/admin/', async ({ request }) => {
   expect(xml).not.toContain('/merchant/');
   expect(xml).not.toContain('/admin/');
 });
+
+// 开发者文档改为多链口径（TRON、以太坊、BSC）：不再写"只支持 TRON"；确认数按链写（TRON 19、以太坊 12、BSC 15）；沙箱写三条测试网
+for (const [path, lang] of [['/zh/docs/', 'zh'], ['/docs/', 'en']] as const) {
+  test(`TC-DOC-MC ${path} 多链口径：三条链、确认数 19 / 12 / 15、不再写只支持 TRON；沙箱写三条测试网`, async ({ page }) => {
+    await page.goto(path);
+    const body = page.locator('.docs-body');
+    await expect(body.locator('#overview')).toBeVisible(); // 前提：文档正文已显示
+    const overview = (await body.locator('#overview + ul').innerText()).replace(/\s+/g, ' ');
+    // 三条链都写到
+    for (const name of lang === 'zh' ? ['TRON', '以太坊', 'BSC'] : ['TRON', 'Ethereum', 'BSC']) expect(overview, `概览要写到 ${name}`).toContain(name);
+    // 不再写"只支持 TRON"
+    if (lang === 'zh') expect(overview).not.toMatch(/只支持\s*TRON/);
+    else expect(overview).not.toMatch(/USDT on TRON \(TRC20\) only/i);
+    // 确认数：写"确认"的那一条里三个数都有，并且各跟着自己的链名
+    const conf = (await body.locator('#overview + ul li').allInnerTexts()).map((x) => x.replace(/\s+/g, ' ')).filter((x) => (lang === 'zh' ? /确认/ : /confirmation/i).test(x));
+    expect(conf.length, '概览要有一条写确认数').toBeGreaterThan(0);
+    const all = conf.join(' ');
+    for (const n of ['19', '12', '15']) expect(all, `确认数 ${n}`).toMatch(new RegExp(`\\b${n}\\b`));
+    const near = (chain: string, n: string) => new RegExp(`${chain}[^。；;.]{0,20}?\\b${n}\\b|\\b${n}\\b[^。；;.]{0,20}?${chain}`);
+    expect(all, 'TRON 19 个确认').toMatch(near('TRON', '19'));
+    expect(all, '以太坊 12 个确认').toMatch(near(lang === 'zh' ? '以太坊' : 'Ethereum', '12'));
+    expect(all, 'BSC 15 个确认').toMatch(near('BSC', '15'));
+    // 沙箱：三条测试网（以太坊 Sepolia、BSC 测试网、TRON Nile），不再写"暂不提供沙箱"
+    const sb = page.locator('#sandbox ~ *');
+    const sandbox = (await sb.allInnerTexts()).join(' ').replace(/\s+/g, ' ');
+    expect(sandbox).toMatch(/Sepolia/);
+    expect(sandbox).toMatch(/Nile/);
+    expect(sandbox).toMatch(lang === 'zh' ? /BSC[^。；]*测试网|测试网[^。；]*BSC/ : /BSC[^.;]*testnet|testnet[^.;]*BSC/i);
+    if (lang === 'zh') expect(sandbox).not.toContain('暂时不提供沙箱');
+    else expect(sandbox).not.toMatch(/not available yet/i);
+  });
+}

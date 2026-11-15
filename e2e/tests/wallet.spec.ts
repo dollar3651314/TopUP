@@ -77,6 +77,11 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(admin.locator(`[data-panel="${tab}"] [data-loading]`)).toHaveCount(0);
   }
   const usdtOf = (s: string) => Number(s.replace(/[^\d.]/g, ''));
+  // TRON 没开通时面向用户的口径（产品定的口径变更：原来写"第 2 批"，改成"未开通"）
+  const OFF = '未开通', OLD = '第 2 批';
+  const LATER_NOTE = '平台还没开通 TRON 收款，暂时不能选。';
+  const TRON_LATER = '平台还没开通 TRON 收款；开通后，客户在 TRON 发起充值时生成。';
+  const TRON_STATUS_NOTE = 'TRON 合约钱包没开通（config/wallets.json 的 tron 参数没填全，或链上核对没通过），不分配新的 TRON 地址；已有的老 TRON 地址照常入账。';
 
   // ---- 第 2 批（TRON 合约钱包）开通后的收尾：本地（config/wallets.json 的 local）不开通 TRON 合约钱包，
   // "开通"用浏览器拦截接口模拟：商户页看概览接口的 chains、付款页看 /api/pay/ 的 chains。每个用例用新开的页面，不影响 merchant 页面里已读到的开通列表。
@@ -301,15 +306,19 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(admin.locator('[data-panel="p-overview"] [data-todo]')).not.toContainText('读取失败');
   });
 
-  test('TC-W07 钱包提供方：没有别的已接入提供方时"切换"按钮禁用；Cobo、Fireblocks 显示"未接入"', async () => {
+  test('TC-W07 钱包提供方：没有别的已接入提供方时"切换"按钮禁用；Cobo、Fireblocks 显示"未接入"；TRON 标"未开通"、不写"第 2 批"', async () => {
     await adminTab('p-routes');
     const p = admin.locator('[data-panel="p-routes"]');
     await expect(p).toContainText('未接入');
-    await expect(p).toContainText('第 2 批'); // TRON
+    // TRON：标签（链名旁边、切换按钮的位置）都写"未开通"
+    const tags = p.locator('.later-tag');
+    await expect(tags.first()).toBeVisible();
+    for (const t of await tags.allInnerTexts()) expect(t.trim()).toBe(OFF);
+    await expect(p).not.toContainText(OLD);
     for (const ch of ['eth', 'bsc']) await expect(p.locator(`[data-switch="${ch}"]`)).toBeDisabled();
   });
 
-  test('TC-W08 系统状态：每条链一张卡；扫块停了的链标红（状态和提示），正常的链不标红；TRON 显示"第 2 批"；不显示合约地址的值', async () => {
+  test('TC-W08 系统状态：每条链一张卡；扫块停了的链标红（状态和提示），正常的链不标红；TRON 标"未开通"、说明写新口径、不写"第 2 批"；不显示合约地址的值', async () => {
     await tick(admin); // 先让两条链都扫一次块（正常状态）
     await admin.route(isWallet('wallet-chains'), async (r) => {
       const res = await r.fetch(); const j = await res.json();
@@ -323,17 +332,24 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(p.locator('[data-chain-card="bsc"] .alert')).toBeVisible();
     await expect(p.locator('[data-chain-card="eth"] .st-rejected')).toHaveCount(0);
     await expect(p.locator('[data-wallet-status] .hero-bad')).toContainText('BSC');
-    await expect(p.locator('[data-chain-card="tron"]')).toContainText('第 2 批');
+    const tc = p.locator('[data-chain-card="tron"]');
+    await expect(tc.locator('.later-tag')).toHaveText(OFF);
+    await expect(tc).toContainText(TRON_STATUS_NOTE);
+    await expect(tc).not.toContainText(OLD);
+    await expect(tc).not.toContainText('第 1 批');
+    await expect(p).not.toContainText(OLD);
     expect(await p.locator('[data-wallet-status]').innerText()).not.toMatch(/0x[0-9a-fA-F]{40}/);
     await admin.unroute(isWallet('wallet-chains'));
   });
 
-  test('TC-W09 商户客户（K1）：新建客户后没有地址，写明"客户发起充值时按链生成"；列表按链分列；TRON 标"第 2 批"', async () => {
+  test('TC-W09 商户客户（K1）：新建客户后没有地址，写明"客户发起充值时按链生成"；列表按链分列；列表的 TRON 一列标"未开通"，不写"第 2 批"', async () => {
     await merchant.goto('/zh/merchant/');
     await merchant.click('[data-mtab="customers"]');
     const panel = merchant.locator('[data-mpanel="customers"]');
     await expect(panel.locator('thead')).toContainText('以太坊');
     await expect(panel.locator('thead')).toContainText('BSC');
+    // 口径的断言用 soft：没改时这里红，但照样往下建客户（后面的用例要用）
+    await expect.soft(panel).not.toContainText(OLD);
     await panel.locator('.toolbar .btn-primary').click();
     await merchant.fill('#mc-id', 'ui_multi_1');
     await merchant.click('[data-mdialog-ok]');
@@ -345,10 +361,19 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(dlg).toBeVisible();
     await expect(dlg).not.toContainText(/0x[0-9a-fA-F]{40}/);
     await expect(dlg).toContainText('充值'); // 说明地址在客户发起充值时按链生成
+    // 新客户没有地址时详情不画按链的地址卡（只写说明），TRON 一行的口径在 TC-W09B 断言；这里只断言不写"第 2 批"
+    await expect.soft(dlg).not.toContainText(OLD);
+    await expect.soft(dlg).not.toContainText('第 2 批上线');
     await merchant.keyboard.press('Escape');
+    // 列表的 TRON 一列：标"未开通"
+    const heads = (await panel.locator('thead th').allInnerTexts()).map((x) => x.trim());
+    const ti = heads.findIndex((x) => x.includes('TRON'));
+    expect(ti, `前提：列表有 TRON 一列（表头 ${heads.join(' | ')}）`).toBeGreaterThan(0);
+    await expect(panel.locator('[data-customer="ui_multi_1"] td').nth(ti)).toHaveText(OFF);
+    await expect(panel.locator('tbody')).not.toContainText(OLD);
   });
 
-  test('TC-W09B 商户客户：以太坊、BSC 都生成过时，客户详情两行同一串，旁边写一句说明（免得商户以为只能收一条链）；TRON 标"第 2 批"', async () => {
+  test('TC-W09B 商户客户：以太坊、BSC 都生成过时，客户详情两行同一串，旁边写一句说明（免得商户以为只能收一条链）；TRON 标"未开通"、不写"第 2 批"', async () => {
     await mcall('customer-save', { customer_id: 'ui_multi_2' });
     for (const chain of ['eth', 'bsc']) expect((await mcall('order-create', { customer_id: 'ui_multi_2', merchant_order_no: `GEN2-${chain}`, amount: '1', chain })).status).toBe(200);
     await merchant.goto('/zh/merchant/');
@@ -360,7 +385,9 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(eth).toBeVisible(); await expect(bsc).toBeVisible();
     expect((await eth.locator('.mono').textContent())!.trim()).toBe((await bsc.locator('.mono').textContent())!.trim());
     await expect(eth).toContainText('ERC20'); await expect(bsc).toContainText('BEP20');
-    await expect(dlg.locator('[data-addresses] [data-chain="tron"]')).toContainText('第 2 批');
+    await expect(dlg.locator('[data-addresses] [data-chain="tron"] .later-tag')).toHaveText(OFF);
+    await expect(dlg.locator('[data-addresses] [data-chain="tron"]')).toContainText(TRON_LATER);
+    await expect(dlg).not.toContainText(OLD);
     await expect(dlg).toContainText('同一串');
     await merchant.keyboard.press('Escape');
   });
@@ -387,16 +414,23 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(tron).toContainText('客户在这条链发起充值时生成');
     await expect(tron).not.toContainText('第 2 批');
     await expect(dlg).not.toContainText('第 2 批');
+    await expect(dlg).not.toContainText(OFF); // 开通后也不标"未开通"
+    await expect(dlg.locator('.later-tag')).toHaveCount(0);
     await mp.close();
   });
 
-  test('TC-W10 订单选链（K1）：可选"不指定 / 以太坊 / BSC"，TRON 灰（第 2 批）；不指定时不给地址（付款人选了链才生成）；指定 BSC 时生成并只给 BSC 地址', async () => {
+  test('TC-W10 订单选链（K1）：可选"不指定 / 以太坊 / BSC"，TRON 灰（标"未开通"、写新口径的说明，不写"第 2 批"）；不指定时不给地址（付款人选了链才生成）；指定 BSC 时生成并只给 BSC 地址', async () => {
     const create = async (no: string, chain: string) => {
       await merchant.click('[data-mtab="orders"]');
       await merchant.click('[data-mpanel="orders"] .toolbar .btn-primary');
       const box = merchant.locator('[data-mdialog] [data-chain-choice]');
       await expect(box).toBeVisible();
       await expect(box.locator('input[value="tron"]')).toBeDisabled();
+      const tronChoice = box.locator('label.chain-choice', { has: merchant.locator('input[value="tron"]') });
+      // soft：口径没改时这里红，但照样往下建单（后面的付款页用例要用）
+      await expect.soft(tronChoice.locator('.later-tag')).toHaveText(OFF);
+      await expect.soft(tronChoice).toContainText(LATER_NOTE);
+      await expect.soft(box).not.toContainText(OLD);
       await expect(box.locator('input[value=""]')).toBeChecked(); // 默认不指定
       // 客户搜索列表出来以后再按 Esc（只关列表）：列表还没出来时 Esc 会关掉整个弹窗（CI 上搜索慢时第二张单的表单就不见了）
       await merchant.fill('#mo-cust', 'ui_multi_1');
@@ -453,6 +487,7 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(box.locator('input[value="eth"]')).toBeEnabled(); // 前提：选链已显示
     await expect(box.locator('input[value="tron"]')).toBeEnabled();
     await expect(box).not.toContainText('第 2 批');
+    await expect(box).not.toContainText(OFF);
     await expect(box.locator('.later-tag')).toHaveCount(0);
     await mp.fill('#mo-cust', 'ui_multi_1');
     await expect(mp.locator('#mo-cust-list')).toBeVisible();
@@ -509,6 +544,11 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(off.locator('[data-net="tron"]')).toBeDisabled();
     await expect(off.locator('[data-net="tron"]')).toContainText('暂未开通');
     await expect(off.locator('[data-net="tron"]')).not.toContainText('即将开通');
+    // 新口径：没开通的链去掉标签，只留"暂未开通"小字（不再写"第 2 批"，也不另加"未开通"标签）
+    await expect(off.locator('[data-net="tron"] .later-tag')).toHaveCount(0);
+    await expect(off.locator('[data-net="tron"]')).not.toContainText(OLD);
+    expect(((await off.locator('[data-net="tron"]').innerText()).match(/未开通/g) || []).length, 'TRON 按钮里"未开通"只出现在"暂未开通"小字里一次').toBe(1);
+    await expect(off.locator('[data-pay-chains]')).not.toContainText(OLD);
     await off.close();
     // 开通：付款页接口的 chains 带上 tron
     const on = await mctx.newPage();
@@ -524,6 +564,47 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(t).not.toContainText('即将开通');
     await expect(t).not.toContainText('暂未开通');
     await on.close();
+  });
+
+  test('TC-W11C 付款页（英文）没开通的 TRON：没有标签，只有"Not available yet"小字；不写"Release 2"', async () => {
+    expect(st.orderAny, '前提：TC-W10 建了不指定链的订单').toMatch(/^ORD-/);
+    const pay = await mctx.newPage();
+    await pay.goto(`/pay/${st.orderAny}/`);
+    await expect(pay.locator('[data-pay-choose]')).toBeVisible();
+    await expect(pay.locator('[data-net="eth"]')).toBeEnabled(); // 前提：选网络的按钮已画出
+    const t = pay.locator('[data-net="tron"]');
+    await expect(t).toBeDisabled();
+    await expect(t).toContainText('Not available yet');
+    await expect(t.locator('.later-tag')).toHaveCount(0);
+    await expect(t).not.toContainText('Not enabled');
+    await expect(pay.locator('[data-pay-chains]')).not.toContainText(/release 2/i);
+    await pay.close();
+  });
+
+  test('TC-W09D 商户客户（英文）TRON 没开通：客户详情、列表、建单选链的标签写"Not enabled"，不写"Release 2"', async () => {
+    const mp = await mctx.newPage();
+    await mp.goto('/merchant/');
+    await expect(mp.locator('[data-merchant-name]')).toHaveText('Wallet E2E Ltd');
+    await mp.click('[data-mtab="customers"]');
+    const panel = mp.locator('[data-mpanel="customers"]');
+    const row = panel.locator('[data-customer="ui_multi_2"]');
+    await expect(row).toBeVisible();
+    await expect(row.locator('.later-tag')).toHaveText('Not enabled');
+    await expect(panel).not.toContainText(/release 2/i);
+    await row.click();
+    const dlg = mp.locator('[data-mdialog]');
+    await expect(dlg.locator('[data-addresses] [data-chain="eth"] .mono')).toBeVisible(); // 前提：详情已显示
+    await expect(dlg.locator('[data-addresses] [data-chain="tron"] .later-tag')).toHaveText('Not enabled');
+    await expect(dlg).not.toContainText(/release 2/i);
+    await mp.keyboard.press('Escape');
+    await mp.click('[data-mtab="orders"]');
+    await mp.click('[data-mpanel="orders"] .toolbar .btn-primary');
+    const box = mp.locator('[data-mdialog] [data-chain-choice]');
+    await expect(box).toBeVisible();
+    await expect(box.locator('input[value="tron"]')).toBeDisabled();
+    await expect(box.locator('.later-tag')).toHaveText('Not enabled');
+    await expect(box).not.toContainText(/release 2/i);
+    await mp.close();
   });
 
   test('TC-W12 付款页：查询接口出错（500）时显示"暂时查不到状态"并提醒已付请不要重复付，不显示"订单不存在"；恢复后自动接着查', async () => {
@@ -661,6 +742,12 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(dlg).not.toContainText('第 2 批');
     await admin.keyboard.press('Escape');
     await expect(dlg).toBeHidden();
+    // 各链待归集地址的链切换：TRON 没开通时标"未开通"，整个归集页不写"第 2 批"
+    const ttab = admin.locator('[data-panel="p-sweep"] [data-sweep-tab="tron"]');
+    await expect(ttab).toBeDisabled();
+    await expect(ttab).toContainText(OFF);
+    await expect(ttab).not.toContainText(OLD);
+    await expect(admin.locator('[data-panel="p-sweep"]')).not.toContainText(OLD);
   });
 
 });

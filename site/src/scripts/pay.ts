@@ -70,8 +70,7 @@ function paintChoose(s: PayState) {
     const hint = document.createElement('span'); hint.className = 'hint muted'; hint.textContent = n ? (c.netHint as Record<string, string>)[ch] || '' : c.netOff; // 没开通的链（灰着）写"暂未开通"，开通的写这条链的说明
     txt.append(std, hint);
     b.append(dot, txt);
-    if (!n) { const later = document.createElement('span'); later.className = 'later-tag'; later.textContent = cn.later; b.append(later); }
-    else b.addEventListener('click', () => setPick(ch));
+    if (n) b.addEventListener('click', () => setPick(ch)); // 没开通的链不加标签，只留"暂未开通"小字
     return b;
   });
   box.replaceChildren(...rows);
