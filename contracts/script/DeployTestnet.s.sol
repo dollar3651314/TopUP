@@ -19,6 +19,8 @@ import {TestUSDT} from "./testnet/TestUSDT.sol";
 ///   TESTNET_USDT                1 = 部署测试 USDT（默认 0）；TESTNET_USDT_TO（默认部署账户）、TESTNET_USDT_MINT（整数个，默认 1,000,000）；
 ///                               小数位数按链定：Sepolia 6、BSC 测试网 18（和主网 USDT 一样，后端按链换算）；本地 anvil 用 TESTNET_USDT_DECIMALS（默认 6）
 ///   PAYOUT_PAYER                批量打款的热钱包地址；设了才部署 BatchPayout（第 3 批的合约，src/BatchPayout.sol 合并进来之后才有）
+///   PAYOUT_ONLY                 1 = 只部署 BatchPayout（nonce N 部署 → N+1 transferOwnership(owner)），不部署实现合约、工厂、批量合约、测试 USDT；
+///                               归集合约已经部署过、只补批量打款时用。要填 PAYOUT_PAYER、SWEEP_PARENT（owner 默认 = parent），不用 SWEEP_OPERATOR
 /// 结果：每个地址一行 "TOPUP_OUT 名字 地址"（deploy.mjs 读这些行），都是公开地址。
 contract DeployTestnet is SweepCheck {
     struct Params {
@@ -33,6 +35,7 @@ contract DeployTestnet is SweepCheck {
         uint256 usdtMint;
         uint8 usdtDecimals;
         address payer;
+        bool payoutOnly;
     }
 
     function params() internal view returns (Params memory p) {
@@ -40,7 +43,8 @@ contract DeployTestnet is SweepCheck {
         p.key = vm.envUint("TOPUP_TESTNET_DEPLOYER_KEY");
         p.deployer = vm.addr(p.key);
         p.parent = vm.envAddress("SWEEP_PARENT");
-        p.operator = vm.envAddress("SWEEP_OPERATOR");
+        p.payoutOnly = vm.envOr("PAYOUT_ONLY", uint256(0)) == 1;
+        p.operator = p.payoutOnly ? vm.envOr("SWEEP_OPERATOR", address(0)) : vm.envAddress("SWEEP_OPERATOR");
         p.owner = vm.envOr("SWEEP_OWNER", p.parent);
         p.expectNonce = vm.envOr("SWEEP_EXPECT_NONCE", uint256(0));
         p.usdt = vm.envOr("TESTNET_USDT", uint256(0)) == 1;
@@ -59,6 +63,7 @@ contract DeployTestnet is SweepCheck {
         console.log(unicode"部署账户:", p.deployer, unicode"nonce:", nonce);
         require(nonce == p.expectNonce, unicode"部署账户的 nonce 不是 SWEEP_EXPECT_NONCE：两条链 nonce 不同，部署出的地址会不同（用一个新的部署账户，或者在运行时填起始 nonce）");
         require(p.deployer.balance > 0, unicode"部署账户没有手续费币（先去水龙头领）");
+        if (p.payoutOnly) return runPayoutOnly(p, nonce);
         require(p.parent != address(0) && p.operator != address(0), unicode"parent、发起账户不能是 0 地址");
         require(p.parent != p.deployer, unicode"parent（冷钱包）不要用部署账户：部署账户的私钥在 GitHub 里");
         if (p.parent.code.length == 0) console.log(unicode"提示：SWEEP_PARENT 不是合约（测试网演练可以，主网必须是 Safe）");
@@ -90,6 +95,24 @@ contract DeployTestnet is SweepCheck {
         }
     }
 
+    /// 只部署 BatchPayout + transferOwnership(owner)：两笔交易，部署后核对热钱包已登记、代码和编译产物一致、所有者等 owner 接受
+    function runPayoutOnly(Params memory p, uint64 nonce) internal {
+        require(p.payer != address(0), unicode"只部署批量打款（PAYOUT_ONLY=1）要填 PAYOUT_PAYER（热钱包）");
+        require(p.parent != address(0) && p.owner != address(0), unicode"parent、owner 不能是 0 地址");
+        require(p.parent != p.deployer && p.owner != p.deployer, unicode"parent / owner（冷钱包）不要用部署账户：部署账户的私钥在 GitHub 里");
+        vm.startBroadcast(p.key);
+        address payout = deployPayout(p);
+        vm.stopBroadcast();
+        checkPayout(payout, p);
+        console.log("TOPUP_OUT chainId", block.chainid);
+        console.log("TOPUP_OUT deployer", p.deployer);
+        console.log("TOPUP_OUT startNonce", nonce);
+        console.log("TOPUP_OUT parent", p.parent);
+        console.log("TOPUP_OUT owner", p.owner);
+        console.log("TOPUP_OUT payout", payout);
+        console.log("TOPUP_OUT hot", p.payer);
+    }
+
     /// 用编译产物部署 BatchPayout（不 import）：src/BatchPayout.sol 还没合并进来时本脚本照样能编译；没有产物时 getCode 报错
     function deployPayout(Params memory p) internal returns (address payout) {
         bytes memory code = abi.encodePacked(vm.getCode("BatchPayout.sol:BatchPayout"), abi.encode(p.payer));
@@ -106,6 +129,7 @@ contract DeployTestnet is SweepCheck {
         require(ok && r.length == 32 && abi.decode(r, (bool)), unicode"BatchPayout 的热钱包没有登记");
         (ok, r) = payout.staticcall(abi.encodeWithSignature("pendingOwner()"));
         require(ok && r.length == 32 && abi.decode(r, (address)) == p.owner, unicode"BatchPayout 的所有者没有交给 owner");
+        require(keccak256(payout.code) == keccak256(vm.getDeployedCode("BatchPayout.sol:BatchPayout")), unicode"BatchPayout 链上代码和编译产物不一致");
         console.log(unicode"  [通过] BatchPayout：热钱包已登记，所有者等 owner 接受");
     }
 }

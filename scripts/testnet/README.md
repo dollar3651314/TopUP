@@ -21,6 +21,7 @@ flowchart LR
 
 - **测试 USDT**（`contracts/script/testnet/TestUSDT.sol`，`tUSDT`）：小数位数和主网 USDT 一样（Sepolia、Nile 6 位，BSC 测试网 18 位）；TRON 版的 `transfer` 成功也返回 `false`（像 TRON 主网 USDT）；谁都可以 `mint`（一次最多 1 亿个），部署时先给部署账户 1,000,000 个。Sepolia、BSC 测试网没有官方测试 USDT，所以默认部署；Nile 有官方测试 USDT（地址已在 `config/wallets.json`），不部署时 TRON 用它。
 - **BatchPayout**：只有填了"批量打款热钱包"、并且这个提交里有 `contracts/src/BatchPayout.sol`（第 3 批合并之后）才部署。
+- **只部署批量打款**（`TESTNET_ONLY_PAYOUT=1`，手动运行时勾选 only_payout）：归集合约已经部署过、只补 BatchPayout 时用。只发两笔：`BatchPayout(热钱包)` 创建 → `transferOwnership(owner)`；同样由 `evm-send.mjs` 整套预演、逐笔发出核对回执。上链后连链只读核对：`isPayer(热钱包)` 为真、链上代码哈希 = 服务器启动核对用的常量（`server/wallet/payout.js` 的 `BATCH_PAYOUT_CODE_HASH`，同一个算法）、`pendingOwner` = owner。只能是 eth、bsc（TRON 打款不走合约）；要填热钱包和 `EVM_PARENT`，不用发起账户；测试 USDT 不部署。结果里 `staging.evm.<链>` 只有 `hot`、`payout` 两项，其他字段不动。owner 调用 `acceptOwnership()` 之前，服务器启动核对会判"owner 不一致"、这条链的批量打款不开通。
 - **owner**：批量合约（和 BatchPayout）的所有者先交给 owner（默认 = parent），owner 要自己调用一次 `acceptOwnership()` 才生效。不接受不影响归集（parent、发起账户已经写在合约里），只影响以后增删发起账户。
 - 部署完的核对（全部通过才算成功）：Foundry 部署脚本里的字节码和参数核对；地址上有代码；**服务器自己的钱包层**（`server/wallet/`，和服务器启动时同一条路径）按要填进 `config/wallets.json` 的参数开通这条链，链上核对 parent / factory / implementation 结果 `ok`；用户 1 的充值地址按服务器的算法算出来 = 批量合约链上算出来的。
 - **ETH / BSC 的交易怎么发**（2026-11-14 改）：forge 只用来算地址、跑部署脚本里的核对、写出要发的交易，**不让 forge 广播**。原因：forge 1.5.1 用自己内置的 EVM 估 gas，不认识 Sepolia 2026-10-06 启用的新硬分叉（`anvil --hardfork amsterdam` 直接报 unimplemented），新规则下建合约贵很多——ForwarderV4 在 Sepolia 上节点估算要 14,028,265 gas，forge 只给了 2,561,629，第一次运行第一笔就耗尽 gas 失败。现在由 `evm-send.mjs` 发：
@@ -56,6 +57,7 @@ flowchart LR
 | `TESTNET_TRON_PARENT` | TRON 冷钱包 parent：你的 Nile 测试地址（T 开头） |
 | `TESTNET_TRON_OPERATOR` | TRON 归集发起账户：`sudo topup gen-operator` 显示的 T 地址 |
 | `TESTNET_PAYOUT_PAYER` | （第 3 批之后）批量打款热钱包地址；空着不部署 BatchPayout |
+| `TESTNET_ONLY_PAYOUT` | （可选）`1` = 推送触发时只部署 BatchPayout（同时把 `TESTNET_CHAINS` 设成 `eth`，`TESTNET_EVM_START_NONCE` 设成部署账户现在的 nonce） |
 | `TESTNET_CHAINS` | （可选）推送触发时部署哪几条链，默认 `eth,bsc,tron` |
 | `TESTNET_EVM_START_NONCE` | （可选）推送触发时 EVM 部署账户的起始 nonce，默认 `0` |
 | `TESTNET_EVM_ALIGN_NONCE` | （可选）`1` = 某条 EVM 链的 nonce 小于起始 nonce 时先给自己转 0 对齐 |
@@ -68,6 +70,7 @@ flowchart LR
 - **手动运行**（这个文件进了默认分支 `main` 之后）：Actions → testnet-deploy → Run workflow，选分支（`staging`）、填参数 → 你在运行页面点 **Review deployments → Approve**。
 - **推送触发**（不用等进 `main`）：推送到 `testnet-run/` 开头的分支（例如 `testnet-run/2026-11-15`），参数用上面的环境变量；同样要你批准。
 - 结果：运行页面的摘要里有要填进 `config/wallets.json` 的 `staging` 一节（JSON）和每笔交易的浏览器链接；产物 `testnet-deploy` 里有 `deployment.json`、`summary.md`（只有公开地址和交易号）。失败时也会写出已经部署了的部分。
+- **只部署批量打款**（推送触发）：环境 `testnet` 的变量设 `TESTNET_ONLY_PAYOUT=1`、`TESTNET_CHAINS=eth`、`TESTNET_PAYOUT_PAYER=<热钱包 0x 地址>`、`TESTNET_EVM_START_NONCE=<部署账户在 Sepolia 上现在的 nonce>`（`TESTNET_EVM_PARENT` 沿用），推送到 `testnet-run/` 分支、批准。部署完把变量 `TESTNET_ONLY_PAYOUT` 删掉或改成 `0`，以后推送才会照常部署整套。
 - 重新部署：EVM 部署账户的 nonce 已经不是 0，运行时把"起始 nonce"填成当前值（两条链要相同）；结果里的 `ver` 会自动加 1（换参数要加版本号）。
 - **两条 EVM 链 nonce 不一样时**（例如 Sepolia 第一次失败用掉了 nonce 0，现在是 1；BSC 测试网还是 0）：起始 nonce 填两条链里**较大**的那个（这里是 1），勾选"对齐 nonce"（推送触发时设环境变量 `TESTNET_EVM_ALIGN_NONCE=1`）。脚本发现某条链的 nonce 小于起始 nonce，先给自己转 0（只花一点手续费）把它推上去，再部署，两条链的地址就一样。nonce 已经大于起始 nonce 的链会报错（nonce 不能往回退），这时起始 nonce 改填更大的值，两条链都对齐到它。
 - 中途失败：错误里会写部署账户现在的 nonce。已经上链的合约不能接着用（后面的合约按 nonce 依次部署，地址连在一起），下次起始 nonce 填这个新值，整套重新部署；另一条链用"对齐 nonce"跟上。
