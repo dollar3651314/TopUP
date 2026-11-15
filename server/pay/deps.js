@@ -19,6 +19,7 @@ import { createWalletLayer } from '../wallet/index.js';
 import { scanEvm } from '../wallet/scan.js';
 import { confirmSweeps, proposeDue } from '../wallet/sweep.js';
 import { checkRentalBalance } from '../wallet/energy.js';
+import { checkOperatorGas } from '../wallet/operator-gas.js';
 import { checkWalletsChange } from './wallets-change.js';
 import { createPayoutService } from '../wallet/payout.js';
 import { isEvmAddress } from '../wallet/create2.js';
@@ -88,6 +89,8 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
         if (Object.keys(pchains).some((ch) => payoutSvc.onchain[ch]?.result !== 'ok' && payoutSvc.onchain[ch]?.result !== 'mismatch')) await payoutSvc.verify().catch(() => {});
         return payoutSvc.confirm();
       } : null,
+      // 发起账户提醒用发失败会抛错的发信函数：发成功才记状态，发失败下一次检查重发
+      operatorGas: layer.enabledChains.length ? () => checkOperatorGas(db, { layer, notify: notifyStrict, adminUrl: `${origin}/admin/` }) : null,
       // 归集：TRON 第 0 批的浏览器签名批次；ETH、BSC 合约钱包确认已发出的批次、到点凑批（东八区 10:00、20:00）
       confirmSweeps: async () => {
         const tronSweeps = await sweepProgress(db, tron, { notify });

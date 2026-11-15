@@ -6,9 +6,11 @@
 //     确认作废、开通商户（会给任意邮箱发信）都不在里面。要动态码的动作（改打款上限）对测试管理员免动态码。
 //   - 审计：业务动作的 actor 记成 test-admin；另外每个 POST 再记一条 test_admin.request（动作名、成功或错误码）。
 //   - 生产（APP_ENV=production）配了 TEST_ADMIN_TOKEN_SHA256：web、worker 拒绝启动（server/app.js 的 refuseConfig）；本地忽略。
-//   - 只在测试网开：APP_ENV=staging 且 TRON_NETWORK=nile；配了以太坊 / BSC 节点的，节点的链 ID 不能是主网（1、56），查不到时这次不认（server/pay/deps.js）。
+//   - 只在测试网开：APP_ENV=staging 且 TRON_NETWORK=nile；配了以太坊 / BSC 节点的，节点的链 ID 要在测试网白名单里（TESTNET_CHAIN_IDS），查不到时这次不认（server/pay/deps.js）。
+//     TRON 节点本身是不是 Nile 没有另外核对（只看 TRON_NETWORK）。
 //   - 开户和商户资料：商户列表（merchants，含联系人邮箱和待开通的开户申请）、客户列表和客户详情（customers、customer，含客户姓名）不在白名单；
-//     其余返回里的商户名（merchant）、名称（name，链名除外）、邮箱（email）、公司名（company）一律打码成"首字 + ***"（maskForTestAdmin）。
+//     其余返回里的商户名（merchant）、名称（name，链名除外）、邮箱（email）、公司名（company）一律打码成"首字 + ***"（maskForTestAdmin）；
+//     任何字段里邮箱形式的内容（例如商户拿邮箱当客户编号、驳回原因里写了邮箱）也打码成"首字***"（不留 @）。
 //   - 改东西的动作只收 POST（GET 调改东西的动作 405）。
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -41,8 +43,19 @@ export const TEST_ADMIN_WRITES = Object.freeze(new Set([
 const HEX64 = /^[0-9a-f]{64}$/;
 const MASK_KEYS = new Set(['merchant', 'email', 'company', 'name']);
 const mask = (v) => (typeof v === 'string' && v ? `${[...v][0]}***` : v);
-/** 测试管理员拿到的返回：商户名、名称（链名除外）、邮箱、公司名打码；别的字段原样 */
+// 邮箱形式的内容（客户编号、驳回原因等自由文本里都可能有）：不管字段名，一律打码成"首字***"（不留 @）
+// 也认 %40（网址编码）和全角＠；两边限长（本地部分最多 64、域名部分最多 255），没有 @ 的字符串直接原样返回：
+// payout-plan 之类的返回里有很长的交易原文（十六进制），不能让正则在上面来回回溯拖住 web 进程。
+// 这只是兜底，不是完整的个人信息清洗（电话、地址、姓名这类不按内容识别）
+const AT_LIKE = /@|＠|%40/i;
+const EMAIL_LIKE = /[^\s@＠%"'<>(),;:]{1,64}(?:@|＠|%40)[^\s@＠%"'<>(),;:]{1,255}/giu;
+const scrubEmail = (v) => (AT_LIKE.test(v) ? v.replace(EMAIL_LIKE, (m) => `${[...m][0]}***`) : v);
+/**
+ * 测试管理员拿到的返回：商户名、名称（链名除外）、邮箱、公司名打码；其余字符串里邮箱形式的内容也打码（customer_id、reason 这类自由文本，
+ * 按字段名列不全，所以按内容兜底）；别的原样
+ */
 export function maskForTestAdmin(x) {
+  if (typeof x === 'string') return scrubEmail(x);
   if (Array.isArray(x)) return x.map(maskForTestAdmin);
   if (!x || typeof x !== 'object') return x;
   const out = {};
@@ -60,10 +73,10 @@ export function testAdminHash(config) {
   return config?.appEnv === 'staging' && config?.tronNetwork === 'nile' && HEX64.test(h) ? h : '';
 }
 
-/** 以太坊、BSC 主网的链 ID：配的节点是这两个时不认测试管理员 */
-export const MAINNET_CHAIN_IDS = Object.freeze([1, 56]);
+/** 认可的以太坊 / BSC 测试网链 ID：Sepolia、Holesky、Hoodi、BSC 测试网。配的节点不在里面（主网或别的链）就不认测试管理员 */
+export const TESTNET_CHAIN_IDS = Object.freeze([11155111, 17000, 560048, 97]);
 /**
- * 核对配了的以太坊 / BSC 节点都不是主网（chainId 不是 1、56）。都核对过返回 true；是主网返回 false 并记住；
+ * 核对配了的以太坊 / BSC 节点都是认可的测试网（白名单，不是"不是主网"）。都核对过返回 true；不在白名单返回 false 并记住；
  * 节点查不到返回 false（这次不认），下次再查。adapters：{ eth?, bsc? }，每个有 chainId()
  */
 export function createTestnetCheck(adapters = {}) {
@@ -75,7 +88,7 @@ export function createTestnetCheck(adapters = {}) {
       let id;
       try { id = Number(await a.chainId()); } catch { return false; }
       if (!Number.isFinite(id)) return false;
-      if (MAINNET_CHAIN_IDS.includes(id)) { result = false; console.error('[test-admin] EVM node is mainnet, test admin disabled'); return false; }
+      if (!TESTNET_CHAIN_IDS.includes(id)) { result = false; console.error('[test-admin] EVM node is not a known testnet, test admin disabled'); return false; }
     }
     result = true;
     return true;
