@@ -3,7 +3,7 @@
 //   - 令牌、商户 Secret 在这个文件加载时读进来，随即从 process.env 删掉，用例拿不到变量本身，只能用下面的请求函数
 //     （这挡不住故意作恶的用例代码：同一个进程里总有办法读到；真正的防线是 GitHub 环境的 Required reviewers 和定期换令牌）
 //   - 这里的函数不打印、不返回请求头；出错信息只有动作名、HTTP 状态和接口返回的错误码（error.code），不含响应内容、地址和令牌：
-//     仓库是公开的，运行日志谁都能看。用例里的断言也要带说明文字（assert.equal(a, b, '说明')），不要 console.log 接口返回
+//     仓库是公开的，运行日志谁都能看。用例里的断言只用 assert.ok(条件, '说明') 和下面的 ok()、expectError()，不要 console.log 接口返回
 //   - 用测试管理员调用运营后台接口：admin('payout-limits')、admin('payout-approve', { body: { ids: [...] } })
 //     要动态码的动作（改上限）照样传 code 字段（随便填，例如 '000000'），服务器对测试管理员免核对
 //   - 测试商户的开放 API（可选，造打款单用）：merchant('POST', 'payouts/', body)；要 GitHub 环境里另有
@@ -21,13 +21,13 @@ if (!BASE || !TOKEN) throw new Error('需要环境变量 STAGING_URL 和 STAGING
 /** 地址里只留路径（报错时用，不带测试环境的域名） */
 const pathOf = (p) => String(p).replace(/^https?:\/\/[^/]+/, '');
 
-async function req(path, { method = 'GET', body, headers = {}, token = TOKEN, raw: noCsrf = false } = {}) {
+async function req(path, { method = 'GET', body, headers = {}, token = TOKEN, raw: noCsrf = false, timeoutMs = 30_000 } = {}) {
   const h = { ...headers };
   if (token) h[HEADER] = token;
   if (method !== 'GET') { h['content-type'] = 'application/json'; if (!noCsrf) h['x-topup-csrf'] = '1'; }
   let res;
   try {
-    res = await fetch(BASE + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    res = await fetch(BASE + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
   } catch (e) {
     throw new Error(`${method} ${pathOf(path)}：连不上（${e?.name || 'error'}）`);
   }
@@ -41,9 +41,9 @@ async function req(path, { method = 'GET', body, headers = {}, token = TOKEN, ra
  * 用测试管理员调用运营后台接口 /api/wallet/?a=<动作>。有 body 就是 POST。
  * 返回 { status, body }；不抛错（要 200 用 ok()）
  */
-export function admin(action, { body, query = {}, token } = {}) {
+export function admin(action, { body, query = {}, token, timeoutMs } = {}) {
   const qs = new URLSearchParams({ a: action, ...query }).toString();
-  return req(`/api/wallet/?${qs}`, { method: body === undefined ? 'GET' : 'POST', body, token });
+  return req(`/api/wallet/?${qs}`, { method: body === undefined ? 'GET' : 'POST', body, token, timeoutMs });
 }
 
 /** 请求任意接口，默认不带令牌：raw('/api/health/')；withToken: true 时带测试管理员的令牌（例如核对开户后台不认它） */
@@ -62,6 +62,12 @@ export function ok(r, what = '') {
 export function expectError(r, status, code, what = '') {
   if (r.status !== status || (code && r.body?.error?.code !== code)) assert.fail(`${what} 期望 HTTP ${status}${code ? ` ${code}` : ''}，实际 ${why(r)}`);
 }
+
+/**
+ * 这次运行的编号：Idempotency-Key、merchant_ref、改上限的原因都带上它，审计和数据里能认出是哪一次运行造的
+ * （GitHub 上是运行号 + 重试次数，本机是 local；再加一段随机数，同一次运行里重跑也不撞）
+ */
+export const RUN = `e2e-${String(process.env.GITHUB_RUN_ID || 'local').replace(/[^0-9a-z]/gi, '')}-${String(process.env.GITHUB_RUN_ATTEMPT || '1').replace(/[^0-9]/g, '')}-${randomUUID().slice(0, 8)}`;
 
 const MKEY = String(process.env.STAGING_E2E_MERCHANT_KEY || '').trim();
 const MSECRET = String(process.env.STAGING_E2E_MERCHANT_SECRET || '').trim();
