@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -101,3 +101,18 @@ test('健康检查不是测试环境（或测试管理员没开）：run.mjs 一
   assert.notEqual(r.code, 0);
   assert.match(r.out, /https/);
 });
+
+// 运行日志公开：assert.equal / deepEqual / strictEqual 失败时 node 的 spec 输出会把实际值（接口返回）打印出来，
+// 所以验收用例里只许用 assert.ok(条件, 说明) 和 lib.mjs 的 ok()、expectError()
+test('静态检查：e2e/staging-e2e/*.test.mjs 里没有 equal、deepEqual、strictEqual 这类会打印实际值的断言', () => {
+  const dir = join(ROOT, 'e2e/staging-e2e');
+  const BAD = /\b(equal|deepEqual|strictEqual|deepStrictEqual|notEqual|notDeepEqual|notStrictEqual|notDeepStrictEqual|partialDeepStrictEqual|match|doesNotMatch)\s*\(/;
+  const files = readdirSync(dir).filter((f) => f.endsWith('.test.mjs'));
+  assert.ok(files.length > 0);
+  for (const f of files) {
+    readFileSync(join(dir, f), 'utf8').split('\n').forEach((line, i) => {
+      assert.ok(!BAD.test(line), `${f}:${i + 1} 用了会打印实际值的断言，改成 assert.ok(条件, 说明) 或 ok()、expectError()`);
+    });
+  }
+});
+
