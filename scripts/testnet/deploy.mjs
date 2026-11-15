@@ -19,6 +19,9 @@
 //   TESTNET_USDT                 1 = 每条链部署一个测试 USDT（默认 1）；0 = 不部署（TRON 用 config/wallets.json 里 Nile 官方测试 USDT；ETH、BSC 没有官方的，usdt 留空）
 //   TESTNET_USDT_MINT            部署时给部署账户多少个测试 USDT（默认 1,000,000）
 //   PAYOUT_PAYER                 批量打款的热钱包地址（ETH、BSC）；填了才部署 BatchPayout（src/BatchPayout.sol 合并进来之后才有）
+//   TESTNET_ONLY_PAYOUT          1 = 只部署 BatchPayout + transferOwnership(owner)（归集合约已经部署过、只补批量打款）；只能是 eth、bsc，
+//                                要填 PAYOUT_PAYER、EVM_PARENT（owner 默认 = parent），不用 EVM_OPERATOR，TESTNET_USDT 不管；
+//                                上链后连链只读核对：isPayer(热钱包)、代码哈希（服务器启动时同一个算法和常量）、pendingOwner = owner
 //   TESTNET_LOCAL=1              本机演练：允许本地 anvil（链 ID 31337）和本机 TRON 私链；GitHub 上不要设
 //   OUT_DIR                      结果目录（默认 testnet-deploy）
 import { spawn } from 'node:child_process';
@@ -35,6 +38,7 @@ const OUT = env.OUT_DIR || 'testnet-deploy';
 const CHAINS = (env.TESTNET_CHAINS || 'eth,bsc,tron').split(',').map((s) => s.trim()).filter(Boolean);
 const USDT = (env.TESTNET_USDT ?? '1') === '1';
 const MINT = env.TESTNET_USDT_MINT || '1000000';
+const ONLY_PAYOUT = env.TESTNET_ONLY_PAYOUT === '1';
 const EVM = {
   eth: { name: '以太坊 Sepolia', chainId: 11155111, rpc: env.TESTNET_ETH_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com', explorer: 'https://sepolia.etherscan.io', unit: 'ETH' },
   bsc: { name: 'BSC 测试网', chainId: 97, rpc: env.TESTNET_BSC_RPC_URL || 'https://bsc-testnet-rpc.publicnode.com', explorer: 'https://testnet.bscscan.com', unit: 'tBNB' },
@@ -47,7 +51,7 @@ const FEE_LIMIT = 1_000_000_000; // TRON 每笔最多烧 1,000 TRX（测试币�
 const TRON_ENERGY_EST = 2_000_000;
 
 const WALLETS = JSON.parse(readFileSync(join(ROOT, 'config/wallets.json'), 'utf8'));
-const out = { generatedAt: new Date().toISOString(), commit: env.GITHUB_SHA || '', local: LOCAL, chains: {}, walletsStaging: {}, notes: [] };
+const out = { generatedAt: new Date().toISOString(), commit: env.GITHUB_SHA || '', local: LOCAL, onlyPayout: ONLY_PAYOUT, chains: {}, walletsStaging: {}, notes: [] };
 const log = (...a) => console.log(...a);
 const fail = (m) => { throw new Error(m); };
 const isEvm = (a) => /^0x[0-9a-fA-F]{40}$/.test(a || '');
@@ -160,8 +164,11 @@ function plannedTxs(chainId, deployer, startNonce) {
 
 async function deployEvm(chain, k) {
   const c = EVM[chain];
-  const parent = env.EVM_PARENT, operator = env.EVM_OPERATOR, owner = env.EVM_OWNER || parent;
-  if (!isEvm(parent) || !isEvm(operator) || !isEvm(owner)) fail(`${c.name}：EVM_PARENT（冷钱包）、EVM_OPERATOR（发起账户）要填 0x 开头的地址`);
+  const parent = env.EVM_PARENT, operator = ONLY_PAYOUT ? '' : env.EVM_OPERATOR, owner = env.EVM_OWNER || parent;
+  if (ONLY_PAYOUT) {
+    if (!isEvm(parent) || !isEvm(owner)) fail(`${c.name}：只部署批量打款也要填 EVM_PARENT（冷钱包，BatchPayout 的所有者交给它），0x 开头的地址`);
+    if (!isEvm(env.PAYOUT_PAYER)) fail('只部署批量打款（TESTNET_ONLY_PAYOUT=1）要填 PAYOUT_PAYER（热钱包，0x 开头的地址）');
+  } else if (!isEvm(parent) || !isEvm(operator) || !isEvm(owner)) fail(`${c.name}：EVM_PARENT（冷钱包）、EVM_OPERATOR（发起账户）要填 0x 开头的地址`);
   if (env.PAYOUT_PAYER && !isEvm(env.PAYOUT_PAYER)) fail('PAYOUT_PAYER 要填 0x 开头的地址');
   if (env.PAYOUT_PAYER && !existsSync(join(ROOT, 'contracts/src/BatchPayout.sol'))) fail('填了 PAYOUT_PAYER，但这个提交里还没有 contracts/src/BatchPayout.sol（第 3 批合并之后再部署批量打款）');
   const id = Number(await rpc(c.rpc, 'eth_chainId'));
@@ -175,7 +182,7 @@ async function deployEvm(chain, k) {
   const startNonce = Number(env.EVM_START_NONCE || '0');
   if (!Number.isInteger(startNonce) || startNonce < 0) fail('EVM_START_NONCE 要填 0 或正整数');
   // 先把结果的骨架写好：中途失败时，已经发出的交易也会写进 deployment.json
-  const rec = out.chains[chain] = { name: c.name, chainId: id, explorer: explorer || null, deployer, startNonce, operator, owner, txs: [] };
+  const rec = out.chains[chain] = { name: c.name, chainId: id, explorer: explorer || null, deployer, startNonce, operator: operator || null, owner, ...(ONLY_PAYOUT ? { onlyPayout: true } : {}), txs: [] };
   const onTx = (t) => rec.txs.push(t);
   const wait = localOk ? { timeoutMs: 60_000, pollMs: 200 } : { timeoutMs: 600_000, pollMs: 3_000 };
   const gasPrice = await pickGasPrice(call, { overrideGwei: env.EVM_GAS_PRICE_GWEI || '' });
@@ -195,6 +202,7 @@ async function deployEvm(chain, k) {
   }
   // 1. forge 只模拟（不广播）：算出地址、跑部署脚本里的字节码和参数核对、写出要发的交易
   try { rmSync(dryRunFile(id), { force: true }); } catch { /* 没有就算了 */ }
+  if (ONLY_PAYOUT) return deployPayoutOnly(chain, { c, id, call, k, deployer, startNonce, parent, owner, gasPrice, explorer, onTx, wait, rec });
   const got = await forge(c, 'script/DeployTestnet.s.sol:DeployTestnet', {
     SWEEP_PARENT: parent, SWEEP_OPERATOR: operator, SWEEP_OWNER: owner,
     SWEEP_EXPECT_NONCE: String(startNonce), TESTNET_USDT: USDT ? '1' : '0', TESTNET_USDT_MINT: MINT,
@@ -231,6 +239,53 @@ async function deployEvm(chain, k) {
   out.walletsStaging.evm ||= {};
   out.walletsStaging.evm[chain] = section;
   await serverCheck(chain, section, { rpcUrl: c.rpc });
+}
+
+/**
+ * 只部署 BatchPayout（TESTNET_ONLY_PAYOUT=1）：forge 只模拟出两笔（BatchPayout 创建、transferOwnership(owner)），
+ * evm-send 整套预演、逐笔发出核对回执；上链后连链只读核对：isPayer(热钱包)、代码哈希（服务器 server/wallet/payout.js 启动时同一个算法和常量）、
+ * pendingOwner = owner、owner 还是部署账户（等 owner 调用 acceptOwnership；接受之前服务器的启动核对会判 owner 不一致、不开这条链的打款）
+ */
+async function deployPayoutOnly(chain, { c, id, call, k, deployer, startNonce, parent, owner, gasPrice, explorer, onTx, wait, rec }) {
+  const hot = env.PAYOUT_PAYER;
+  const got = await forge(c, 'script/DeployTestnet.s.sol:DeployTestnet', {
+    PAYOUT_ONLY: '1', SWEEP_PARENT: parent, SWEEP_OWNER: owner, SWEEP_EXPECT_NONCE: String(startNonce), TESTNET_USDT: '0', PAYOUT_PAYER: hot,
+  }, k);
+  if (!isEvm(got.payout)) fail(`${c.name}：forge 的输出里没有 BatchPayout 地址`);
+  if (String(got.hot).toLowerCase() !== hot.toLowerCase()) fail(`${c.name}：forge 输出的热钱包 ${got.hot} 不是 PAYOUT_PAYER ${hot}`);
+  Object.assign(rec, { payout: got.payout, hot });
+  const txs = plannedTxs(id, deployer, startNonce);
+  if (txs.length !== 2) fail(`${c.name}：只部署批量打款应该是 2 笔交易（创建、transferOwnership），forge 模拟出 ${txs.length} 笔`);
+  if (String(txs[0].contractAddress).toLowerCase() !== got.payout.toLowerCase()) fail(`${c.name}：forge 模拟的第一笔不是 BatchPayout ${got.payout}`);
+  if (String(txs[1].to).toLowerCase() !== got.payout.toLowerCase()) fail(`${c.name}：forge 模拟的第二笔不是发给 BatchPayout 的 transferOwnership`);
+  log(`  forge 模拟出 ${txs.length} 笔交易（BatchPayout 创建、transferOwnership）；gas 下面按节点的规则重新算`);
+  const balance = BigInt(await call('eth_getBalance', [deployer, 'latest']));
+  const pf = await preflight(call, { from: deployer, txs, gasPrice, balance, unit: c.unit });
+  rec.preflight = { simulated: pf.simulated, gas: pf.gas, totalGasLimit: pf.totalLimit, maxCostWei: String(pf.cost), gasPrice: String(gasPrice) };
+  log(pf.simulated
+    ? `  节点模拟（eth_simulateV1）：${txs.length} 笔全部成功，gas ${pf.gas.map((g) => g.toLocaleString('en-US')).join(' + ')}；按 × 1.25 最多花 ${fmtEth(pf.cost, c.unit)}，余额 ${fmtEth(balance, c.unit)}`
+    : `  提示：节点不支持 eth_simulateV1，只估了第一笔（${pf.gas[0].toLocaleString('en-US')} gas）；后面每笔发之前再估`);
+  await sendAll(call, { key: '0x' + k, from: deployer, chainId: id, gasPrice, txs, explorer, onTx, log, wait });
+  // 连链只读核对
+  const { payoutCodeHash, BATCH_PAYOUT_CODE_HASH } = await import('../../server/wallet/payout.js');
+  const { selector } = await import('../../server/wallet/evm-tx.js');
+  const word = (a) => a.replace(/^0x/, '').toLowerCase().padStart(64, '0');
+  const read = (sig, arg = '') => call('eth_call', [{ to: got.payout, data: '0x' + selector(sig) + arg }, 'latest']);
+  const addrOf = (w) => '0x' + String(w).slice(-40).toLowerCase();
+  const code = await call('eth_getCode', [got.payout, 'latest']);
+  if (!code || code === '0x') fail(`${c.name}：BatchPayout ${got.payout} 上没有合约代码`);
+  const codeHash = payoutCodeHash(code);
+  if (codeHash !== BATCH_PAYOUT_CODE_HASH) fail(`${c.name}：BatchPayout 链上代码哈希 ${codeHash} ≠ 服务器认可的 ${BATCH_PAYOUT_CODE_HASH}（服务器启动核对会判不一致）`);
+  if (!/^0x0{63}1$/i.test(String(await read('isPayer(address)', word(hot))))) fail(`${c.name}：BatchPayout 上热钱包 ${hot} 没有登记（isPayer = false）`);
+  const pending = addrOf(await read('pendingOwner()'));
+  if (pending !== owner.toLowerCase()) fail(`${c.name}：BatchPayout 的 pendingOwner 是 ${pending}，应该是 owner ${owner}`);
+  const curOwner = addrOf(await read('owner()'));
+  rec.onchainVerify = { isPayer: true, codeHash, pendingOwner: pending, owner: curOwner };
+  log(`  连链核对：热钱包已登记（isPayer）、代码哈希 = 服务器认可的 ${codeHash}、pendingOwner = ${owner}（现在的 owner ${curOwner}，等它接受）`);
+  out.walletsStaging.evm ||= {};
+  out.walletsStaging.evm[chain] = { hot, payout: got.payout };
+  out.notes.push(`${c.name}：只部署了批量打款，config/wallets.json 的 staging.evm.${chain} 只填 hot、payout 两项，其他（usdt、factory 等）不动`);
+  out.notes.push(`${c.name}：owner ${owner} 要对 BatchPayout ${got.payout} 调用 acceptOwnership()；接受之前服务器启动核对判"owner 不一致"，这条链的批量打款不开通`);
 }
 
 /** wallets.json 里已经有一套不同的地址时 ver 加 1（换参数要加版本号），否则沿用 */
@@ -324,8 +379,14 @@ function summary() {
   lines.push('```json', JSON.stringify(out.walletsStaging, null, 2), '```', '');
   for (const [chain, c] of Object.entries(out.chains)) {
     lines.push(`## ${c.name}${c.chainId ? `（链 ID ${c.chainId}）` : c.network ? `（${c.network}）` : ''}`, '');
-    lines.push(`- 部署账户 ${c.deployer}${c.startNonce !== undefined ? `（起始 nonce ${c.startNonce}）` : ''}`, `- 发起账户 ${c.operator}；所有者交给 ${c.owner}（等它调用 acceptOwnership 接受）`);
-    lines.push(`- 用户 1 的充值地址 ${c.user1}；服务器钱包层核对：${c.serverCheck || '未通过'}`);
+    lines.push(`- 部署账户 ${c.deployer}${c.startNonce !== undefined ? `（起始 nonce ${c.startNonce}）` : ''}`);
+    if (c.onlyPayout) {
+      lines.push(`- 只部署批量打款：BatchPayout ${c.payout || '（未部署）'}，热钱包 ${c.hot || ''}；所有者交给 ${c.owner}（等它调用 acceptOwnership 接受）`);
+      lines.push(`- 连链核对（isPayer、代码哈希、pendingOwner）：${c.onchainVerify ? '通过' : '未通过'}`);
+    } else {
+      lines.push(`- 发起账户 ${c.operator}；所有者交给 ${c.owner}（等它调用 acceptOwnership 接受）`);
+      lines.push(`- 用户 1 的充值地址 ${c.user1}；服务器钱包层核对：${c.serverCheck || '未通过'}`);
+    }
     const txs = (c.txs || []).map((t) => ({ ...t, label: (t.label || t.name || 'tx') + (t.status && t.status !== 'ok' ? `【${{ failed: '链上失败', pending: '未上链', 'send-error': '发送出错', 'hash-mismatch': '交易号不符', mismatch: '合约地址不符' }[t.status] || t.status}】` : '') }));
     if (txs.length) lines.push(`- 交易（${txs.length} 笔）：${txs.map((t) => (c.explorer ? `[${t.label}](${c.explorer}/${chain === 'tron' ? '#/transaction' : 'tx'}/${(t.hash || t.txId || '').replace(/^0x/, chain === 'tron' ? '' : '0x')})` : `${t.label} ${t.hash || t.txId}`)).join('、')}`);
     if (c.preflight) lines.push(`- 节点模拟：${c.preflight.simulated ? `gas ${c.preflight.gas.map((g) => g.toLocaleString('en-US')).join(' + ')}` : '节点不支持 eth_simulateV1，逐笔估算'}；gas 价格 ${c.preflight.gasPrice} wei`);
@@ -341,6 +402,7 @@ async function main() {
   const k = key();
   KEY_FOR_MASK = k;
   for (const c of CHAINS) if (!['eth', 'bsc', 'tron'].includes(c)) fail(`不认识的链：${c}（只能是 eth、bsc、tron）`);
+  if (ONLY_PAYOUT && CHAINS.includes('tron')) fail('只部署批量打款（TESTNET_ONLY_PAYOUT=1）只能是 eth、bsc（TRON 打款不走合约）：把部署哪几条链设成 eth（推送触发时环境变量 TESTNET_CHAINS=eth）');
   mkdirSync(OUT, { recursive: true });
   let error = null;
   try {

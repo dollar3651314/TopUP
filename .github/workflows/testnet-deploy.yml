@@ -3,6 +3,7 @@
 # 只连测试网（脚本会拒绝主网）。部署账户私钥放在 GitHub 环境 "testnet" 的环境密钥 TOPUP_TESTNET_DEPLOYER_KEY 里，只有管理员能填；
 # 环境 "testnet" 设了"需要审批"，每次运行都要管理员在 GitHub 上点批准，批准前拿不到密钥、不会上链。
 # 触发：在 Actions 页面手动运行（这个文件进了默认分支之后才有按钮），或推送到 testnet-run/ 开头的分支（不用先进默认分支）。
+# 只部署批量打款：勾选 only_payout（推送触发时环境变量 TESTNET_ONLY_PAYOUT=1），只部署 BatchPayout + transferOwnership(owner)。
 # 参数：手动运行时页面上填；没填的（以及推送触发时）用环境 "testnet" 的环境变量（TESTNET_EVM_PARENT 等，见 README），都是公开地址。
 # 不改 config/wallets.json：结果里的地址由管理员自己填进 staging 一节、开 PR、自己合并。
 name: testnet-deploy
@@ -40,6 +41,10 @@ on:
       payout_payer:
         description: 批量打款热钱包（0x 地址；填了才部署 BatchPayout，第 3 批合并后才有；空着用 TESTNET_PAYOUT_PAYER）
         required: false
+      only_payout:
+        description: 只部署 BatchPayout（归集合约已部署过；链选 eth 或 bsc，要填热钱包，不用发起账户；也可用环境变量 TESTNET_ONLY_PAYOUT=1）
+        type: boolean
+        default: false
   push:
     branches: ['testnet-run/**']
 permissions:
@@ -85,6 +90,7 @@ jobs:
           EVM_GAS_PRICE_GWEI: ${{ vars.TESTNET_EVM_GAS_PRICE_GWEI }}
           TESTNET_USDT: ${{ (github.event_name != 'workflow_dispatch' || inputs.test_usdt) && '1' || '0' }}
           PAYOUT_PAYER: ${{ inputs.payout_payer || vars.TESTNET_PAYOUT_PAYER }}
+          TESTNET_ONLY_PAYOUT: ${{ (inputs.only_payout || vars.TESTNET_ONLY_PAYOUT == '1') && '1' || '0' }}
           OUT_DIR: testnet-deploy
         run: node scripts/testnet/deploy.mjs
       - name: 保存地址清单（只有公开地址和交易号）
