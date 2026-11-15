@@ -32,10 +32,10 @@ const netName = (ch: string) => (c.chain.names as Record<string, string>)[ch] ||
 const netStd = (ch: string) => (c.chain.std as Record<string, string>)[ch] || '';
 const chainTag = (ch: string) => h('span', { class: `chain-tag c-${ch}` }, netName(ch));
 const laterTag = () => h('span', { class: 'later-tag' }, c.chain.later);
-/** TRON 合约钱包没开通（服务器返回的 chains 里没有 tron）：TRON 地址处标"第 2 批"；开通了和以太坊、BSC 一样 */
+/** TRON 合约钱包没开通（服务器返回的 chains 里没有 tron）：TRON 地址处标"未开通"；开通了和以太坊、BSC 一样 */
 const tronOff = (ch: string) => ch === 'tron' && !enabledChains.includes('tron');
 const addrOf = (list: ChainAddr[] | undefined, ch: string) => (list || []).find((a) => a.chain === ch)?.address || null;
-/** 每条链一张地址卡：地址、复制按钮、"只收某网络的 USDT"；没有地址时写"客户在这条链发起充值时生成"（TRON 没开通时标"第 2 批"） */
+/** 每条链一张地址卡：地址、复制按钮、"只收某网络的 USDT"；没有地址时写"客户在这条链发起充值时生成"（TRON 没开通时标"未开通"） */
 function addressCards(list: ChainAddr[] | undefined) {
   // 以太坊、BSC 同一串时就近说明一句（免得商户以为只能收一条链）
   const e = addrOf(list, 'eth'), b = addrOf(list, 'bsc');
@@ -382,7 +382,7 @@ async function createOrder() {
   const chainBox = enabledChains.length ? h('fieldset', { class: 'f chain-choices', 'data-chain-choice': '' }, h('legend', { class: 'lbl' }, cc.chain),
     choice('', cc.chainAny, cc.chainAnyHint),
     ...['eth', 'bsc'].filter((ch) => enabledChains.includes(ch)).map((ch) => choice(ch, tpl(cc.chainOnly, { net: netName(ch), std: netStd(ch) }), ch === 'eth' ? cc.ethHint : '')),
-    // TRON：服务器返回开通了就能选；没开通时灰着、标"第 2 批"
+    // TRON：服务器返回开通了就能选；没开通时灰着、标"未开通"
     tronOff('tron') ? choice('tron', tpl(cc.chainOnly, { net: netName('tron'), std: netStd('tron') }), c.chain.laterNote, true, laterTag()) : choice('tron', tpl(cc.chainOnly, { net: netName('tron'), std: netStd('tron') }), '')) : null;
   const body = h('div', { class: 'stack' }, pickerField('mo-cust', cc.customer, picker, cc.customerHint), who,
     h('div', { class: 'fgrid' }, field('mo-cname', `${cc.customerName} (${c.common.optional})`, cname), field('mo-cemail', `${cc.customerEmail} (${c.common.optional})`, cemail)),

@@ -217,6 +217,9 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
         contracts_configured: Boolean(layer?.config?.tron?.complete), operator: layer?.providers?.contract?.tronOperator || null, legacy_addresses: legacy.n, hot_balance: null, hot_max: usdt(limits.hotMax), hot_low: usdt(limits.hotLow), allowance: null, rental: Boolean(layer?.tronEnergy) };
       // 冷钱包 USDT、热钱包 TRX：读不到给 null（字段一直在，页面写"暂时查不到"）
       if (wallets.hot) { tcard.hot_gas = null; try { const acc = await tron.account(wallets.hot); tcard.hot_balance = usdt(acc.trc20[tron.contract] || 0); tcard.low = Number(acc.trc20[tron.contract] || 0) < limits.hotLow; tcard.hot_gas = native(acc.trx || 0, 'tron'); } catch { tcard.error = 'rpc'; } }
+      // 热钱包按老口径用 tron.contract 读、打款也用它；和合约钱包收款的 USDT 合约（tron.usdt）不同时（测试环境才会）告诉页面，热钱包余额旁注明
+      const recvUsdt = layer?.config?.tron?.usdt || '';
+      if (wallets.hot && tron?.contract && recvUsdt && recvUsdt !== tron.contract) tcard.payout_usdt = tron.contract;
       // 合约钱包冷钱包：和以太坊、BSC 一样，链开通了才读余额（停用的链不读）
       if (tronParent && tronOn) { try { tcard.cold_balance = usdt(await layer.providers.contract.balance('tron', { vault: 'cold' })); } catch { tcard.cold_balance = null; } }
       else if (!tronParent && wallets.cold) { tcard.cold_balance = null; try { const acc = await tron.account(wallets.cold); tcard.cold_balance = usdt(acc.trc20[tron.contract] || 0); } catch { tcard.cold_balance = null; } }

@@ -12,7 +12,7 @@ export const STD: Record<string, string> = { eth: 'ERC20', bsc: 'BEP20', tron: '
 const t = (iso?: string | null) => (iso ? fmtTime(iso, 'zh') : '—');
 const usd = (s: string | null | undefined) => fmtUsdt(parseUsdt(String(s ?? '0')) ?? 0);
 export const chainTag = (c: string) => h('span', { class: `chain-tag c-${c}` }, CHAIN_NAME[c] || c);
-export const laterTag = () => h('span', { class: 'later-tag' }, '第 2 批');
+export const laterTag = () => h('span', { class: 'later-tag' }, '未开通');
 const ago = (iso: string) => {
   const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
   return m < 60 ? `${m} 分钟` : m < 1440 ? `${Math.floor(m / 60)} 小时 ${m % 60} 分` : `${Math.floor(m / 1440)} 天 ${Math.floor((m % 1440) / 60)} 小时`;
@@ -434,7 +434,7 @@ export async function walletStatus(ui: WalletUi): Promise<HTMLElement> {
   const ck = (ok: boolean, text: string) => h('li', { class: ok ? 'y' : 'bad' }, `${text}：${ok ? '已配置' : '没配置'}`);
   const ONCHAIN: Record<string, [string, string]> = { ok: ['y', '一致'], mismatch: ['bad', '不一致（这条链已停用，需重新部署后重启；已发邮件）'], unverified: ['bad', '还没核对上（节点连不上，下一轮再核对）'] };
   const cards = r.chains.map((c: any) => c.status === 'not_in_this_batch'
-    ? h('article', { class: 'card stack-sm chain-card later', 'data-chain-card': c.chain }, h('div', { class: 'batch-head' }, chainTag(c.chain), laterTag()), h('p', { class: 'muted m0' }, '第 1 批不分配新的 TRON 地址；已有的 TRON 地址照常入账（上面"链上监控"）。第 2 批上线后这里同样显示扫块和合约配置。'))
+    ? h('article', { class: 'card stack-sm chain-card later', 'data-chain-card': c.chain }, h('div', { class: 'batch-head' }, chainTag(c.chain), laterTag()), h('p', { class: 'muted m0' }, 'TRON 合约钱包没开通（config/wallets.json 的 tron 参数没填全，或链上核对没通过），不分配新的 TRON 地址；已有的老 TRON 地址照常入账。'))
     : h('article', { class: `card stack-sm chain-card${c.ok ? '' : ' chain-bad'}`, 'data-chain-card': c.chain },
       h('div', { class: 'batch-head' }, chainTag(c.chain), c.ok ? status(c.status === 'catching_up' ? 'in' : 'approved', words(c)) : badStatus(words(c))),
       h('h3', { class: 'h-sm m0' }, '扫块'),
