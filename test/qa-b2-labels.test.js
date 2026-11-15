@@ -21,7 +21,7 @@ const TP = 'TJCnKsPa7y5okkXvQAidZBzqx3QyQ6sxMW'; // TRON 合约钱包的冷钱�
  * parent：tron.parent（null = 没配合约钱包）；on：TRON 在不在开通列表里
  * 返回 TRON 卡、合约提供方被问过的读数、TronGrid 被查过的地址
  */
-async function tronCard({ parent, on }) {
+async function tronCard({ parent, on, recv = 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf' }) {
   const db = await setupDb({ customers: [] });
   const tron = createFakeTron();
   tron.accounts.set(TH, { activated: true, trx: 50 * U, trc20: { [tron.contract]: 1_000 * U } });
@@ -32,7 +32,7 @@ async function tronCard({ parent, on }) {
   const providerCalls = [];
   const layer = {
     enabledChains: on ? ['tron'] : [],
-    config: { tron: { complete: Boolean(parent), ...(parent ? { scheme: { parent }, usdt: 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf' } : {}) } },
+    config: { tron: { complete: Boolean(parent), ...(parent ? { scheme: { parent }, usdt: recv } : {}) } },
     providers: { contract: {
       tronOperator: null,
       async balance(chain, opts = {}) { providerCalls.push([chain, opts.vault]); return 2_222n * BigInt(U); }, // 合约提供方：2,222
@@ -42,7 +42,7 @@ async function tronCard({ parent, on }) {
   const { payoutAdminActions } = await import('../server/pay/payout-admin.js');
   const acts = payoutAdminActions({ db, tron, wallets: { hot: TH, cold: TC, evm: {} }, layer, verifyAdminCode: async () => true });
   const r = wire(await acts['payout-wallets']());
-  return { card: r.cards.find((c) => c.chain === 'tron'), providerCalls, asked };
+  return { card: r.cards.find((c) => c.chain === 'tron'), providerCalls, asked, payoutUsdt: tron.contract };
 }
 
 test('payout-wallets（TRON 开通、配了 tron.parent）：冷钱包是 parent，cold_balance 来自合约提供方（tron、vault = cold），不按老冷钱包读', async () => {
@@ -74,3 +74,22 @@ for (const on of [true, false]) {
     assert.deepEqual(providerCalls.filter(([c]) => c === 'tron'), [], '没配合约钱包时不问合约提供方');
   });
 }
+
+// 钱包设置 TRON 卡：热钱包打款用的 USDT 合约（TronGrid 客户端的 tron.contract，老口径）和合约钱包收款的 USDT 合约（tron.usdt）不同时
+// （测试环境就是这样：wallets.usdt 是一个 Nile USDT，tron.usdt 是另一个），接口给 payout_usdt，页面在热钱包余额旁注明；相同时不给。
+const RECV_OTHER = 'TRRciutGz3Ht2jCvKAqV3a7Qb1TUvdLdAr';
+test('payout-wallets（TRON）：打款 USDT 合约和收款 USDT 合约不同时，卡片带 payout_usdt = 打款用的合约（热钱包余额也按它读）', async () => {
+  const { card, payoutUsdt } = await tronCard({ parent: TP, on: true, recv: RECV_OTHER });
+  assert.notEqual(payoutUsdt, RECV_OTHER, '前提：两个合约不同');
+  assert.equal(card.payout_usdt, payoutUsdt);
+  assert.equal(parseUsdt(card.hot_balance), 1_000 * U, '热钱包余额仍按打款用的合约读（1,000）');
+});
+test('payout-wallets（TRON）：打款 USDT 合约和收款 USDT 合约相同时，卡片没有 payout_usdt', async () => {
+  const { card, payoutUsdt } = await tronCard({ parent: TP, on: true, recv: 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf' });
+  assert.equal(payoutUsdt, 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf', '前提：两个合约相同');
+  assert.ok(!('payout_usdt' in card), `合约相同时不该给 payout_usdt（实际 ${JSON.stringify(card.payout_usdt)}）`);
+});
+test('payout-wallets（TRON）：没配合约钱包（没有收款 USDT 合约可比）时，卡片没有 payout_usdt', async () => {
+  const { card } = await tronCard({ parent: null, on: false });
+  assert.ok(!('payout_usdt' in card), `没配 tron.usdt 时不该给 payout_usdt（实际 ${JSON.stringify(card.payout_usdt)}）`);
+});

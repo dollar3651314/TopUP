@@ -962,6 +962,31 @@ test.describe('TC-PB 批量打款（第 3 批）和第 2 批 TRON 页面', () =>
     const t = w.body.cards.find((k: any) => k.chain === 'tron');
     expect('cold_balance' in t && 'hot_gas' in t, 'TRON 卡也有这两个字段').toBe(true);
   });
+
+  test('TC-PB27 钱包设置 TRON 卡：打款用的 USDT 合约和收款合约不同（接口给 payout_usdt）时，热钱包余额旁注明"打款用的 USDT 合约：T…（与收款合约不同）"；相同（不给）时没有这句', async () => {
+    const PAYOUT_USDT = 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf';
+    const NOTE = `打款用的 USDT 合约：${PAYOUT_USDT}（与收款合约不同）`;
+    try {
+      // 1）不同：接口给 payout_usdt
+      await walletPage((j) => { card(j, 'tron').payout_usdt = PAYOUT_USDT; });
+      const tc = admin.locator('[data-panel="p-wallet"] [data-wallet-card="tron"]');
+      await expect(tc).toBeVisible();
+      await expect(tc).toContainText('USDT 5,000.00'); // 前提：热钱包余额已显示
+      await expect(tc).toContainText(NOTE);
+      // 注在热钱包那一节里（和热钱包余额在一起），不在别的节
+      const hotSec = tc.locator('*', { hasText: NOTE }).filter({ hasText: 'USDT 5,000.00' }).last();
+      await expect(hotSec).toContainText('热钱包');
+      await expect(hotSec).not.toContainText('冷钱包');
+      // 以太坊、BSC 卡没有这句
+      for (const c of ['eth', 'bsc']) await expect(admin.locator(`[data-panel="p-wallet"] [data-wallet-card="${c}"]`)).not.toContainText('打款用的 USDT 合约');
+      // 2）相同：接口不给 payout_usdt
+      await walletPage((j) => { delete card(j, 'tron').payout_usdt; });
+      await expect(tc).toBeVisible();
+      await expect(tc).toContainText('USDT 5,000.00'); // 前提：热钱包余额已显示
+      await expect(tc).not.toContainText('打款用的 USDT 合约');
+      await expect(tc).not.toContainText('与收款合约不同');
+    } finally { await unrouteWallet(); }
+  });
 });
 
 // ============ 测试环境构建（APP_ENV=staging）：确认作废弹窗的区块浏览器链接指向测试网 ============
