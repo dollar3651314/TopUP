@@ -13,7 +13,7 @@ import { createApp, initReason, refuseConfig, ROOT } from './app.js';
 import { json } from './kyb/http.js';
 import { walletChainStatus } from './wallet/status.js';
 import { walletsWatchStatus } from './pay/wallets-change.js';
-import { testAdminHash } from './pay/test-admin.js';
+import { testAdminHash, testMerchantIpBypass } from './pay/test-admin.js';
 
 const getMetaSafe = async (db, key) => { try { const [r] = await db.query('select value from pay_meta where key = $1', [key]); return r ? r.value : null; } catch { return null; } };
 
@@ -99,8 +99,8 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
       } catch { wallet = { error: 'query_failed' }; }
     }
     const ok = storage && db && secret && blob && mail && payInfo.trongridKey && ready;
-    // 测试环境：测试管理员开没开（只给是否；生产没有这一项，配了也起不来）
-    const testAdmin = c.appEnv === 'staging' ? { test_admin: Boolean(testAdminHash(c)) } : {};
+    // 测试环境：测试管理员、测试商户免 IP 白名单开没开（只给是否，不给商户编号；生产没有这两项，配了也起不来）
+    const testAdmin = c.appEnv === 'staging' ? { test_admin: Boolean(testAdminHash(c)), test_merchant_ip_bypass: Boolean(testMerchantIpBypass(c)) } : {};
     return json(ok ? 200 : 503, { ok, env: c.appEnv, commit, storage, db, mail, mailMode, secret, blob, pay: payInfo, worker, ...(wallet ? { wallet } : {}), ...testAdmin });
   }
   async function fake(path, request) {

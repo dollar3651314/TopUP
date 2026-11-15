@@ -12,12 +12,14 @@
 //     其余返回里的商户名（merchant）、名称（name，链名除外）、邮箱（email）、公司名（company）一律打码成"首字 + ***"（maskForTestAdmin）；
 //     任何字段里邮箱形式的内容（例如商户拿邮箱当客户编号、驳回原因里写了邮箱）也打码成"首字***"（不留 @）。
 //   - 改东西的动作只收 POST（GET 调改东西的动作 405）。
+// 同一套"只在测试网"的条件（testnetEnv、createTestnetCheck）也管测试商户免 IP 白名单（TEST_MERCHANT_IP_BYPASS，见 testMerchantIpBypass）。
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 export const TEST_ADMIN_HEADER = 'x-topup-test-admin';
 export const TEST_ADMIN_ACTOR = 'test-admin';
 export const TEST_ADMIN_ENV = 'TEST_ADMIN_TOKEN_SHA256';
+export const TEST_MERCHANT_IP_BYPASS_ENV = 'TEST_MERCHANT_IP_BYPASS';
 
 /** 测试管理员能调用的运营后台动作（/api/wallet/?a=…）。只读的和"到待签名为止"的操作；签名、钱包设置不在里面 */
 export const TEST_ADMIN_ACTIONS = Object.freeze(new Set([
@@ -67,10 +69,23 @@ export function maskForTestAdmin(x) {
 }
 const sha256 = (s) => createHash('sha256').update(String(s)).digest();
 
+/** 测试专用开关的环境条件（测试管理员、测试商户免 IP 白名单共用）：APP_ENV=staging 且 TRON_NETWORK=nile。以太坊 / BSC 节点另由 createTestnetCheck 核对 */
+export const testnetEnv = (config) => config?.appEnv === 'staging' && config?.tronNetwork === 'nile';
+
 /** 这个环境的测试管理员是否开着：只有测试环境、配了 64 位十六进制的哈希才开 */
 export function testAdminHash(config) {
   const h = String(config?.testAdminTokenSha256 || '').toLowerCase();
-  return config?.appEnv === 'staging' && config?.tronNetwork === 'nile' && HEX64.test(h) ? h : '';
+  return testnetEnv(config) && HEX64.test(h) ? h : '';
+}
+
+/**
+ * 测试商户免 IP 白名单（TEST_MERCHANT_IP_BYPASS = 一个商户编号）：给自动化验收用例（GitHub 上的机器，IP 不固定）在测试环境调开放 API 的提币、批量打款。
+ * 和测试管理员同样的条件才开（testnetEnv；配了以太坊 / BSC 节点的，请求时再由 createTestnetCheck 核对链 ID），返回商户编号；否则 ''。
+ * 只免 IP 白名单这一项：签名、时间戳、幂等、余额、上限、逐行校验照旧；别的商户不受影响。生产配了它拒绝启动（refuseTestMerchantIpBypass）
+ */
+export function testMerchantIpBypass(config) {
+  const id = String(config?.testMerchantIpBypass || '').trim();
+  return testnetEnv(config) && id ? id : '';
 }
 
 /** 认可的以太坊 / BSC 测试网链 ID：Sepolia、Holesky、Hoodi、BSC 测试网。配的节点不在里面（主网或别的链）就不认测试管理员 */
@@ -88,7 +103,7 @@ export function createTestnetCheck(adapters = {}) {
       let id;
       try { id = Number(await a.chainId()); } catch { return false; }
       if (!Number.isFinite(id)) return false;
-      if (!TESTNET_CHAIN_IDS.includes(id)) { result = false; console.error('[test-admin] EVM node is not a known testnet, test admin disabled'); return false; }
+      if (!TESTNET_CHAIN_IDS.includes(id)) { result = false; console.error('[test-admin] EVM node is not a known testnet, test-only switches (test admin, merchant IP bypass) disabled'); return false; }
     }
     result = true;
     return true;
@@ -99,6 +114,13 @@ export function createTestnetCheck(adapters = {}) {
 export function refuseTestAdmin(config) {
   return config?.appEnv === 'production' && String(config?.testAdminTokenSha256 || '') !== ''
     ? `生产环境不能有测试管理员：.env 里有 ${TEST_ADMIN_ENV}，删掉这一行再启动（sudo topup gen-test-admin 只在测试环境用）`
+    : null;
+}
+
+/** 生产配了测试商户免 IP 白名单：返回拒绝启动的说明（只有变量名，没有商户编号）；否则 null */
+export function refuseTestMerchantIpBypass(config) {
+  return config?.appEnv === 'production' && String(config?.testMerchantIpBypass || '') !== ''
+    ? `生产环境不能有测试商户免 IP 白名单：.env 里有 ${TEST_MERCHANT_IP_BYPASS_ENV}，删掉这一行再启动（只在测试环境用）`
     : null;
 }
 

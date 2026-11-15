@@ -9,6 +9,8 @@
 #   sudo topup admin-token       显示一次运营后台的初始化口令（第一次进后台用，初始化后作废）
 #   sudo topup gen-test-admin    测试环境：生成测试管理员的令牌（给 GitHub 上的自动验收用例用），服务器只存它的哈希，令牌只在屏幕上显示一次
 #   sudo topup test-admin-off    关掉测试管理员（删掉令牌的哈希，旧令牌立刻作废）
+#   sudo topup set TEST_MERCHANT_IP_BYPASS 商户编号   测试环境：这个测试商户调开放 API 提币、批量打款时不查 IP 白名单（给自动验收用例用）
+#   sudo topup test-merchant-ip-off   关掉上面这一项（删掉 TEST_MERCHANT_IP_BYPASS）
 #   sudo topup test-mail         发一封测试邮件到 MAIL_TO
 #   sudo topup backup            立刻备份一次（每天的定时备份也是它）：本机加密保存，默认不传到别处
 #   sudo topup restore-drill     恢复演练：把本机最近一份备份解密、恢复进临时容器并核对，不碰正在运行的数据
@@ -44,7 +46,8 @@ BACKUP_IDENTITY_REL=state/backup-identity
 # 可以用 set-key 填的密钥（屏幕上不显示）；R2_ 开头的写进 deploy.env，其余写进 .env
 SECRET_KEYS="RESEND_API_KEY SMTP_PASS TRONGRID_API_KEY ETH_RPC_URL BSC_RPC_URL TRON_NODE_URL SWEEP_OPERATOR_KEY SWEEP_OPERATOR_KEY_TRON TRONSAVE_API_KEY R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY"
 # 可以用 set 填的普通设置（不是密钥，会显示）
-PLAIN_KEYS="MAIL_FROM MAIL_TO SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER ETH_CONFIRMATIONS BSC_CONFIRMATIONS TRON_CONFIRMATIONS TRONSAVE_MAX_PRICE_SUN TRON_RENT_MAX_ENERGY USDT_CONTRACT BACKUP_OFFSITE R2_ACCOUNT_ID R2_BUCKET"
+# TEST_MERCHANT_IP_BYPASS 只能在测试环境设（check_value 挡）；关掉用 test-merchant-ip-off
+PLAIN_KEYS="MAIL_FROM MAIL_TO SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER ETH_CONFIRMATIONS BSC_CONFIRMATIONS TRON_CONFIRMATIONS TRONSAVE_MAX_PRICE_SUN TRON_RENT_MAX_ENERGY USDT_CONTRACT BACKUP_OFFSITE R2_ACCOUNT_ID R2_BUCKET TEST_MERCHANT_IP_BYPASS"
 # 由部署决定的变量（compose.yml 的 environment 或镜像），不写进 .env
 MANAGED_KEYS="APP_ENV PUBLIC_URL HOST PORT TRUST_PROXY GIT_COMMIT DATABASE_URL REDIS_URL BLOB_DIR"
 DEPLOY_KEYS=" BACKUP_OFFSITE R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET BACKUP_AGE_RECIPIENT "
@@ -642,6 +645,7 @@ watch_problems() {
   fi
   # 测试管理员只在测试环境：不是测试环境的服务器 .env 里有它（应用会拒绝启动）
   [ "$(dval TOPUP_ENV)" = staging ] || [ -z "$(envval TEST_ADMIN_TOKEN_SHA256)" ] || p+=(".env 里有 TEST_ADMIN_TOKEN_SHA256，但这台不是测试环境（应用会拒绝启动）：sudo topup test-admin-off")
+  [ "$(dval TOPUP_ENV)" = staging ] || [ -z "$(envval TEST_MERCHANT_IP_BYPASS)" ] || p+=(".env 里有 TEST_MERCHANT_IP_BYPASS，但这台不是测试环境（应用会拒绝启动）：sudo topup test-merchant-ip-off")
   [ ! -f "$TOPUP_DIR/state/skip" ] || p+=("版本 $(cut -c1-7 "$TOPUP_DIR/state/skip") 更新失败、不再重试（sudo topup retry）")
   if [ -f "$LE_DIR/live/$CERT_NAME/fullchain.pem" ] && ! openssl x509 -checkend $((14 * 86400)) -noout -in "$LE_DIR/live/$CERT_NAME/fullchain.pem" > /dev/null 2>&1; then p+=("HTTPS 证书 14 天内过期"); fi
   printf '%s\n' "${p[@]}"
@@ -678,6 +682,7 @@ cmd_status() {
   detail "健康检查：$(jq -c '{ok, env, commit, db, storage, secret, blob, mail, mailMode, pay, worker}' <<< "$body" 2> /dev/null || echo 没有响应)"
   detail "钱包：$(jq -c '.wallet // {}' <<< "$body" 2> /dev/null)"
   [ "$(dval TOPUP_ENV)" != staging ] || detail "测试管理员：$(jq -r 'if .test_admin == true then "开着（sudo topup test-admin-off 关）" else "关着（sudo topup gen-test-admin 开）" end' <<< "$body" 2> /dev/null)"
+  [ "$(dval TOPUP_ENV)" != staging ] || detail "测试商户免 IP 白名单：$(jq -r 'if .test_merchant_ip_bypass == true then "开着（sudo topup test-merchant-ip-off 关）" else "关着（sudo topup set TEST_MERCHANT_IP_BYPASS 商户编号 开）" end' <<< "$body" 2> /dev/null)"
   detail "还没填的：$(missing_list)"
   detail "备份：$(cat "$TOPUP_DIR/state/last-backup.json" 2> /dev/null || echo 还没有)    恢复演练：$(cat "$TOPUP_DIR/state/last-drill.json" 2> /dev/null || echo 还没有)"
   [ -f "$LE_DIR/live/$CERT_NAME/fullchain.pem" ] && detail "证书到期：$(openssl x509 -enddate -noout -in "$LE_DIR/live/$CERT_NAME/fullchain.pem" | cut -d= -f2)"
@@ -720,6 +725,7 @@ apply_env() {
     SWEEP_OPERATOR_KEY) detail "发起账户（ETH、BSC）：$(jq -r '.wallet.operator' <<< "$body")" ;;
     SWEEP_OPERATOR_KEY_TRON) detail "发起账户（TRON）：$(jq -r '.wallet.operator_tron' <<< "$body")" ;;
     TEST_ADMIN_TOKEN_SHA256) detail "测试管理员：$(jq -r 'if .test_admin == true then "开着" else "关着" end' <<< "$body")" ;;
+    TEST_MERCHANT_IP_BYPASS) detail "测试商户免 IP 白名单：$(jq -r 'if .test_merchant_ip_bypass == true then "开着" else "关着" end' <<< "$body")" ;;
   esac
 }
 
@@ -747,6 +753,9 @@ check_value() {
       printf '%s' "$val" | grep -Eq '^[^@]+@[^@]+\.[^@]+$' || die "$key 应该是一个邮箱地址；什么都没有改" ;;
     BACKUP_OFFSITE)
       case "$val" in off | r2) ;; *) die "BACKUP_OFFSITE 只能是 off（默认，只在本机）或 r2；什么都没有改" ;; esac ;;
+    TEST_MERCHANT_IP_BYPASS)
+      [ "$(dval TOPUP_ENV)" = staging ] || die "只用于测试环境；生产不能有这一项（应用会拒绝启动），什么都没有改"
+      printf '%s' "$val" | grep -Eq '^[A-Za-z0-9_-]{1,64}$' || die "TEST_MERCHANT_IP_BYPASS 应该是一个商户编号（例如运营后台商户列表里 m_ 开头的那一列）；什么都没有改" ;;
   esac
 }
 
@@ -885,6 +894,17 @@ cmd_test_admin_off() {
   detail "GitHub 环境 staging-e2e 里的 STAGING_TEST_ADMIN_TOKEN 也可以删掉（不删也用不了）"
 }
 
+# ---------- test-merchant-ip-off：关掉测试商户免 IP 白名单（server/pay/test-admin.js 的 testMerchantIpBypass）----------
+# 开：sudo topup set TEST_MERCHANT_IP_BYPASS 商户编号（只在测试环境）。关：删掉这一行。
+cmd_test_merchant_ip_off() {
+  start_log test-merchant-ip-off
+  [ -f "$TOPUP_DIR/.env" ] || die "还没有部署过" "先粘贴第一次部署的那条命令"
+  [ -n "$(envval TEST_MERCHANT_IP_BYPASS)" ] || { ok "测试商户免 IP 白名单本来就是关着的，没有改"; return 0; }
+  env_del TEST_MERCHANT_IP_BYPASS "$TOPUP_DIR/.env"
+  ok "已删掉 TEST_MERCHANT_IP_BYPASS（这个商户调提币、批量打款又要查 IP 白名单）"
+  apply_env TEST_MERCHANT_IP_BYPASS
+}
+
 # ---------- stop / start（停：定时器 → 应用 → 备份 → 数据库）----------
 cmd_stop() {
   start_log stop
@@ -949,6 +969,7 @@ case "$cmd" in
   admin-token) cmd_admin_token ;;
   gen-test-admin) cmd_gen_test_admin ;;
   test-admin-off) cmd_test_admin_off ;;
+  test-merchant-ip-off) cmd_test_merchant_ip_off ;;
   stop) cmd_stop ;;
   start) cmd_start ;;
   help | -h | --help) usage ;;
