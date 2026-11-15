@@ -793,7 +793,7 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await expect(card).not.toHaveClass(/chain-bad/);
     await expect(card.locator('.st-rejected')).toHaveCount(0);
     await expect(card.locator('.alert')).toHaveCount(0);
-    await expect(card).not.toContainText('少 ');
+    await expect(card).not.toContainText(/少 \d+ 项配置/); // 说明文字里有"少几项配置"的提示，不算；不能有"少 N 项配置"这个状态
     const top = p.locator('[data-wallet-status] [data-hero]').first();
     await expect(top).toHaveAttribute('data-hero', 'ok');
     await expect(top).toContainText('开通的链都正常');
