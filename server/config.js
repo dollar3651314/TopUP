@@ -67,5 +67,7 @@ export function loadConfig(rawEnv = process.env) {
     // worker 进程：扫链间隔、每日任务的时间（UTC 小时:分钟）
     tickIntervalMs: int(env.TICK_INTERVAL_MS, 15_000),
     dailyAtUtc: env.DAILY_AT_UTC || '19:15',
+    // 每日对账：同一条链连续多少天没查完就另发提醒（默认 2）
+    reconIncompleteDays: int(env.RECON_INCOMPLETE_DAYS, 2),
   };
 }

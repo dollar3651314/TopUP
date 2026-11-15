@@ -80,7 +80,7 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
     v1: createApiV1({ db, keys, ops, getIp, redis: kyb.redis }), // 限流计数和开户共用同一个 Redis
     merchant: createMerchantApi({ db, keys, ops, send }),
     pay: createPayApi({ db, layer, redis: kyb.redis, getIp }), // 按 IP 限流，和开放 API 共用 Redis
-    wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, layer, notify, diskPath }), diskPath, payoutSvc, ...gate }),
+    wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, layer, notify, diskPath, incompleteDays: config.reconIncompleteDays }), diskPath, payoutSvc, ...gate }),
     tick: () => runTick({
       db, tron, getTarget, notify, adminUrl: `${origin}/admin/`,
       scanEvm: () => scanEvm(db, { layer, notify }),
@@ -99,7 +99,7 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
       },
     }),
     daily: async () => {
-      const out = await runDaily({ db, tron, wallets, layer, notify, diskPath });
+      const out = await runDaily({ db, tron, wallets, layer, notify, diskPath, incompleteDays: config.reconIncompleteDays });
       // 租能量平台的预存余额每天查一次（超过 1,000 TRX 告警；没配不查）
       const rental = await checkRentalBalance(db, { renter: layer.tronEnergy, notify }).catch((e) => ({ status: 'error', error: e.message }));
       return out && typeof out === 'object' ? { ...out, energyRental: rental.status } : out;
