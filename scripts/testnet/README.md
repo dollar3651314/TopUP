@@ -94,3 +94,24 @@ TOPUP_TESTNET_DEPLOYER_KEY=$K TESTNET_LOCAL=1 \
 ```
 
 `TESTNET_LOCAL=1` 只允许本机地址（127.0.0.1 / localhost）上的链 ID 31337 和本机 TRON 私链；GitHub 上不设。
+
+## 5. 测试网充值（归集手续费对比验收用）
+
+验收"一个个归集 vs 一批归集的手续费"要每条链一批**新的**充值地址、每个先有 100 个测试 USDT。`.github/workflows/testnet-fund.yml` 代替人工一笔笔转账，管理员只需要在 GitHub 上批准两次。
+
+```mermaid
+flowchart LR
+  A["第 1 步 addresses<br/>环境 staging-e2e（批准）"] -->|"测试商户开放 API<br/>建单指定链 → 读客户地址"| L["清单：客户标识 + 充值地址<br/>（只有公开信息）"]
+  L --> B["第 2 步 fund<br/>环境 testnet（批准）"]
+  B -->|"部署账户 transfer 测试 USDT<br/>逐笔回执 + 核对余额"| R["运行摘要 + 产物<br/>客户标识、地址、交易号"]
+```
+
+- **第 1 步**（`scripts/testnet/fund-addresses.mjs`，环境 `staging-e2e`，用仓库密钥 `STAGING_URL` 和环境密钥 `STAGING_E2E_MERCHANT_KEY`、`STAGING_E2E_MERCHANT_SECRET`）：开放 API 里生成充值地址的入口是建单时指定链（`POST /api/v1/orders/`，先建客户、再生成地址、再建单），之后用 `GET /api/v1/customers/` 读这条链使用中的地址为准（测试商户没开订单模式时建单返回 403 `order_mode_disabled`，但地址已经生成）。客户标识 `fee-ac3-<链>-<运行号>-<序号>`，订单号同客户标识，Idempotency-Key 固定：重跑不会多建。
+- **第 2 步**（`scripts/testnet/fund-send.mjs`，环境 `testnet`，用 `TOPUP_TESTNET_DEPLOYER_KEY`、`TESTNET_ETH_RPC_URL`、`TRONGRID_API_KEY`）：部署账户（部署测试 USDT 时铸给它 1,000,000 个）给每个地址转 AMOUNT 个。以太坊走 `evm-send.mjs`（整套模拟、余额不够一笔不发、gas × 1.25、逐笔回执）；TRON 走 `scripts/tron-nile/tron-node.mjs`。每笔之后核对收款地址的代币余额正好增加 AMOUNT（TRON 测试 USDT 的 transfer 成功也返回 false，只看回执不够）；已经有 ≥ AMOUNT 余额的地址跳过（重跑第 2 步不会重复打）；一笔失败立即停。
+- **硬性限制**（`scripts/testnet/fund-lib.mjs`，单元测试 `test/testnet-fund.test.js`）：以太坊只准链 ID 11155111（主网 1、56 和其他链都拒绝），TRON 只准 Nile（0 号区块核对，本机私链也不准）；代币只准 staging 的测试 USDT（写死在脚本里，和 `config/wallets.json` 对照，主网 USDT 一律拒绝）；每条链最多 50 个地址、每个最多 1000 个；地址逐个核对格式（以太坊大小写混合要校验和对）、不重复、不是代币合约或部署账户。节点地址、私钥、TronGrid key、测试环境地址、商户 Secret 写出前一律遮盖。
+- **运行**：
+  - 手动（这个文件进了默认分支 `main` 之后）：Actions → testnet-fund → Run workflow，分支选 `staging`，填 `chains`（`eth,tron` / `eth` / `tron`）、`count`（默认 20）、`amount`（默认 100）。`addresses` 填了就跳过第 1 步、直接给这些地址打（只能选一条链，客户标识记成 `manual-01`…）。
+  - 推送触发（不用等进 `main`）：从最新的 `staging` 拉一个 `testnet-fund/<名字>` 分支推上去；参数用仓库变量 `TESTNET_FUND_CHAINS`、`TESTNET_FUND_COUNT`、`TESTNET_FUND_AMOUNT`，没设就是 `eth,tron`、20、100。**先要**在仓库 Settings → Environments 里给 `staging-e2e` 和 `testnet` 两个环境的 Deployment branches 各加一条 `testnet-fund/**`（现在一个只允许 `staging`、`e2e-run/**`，一个只允许 `main`、`staging`、`testnet-run/**`；不能借用这两个前缀，它们会同时触发验收用例或合约部署）。
+  - 每次运行管理员批准两次：先 `staging-e2e`（第 1 步），第 1 步完成后再 `testnet`（第 2 步）。
+- **结果**：运行摘要里有两张表（第 1 步：客户标识、充值地址；第 2 步：客户标识、地址、交易链接、结果），产物 `testnet-fund-addresses`、`testnet-fund-result`（addresses.json / fund.json、.md），只有公开信息。
+- 费用：2026-11-16 查链上（未运行本流程）：部署账户 Sepolia 上约 0.047 ETH、999,900 测试 USDT；Nile 上约 290 TRX、989,900 测试 USDT。每条链 20 笔转账足够；TRON 开始前按节点对第一笔的能量估算 × 1.5 核对 TRX 够不够，不够一笔都不发。
