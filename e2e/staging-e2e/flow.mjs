@@ -9,6 +9,9 @@ import { admin, merchant, hasMerchant, ok, RUN } from './lib.mjs';
 
 /** 收款地址：随便算出来的一个合法 TRON 地址（没有人有它的私钥；用例只到待签名，不会真的打款） */
 export const PAYEE = 'TNQ6owQCmCBpsd3YjbtnRRHDpJ3dg4PgCs';
+/** 以太坊收款地址：随机 20 字节算出的合法地址（带校验大小写，没有人有它的私钥；用例只到待签名，不会真的打款） */
+export const ETH_PAYEE = '0x56d16a25629B59d572Dc77618FE247819a37c509';
+const PAYEES = { tron: PAYEE, eth: ETH_PAYEE };
 /** 最小金额：1 = 0.000001 USDT */
 export const UNIT = 1;
 
@@ -38,13 +41,13 @@ let seq = 0;
 const tag = (label) => `${RUN}-${label}-${++seq}`.slice(0, 64);
 
 /**
- * 测试商户建一笔单笔代付（TRON，待审核）。返回单号；环境没准备好时调用 t.skip(原因) 并返回 null（调用方直接 return）
+ * 测试商户建一笔单笔代付（默认 TRON，chain 可以是 'eth'；待审核）。返回单号；环境没准备好时调用 t.skip(原因) 并返回 null（调用方直接 return）
  */
-export async function newPayout(t, label, amount = UNIT) {
+export async function newPayout(t, label, amount = UNIT, chain = 'tron') {
   const why = noMerchantReason();
   if (why) { t.skip(why); return null; }
   const ref = tag(label);
-  const r = await merchant('POST', 'withdrawals/', { kind: 'payout', chain: 'tron', to: PAYEE, amount: usdt(amount), merchant_ref: ref }, { idem: ref });
+  const r = await merchant('POST', 'withdrawals/', { kind: 'payout', chain, to: PAYEES[chain], amount: usdt(amount), merchant_ref: ref }, { idem: ref });
   const code = r.body?.error?.code;
   if (r.status !== 200 && ENV_REASONS[code]) { t.skip(ENV_REASONS[code]); return null; }
   const w = ok(r, `开放 API 建单（${label}）`);
@@ -137,5 +140,20 @@ export async function tronPlanBlocker(minHot) {
   if (card.planned_batches > 0) return 'TRON 已有没签名的打款批次（可能是管理员正在签）：凑批会把它作废，这一步跳过，算未验证';
   if (card.blocked === 'rpc') return '查不到 TRON 热钱包余额（节点不通）：凑批步骤跳过，算未验证';
   if (!(units(card.hot_balance) >= minHot)) return 'TRON 热钱包的测试 USDT 不够：凑批步骤跳过，算未验证';
+  return null;
+}
+
+/**
+ * 以太坊 / BSC 的凑批卡片：凑不了或不该凑时返回原因（null = 可以凑）。
+ * payout-plan 会把这条链所有已审核的单一起装批、并作废没签名的批次，所以有别人的已审核单或没签名的批次时不凑（那是管理员手上的东西）
+ */
+export async function evmPlanBlocker(chain, minCap) {
+  const p = ok(await admin('payout-plans'), 'payout-plans');
+  const card = (p.cards || []).find((c) => c.chain === chain);
+  if (!card?.enabled) return `${chain} 批量打款没开通：凑批步骤跳过`;
+  if (card.planned_batches > 0) return `${chain} 已有没签名的打款批次（可能是管理员正在签）：凑批会把它作废，这一步跳过，算未验证`;
+  if (card.approved_count > 0) return `${chain} 已有别的已审核单：凑批会把它们一起装进来，这一步跳过，算未验证`;
+  if (card.blocked) return `${chain} 凑批卡片写明凑不了（${card.blocked}）：这一步跳过，算未验证`;
+  if (!(units(card.cap) >= minCap)) return `${chain} 每批实际上限（热钱包、授权额度、每批上限取最小）不够：凑批步骤跳过，算未验证`;
   return null;
 }
