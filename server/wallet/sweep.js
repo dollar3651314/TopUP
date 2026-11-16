@@ -231,12 +231,16 @@ export async function proposeSweep(db, { chain, providers = {}, notify, provider
   // 候选和余额在事务外读（访问节点，不能放进事务）
   const inBatch = new Set((await db.query(`select lower(address) a from wallet_sweep_items where chain = $1 and status = any($2::text[])`, [chain, ACTIVE_ITEM])).map((r) => r.a));
   const cands = await sweepCandidates(db, { chain, provider: providerId });
+  // 对节点同时在途的请求数由适配器自己限（TRON 适配器最多 3 个，429 / 503 自动退避重试）；
+  // 任何一个地址查不到就整次作废，还没开始的地址不再去问节点（节点一直限流时尽快结束，不让后台请求一直挂着）
   const run = gate(balanceConcurrency);
+  let failed = false;
   const enriched = await Promise.all(cands.map((c) => run(async () => {
+    if (failed) throw new Error('aborted');
     const balance = BigInt(await p.balance(chain, { address: c.address }));
     const deployed = balance > 0n && typeof p.isDeployed === 'function' ? await p.isDeployed(chain, c.address) : false;
     return { ...c, balance, deployed, estFee: null, inBatch: inBatch.has(c.address.toLowerCase()) };
-  })));
+  }).catch((e) => { failed = true; throw e; })));
   await reconcileReleased(db, chain, enriched).catch((e) => console.error(`[sweep] reconcile ${chain}: ${e.message}`));
   const plan = await p.planSweep(chain, enriched, lim);
   if (!plan.batches.length) return [];

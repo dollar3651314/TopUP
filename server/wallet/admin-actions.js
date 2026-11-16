@@ -15,6 +15,14 @@ import { operatorGasStatus, native, NATIVE, LOW_GAS_BATCHES } from './operator-g
 const TRON_TYPICAL_BATCH_ENERGY = 1_300_000; // 一批 20 个地址的典型能量（推断值，Nile 实测后再调），只用来判断预存余额够不够一批
 
 const usdt = (u) => fmtUsdt(Number(u)).replace(/,/g, '');
+
+/** 访问节点出错换成给后台的 503（否则统一 500"服务器出错了"）：限流 / 节点繁忙（HTTP 429、503，重试后仍失败）→ node_busy；连不上、超时、其他 HTTP 错误 → rpc_unreachable */
+export function nodeFailure(e) {
+  if (e instanceof PayError) return e;
+  if (e?.code === 'rpc_http' && [429, 503].includes(e.httpStatus)) return new PayError('node_busy', 503);
+  if (['rpc_unreachable', 'rpc_http'].includes(e?.code) || e?.name === 'TimeoutError' || e?.name === 'AbortError') return new PayError('rpc_unreachable', 503);
+  return e;
+}
 /** 发起账户的手续费币少于够付几批典型归集时告警（定义在 operator-gas.js，这里照旧导出） */
 export { native, LOW_GAS_BATCHES };
 
@@ -194,7 +202,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
     async 'wallet-sweep-propose'(b, actor) {
       const chain = String(b.chain || '');
       if (!enabled().includes(chain)) throw new PayError('chain_not_enabled', 409, 'chain');
-      const bs = await proposeSweep(db, { chain, providers: providers(), notify, adminUrl: `${origin}/admin/`, actor, slot: 'manual' });
+      const bs = await proposeSweep(db, { chain, providers: providers(), notify, adminUrl: `${origin}/admin/`, actor, slot: 'manual' }).catch((e) => { throw nodeFailure(e); });
       return { batches: await outAll(db, bs) };
     },
     /** 确认归集：原因必填，不要动态码（钱只能进冷钱包） */
