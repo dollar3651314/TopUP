@@ -145,14 +145,16 @@ export async function tronPlanBlocker(minHot) {
 
 /**
  * 以太坊 / BSC 的凑批卡片：凑不了或不该凑时返回原因（null = 可以凑）。
- * payout-plan 会把这条链所有已审核的单一起装批、并作废没签名的批次，所以有别人的已审核单或没签名的批次时不凑（那是管理员手上的东西）
+ * payout-plan 会把这条链所有已审核的单一起装批、并作废没签名的批次，所以有别人的已审核单或没签名的批次时不凑（那是管理员手上的东西）。
+ * ownApproved：用例自己已审核、还没凑批的笔数（凑批前再查一次时传，这几笔不算"别人的"）。
+ * 验收用例运行期间，不要在后台给这条链凑批（会和用例抢同一批单）
  */
-export async function evmPlanBlocker(chain, minCap) {
+export async function evmPlanBlocker(chain, minCap, ownApproved = 0) {
   const p = ok(await admin('payout-plans'), 'payout-plans');
   const card = (p.cards || []).find((c) => c.chain === chain);
   if (!card?.enabled) return `${chain} 批量打款没开通：凑批步骤跳过`;
   if (card.planned_batches > 0) return `${chain} 已有没签名的打款批次（可能是管理员正在签）：凑批会把它作废，这一步跳过，算未验证`;
-  if (card.approved_count > 0) return `${chain} 已有别的已审核单：凑批会把它们一起装进来，这一步跳过，算未验证`;
+  if (card.approved_count > ownApproved) return `${chain} 已有别的已审核单：凑批会把它们一起装进来，这一步跳过，算未验证`;
   if (card.blocked) return `${chain} 凑批卡片写明凑不了（${card.blocked}）：这一步跳过，算未验证`;
   if (!(units(card.cap) >= minCap)) return `${chain} 每批实际上限（热钱包、授权额度、每批上限取最小）不够：凑批步骤跳过，算未验证`;
   return null;

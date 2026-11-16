@@ -7,6 +7,10 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { admin, ok, expectError } from './lib.mjs';
 import { newPayout, overview, reason, cleanup, tronPlanBlocker, evmPlanBlocker, withLimits, usdt, units, UNIT, ETH_PAYEE } from './flow.mjs';
+import { decodeRawTx, decodePay } from './evm-raw.mjs';
+
+/** BatchPayout.pay(address,bytes32,address[],uint256[]) 的函数选择器 */
+const PAY_SELECTOR = '0x52ecd4bd';
 
 after(cleanup);
 
@@ -37,27 +41,40 @@ test('E05 以太坊：没开通时 payout-plan 返回 409 chain_not_enabled；�
     expectError(await admin('payout-plan', { body: { chain: 'eth' } }), 409, 'chain_not_enabled', 'payout-plan 以太坊');
     return;
   }
-  // 开通了：凑批到"待签名"为止，不签名、不广播
+  // 开通了：凑批到"待签名"为止，不签名、不广播。链 ID 写死 Sepolia（11155111）、tUSDT 6 位小数：测试环境现在只部署了 Sepolia
   const block = await evmPlanBlocker('eth', UNIT);
   if (block) { t.skip(block); return; }
   const id = await newPayout(t, 'e05-eth', UNIT, 'eth');
   if (!id) return;
   await approve([id]);
+  // 建单、审核期间管理员可能在后台凑了批：凑批前再查一次（自己这 1 笔不算别人的）；跳过时这笔由 cleanup 驳回
+  const block2 = await evmPlanBlocker('eth', UNIT, 1);
+  if (block2) { t.skip(block2); return; }
 
-  const r = ok(await admin('payout-plan', { body: { chain: 'eth' } }), 'payout-plan 以太坊');
-  assert.ok(r.chain === 'eth' && Array.isArray(r.batches), '返回以太坊的批次列表');
-  const mineBatches = r.batches.filter((b) => (b.items || []).some((i) => i.id === id));
-  const pts = r.batches.map((b) => b.id);
+  let failure = null;
+  const seen = new Set(); // 这次凑出来的批次号（作废用）
   try {
+    // 凑批要试算 gas、读链上余额和额度，给足 90 秒；超时了服务器可能已经建了批次，下面按单号去找、照样作废
+    const r = ok(await admin('payout-plan', { body: { chain: 'eth' }, timeoutMs: 90_000 }), 'payout-plan 以太坊');
+    for (const x of r.batches || []) seen.add(x.id);
+    assert.ok(r.chain === 'eth' && Array.isArray(r.batches), '返回以太坊的批次列表');
+    const mineBatches = r.batches.filter((b) => (b.items || []).some((i) => i.id === id));
     assert.ok(r.batches.length === 1 && mineBatches.length === 1, '只凑出 1 批，里面有这一笔');
     const b = mineBatches[0];
     assert.ok(typeof b.id === 'string' && b.id.startsWith('PT-ETH-'), '有打款批次号（PT-ETH-）');
     assert.ok(b.items.length === 1 && b.items[0].to === ETH_PAYEE && units(b.items[0].amount) === UNIT, '批次里就是这一笔：收款地址、金额都对');
-    assert.ok(typeof b.rawHex === 'string' && /^(0x)?[0-9a-f]+$/i.test(b.rawHex) && b.rawHex.length > 20, '给了待签名的交易原文（十六进制）');
     assert.ok(/^\d+$/.test(String(b.nonce)) && /^\d+$/.test(String(b.fee_wei)), '给了热钱包 nonce 和预估网络费');
-    assert.ok(b.expect?.chainId === '11155111', '期望值里的链 ID 是 Sepolia（11155111）');
-    assert.ok(eth.contract && String(b.expect?.contract).toLowerCase() === String(eth.contract).toLowerCase(), '期望值里的合约是登记的 BatchPayout');
-    assert.ok(b.expect?.items?.length === 1 && b.expect.items[0].to === ETH_PAYEE, '期望值逐笔列了收款地址');
+
+    // 交易原文自己解码核对（不拿同样来自服务器的 expect 自证）
+    let tx = null, call = null;
+    try { tx = decodeRawTx(b.rawHex); call = decodePay(tx.data); } catch { assert.fail('交易原文解不开（不是未签名的旧式交易或不是 pay 调用）'); }
+    assert.ok(tx.chainId === 11155111n, '原文里的链 ID 是 Sepolia（11155111）');
+    assert.ok(eth.contract && tx.to === String(eth.contract).toLowerCase(), '原文的收款合约是登记的 BatchPayout');
+    assert.ok(tx.value === 0n, '原文不带 ETH（value = 0）');
+    assert.ok(String(tx.nonce) === String(b.nonce), '原文的 nonce 和返回的一致');
+    assert.ok(call.selector === PAY_SELECTOR, '调用的是 pay(address,bytes32,address[],uint256[])');
+    assert.ok(call.items.length === 1 && call.items[0].to === ETH_PAYEE.toLowerCase() && call.items[0].amount === BigInt(UNIT), '原文里就是这一笔：收款地址、金额（6 位小数的最小单位）都对');
+    assert.ok(String(b.expect?.batchId).toLowerCase() === call.batchId, '期望值的批次标识和原文一致');
 
     const x = ok(await admin('payout-tx-batch', { query: { id: b.id } }), 'payout-tx-batch');
     assert.ok(x.status === 'planned' && x.voidable === true && x.resumable === true && x.count === 1, '批次在"待签名"（planned），能继续签名、能作废');
@@ -66,12 +83,41 @@ test('E05 以太坊：没开通时 payout-plan 返回 409 chain_not_enabled；�
     expectError(await admin('payout-reject-approved', { body: { id, reason: reason('凑进批次的单') } }), 409, 'invalid_state', '凑进批次的单不能直接驳回');
     const res = ok(await admin('payout-resume', { body: { id: b.id } }), 'payout-resume');
     assert.ok(res.batches?.length === 1 && res.batches[0].id === b.id && res.batches[0].rawHex === b.rawHex, '"继续签名"拿回同一批、同一份原文（只读，不签名）');
-  } finally {
-    for (const pt of pts) await voidAndCheck(pt, [id]);
+  } catch (e) {
+    failure = e;
   }
+  // 收尾：先把含这一笔、还没签名的批次全部作废（不抛错，免得盖住上面的失败），再统一核对
+  const left = await voidPlannedWith(id, seen);
+  if (failure) throw failure;
+  assert.ok(!left.length, `有批次没作废掉，要在后台手工作废：${left.join('，')}`);
+  for (const pt of seen) {
+    const x = ok(await admin('payout-tx-batch', { query: { id: pt } }), 'payout-tx-batch（作废后）');
+    assert.ok(x.status === 'expired' && x.voidable === false, '作废后批次是 expired、不能再作废');
+  }
+  const appr = (await overview()).approved || [];
+  assert.ok(appr.some((a) => a.id === id), '单回到已审核（还没凑批）');
   const j = ok(await admin('payout-reject-approved', { body: { id, reason: reason('E05 以太坊作废后驳回') } }), 'payout-reject-approved');
   assert.ok(j?.status === 'rejected', '作废后能驳回');
 });
+
+/**
+ * 作废所有含这笔单、还没签名（planned）的批次：凑批返回的批次号 + 打款审核页最近的批次里找到的（凑批请求超时、没拿到返回时靠这个）。
+ * 不抛错；返回作废不掉的批次号。作废掉的都记进 seen
+ */
+async function voidPlannedWith(id, seen) {
+  const left = [];
+  try {
+    const recent = (await admin('payout-overview', { timeoutMs: 60_000 })).body?.batches || [];
+    for (const b of recent) if (b.status === 'planned' && (b.items || []).some((i) => i.id === id)) seen.add(b.id);
+  } catch { /* 查不到就只作废已知的 */ }
+  for (const pt of seen) {
+    try {
+      const r = await admin('payout-void', { body: { id: pt } });
+      if (r.status !== 200 && r.body?.error?.code !== 'invalid_state') left.push(pt);
+    } catch { left.push(pt); }
+  }
+  return left;
+}
 
 test('E05 TRON withdraw-plan 只收已审核的单：待审核的 409 not_approved，空列表 422', async (t) => {
   expectError(await admin('withdraw-plan', { body: { ids: [] } }), 422, 'invalid_param', 'withdraw-plan 空列表');
