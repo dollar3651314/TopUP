@@ -6,20 +6,43 @@
 //   - txStatus：连不上 unknown（不等于失败）；没回执 pending；确认数不够 pending；够了 SUCCESS → confirmed，否则 failed
 //   - 地址对外一律 T 开头；金额 0.000001 USDT 单位（TRON USDT 6 位小数）
 // 每个请求都有超时（timeoutMs，默认 10 秒）；错误信息不含节点地址（可能带 API Key）。
+// 限流：同一个适配器对节点同时最多 maxInFlight 个请求（默认 3，TronGrid 有每秒次数限制）；节点回 HTTP 429 / 503 时退避重试，
+//   每个请求最多 RETRY_ATTEMPTS 次（间隔 1、2、4 秒；有 Retry-After 时至少等那么久，但每次最多 10 秒），都失败抛 rpc_http（带 httpStatus）。
+//   其他 HTTP 错误、连不上、超时不重试（由调用方决定下一轮再来）。重试只发生在节点明确"没处理、请稍后"的回应上；
+//   广播（/wallet/broadcasthex）重发的是同一笔已签名交易（txID 不变），节点已经收过的会回 DUP_TRANSACTION_ERROR，不会上链两次。
 import { toUnits } from '../units.js';
 import { isTronAddress, hex20, tronOf } from '../tron-create2.js';
 import { txIdOf } from '../../pay/txcodec.js';
 import { keccakHex } from '../evm-tx.js';
+import { gate } from '../../pay/db.js';
 
 export const TRANSFER_TOPIC = keccakHex(Buffer.from('Transfer(address,address,uint256)')).slice(2);
-const BLOCK_CONCURRENCY = 4; // 读回执时同时最多几个请求（TronGrid 有频率限制）
+const BLOCK_CONCURRENCY = 4; // 读回执时同时最多几个请求（TronGrid 有频率限制；再受下面 maxInFlight 约束）
+const MAX_IN_FLIGHT = 3; // 同一个适配器对节点同时在途的请求上限
+export const RETRY_ATTEMPTS = 4; // 429 / 503 时每个请求最多请求几次（第 1 次 + 重试 3 次）
+const RETRY_STATUS = new Set([429, 503]);
+const RETRY_BASE_MS = 1000; // 第 n 次重试前等 RETRY_BASE_MS × 2^(n−1)：1、2、4 秒，合计 7 秒
+const RETRY_MAX_MS = 10_000; // 每次最多等多久（Retry-After 再大也只等这么久）
+const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Retry-After：秒数或 HTTP 日期，换成毫秒；没有或看不懂返回 0 */
+function retryAfterMs(v, now = Date.now()) {
+  if (v === null || v === undefined || v === '') return 0;
+  const s = String(v).trim();
+  if (/^\d+(\.\d+)?$/.test(s)) return Math.round(Number(s) * 1000);
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? Math.max(0, t - now) : 0;
+}
 const word = (h) => String(h).replace(/^0x/, '').toLowerCase().padStart(64, '0');
 const hex41 = (a) => '41' + hex20(a);
 /** 日志里的合约地址：一般是 20 字节十六进制（不带 41），个别节点带 41 */
 export const logAddr = (a) => { const s = String(a || '').toLowerCase(); return s.length === 42 && s.startsWith('41') ? s.slice(2) : s.padStart(40, '0'); };
 
 export class TronNodeError extends Error {
-  constructor(message, { code = 'rpc_error', nodeCode } = {}) { super(message); this.code = code; this.nodeCode = nodeCode; }
+  constructor(message, { code = 'rpc_error', nodeCode, httpStatus } = {}) {
+    super(message); this.code = code; this.nodeCode = nodeCode;
+    if (httpStatus !== undefined) this.httpStatus = httpStatus;
+  }
 }
 
 /** 节点返回的 message 多半是十六进制编码的文字：能解就解 */
@@ -31,29 +54,51 @@ export function nodeMessage(m) {
 
 /**
  * base：节点地址（例如 https://api.trongrid.io、http://127.0.0.1:9090）；usdt：T 开头的 USDT 合约地址；
- * confirmations：确认数（默认 19，TRON 固化块）；maxRange：一次最多读多少个区块；apiKey：TronGrid 的 API Key（放请求头）
+ * confirmations：确认数（默认 19，TRON 固化块）；maxRange：一次最多读多少个区块；apiKey：TronGrid 的 API Key（放请求头）；
+ * sleep：async (ms) => void，429 / 503 重试前等待用（默认真的计时器，测试注入假的）；maxInFlight：同时在途的请求上限（默认 3）
  */
-export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations = 19, maxRange = 100, timeoutMs = 10_000, apiKey = '' }) {
+export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations = 19, maxRange = 100, timeoutMs = 10_000, apiKey = '', sleep = realSleep, maxInFlight = MAX_IN_FLIGHT }) {
   if (!isTronAddress(usdt)) throw new Error('tron adapter: usdt must be a T-address');
   if (!base) throw new Error('tron adapter: node url missing');
   const usdtHex = hex20(usdt);
   const root = String(base).replace(/\/+$/, '');
+  const slot = gate(Math.max(1, Number(maxInFlight) || MAX_IN_FLIGHT));
 
-  async function post(path, body = {}) {
+  /** 一次请求（占一个在途名额，读完响应体才放）：返回 { status, retryAfter } 或 { j } */
+  const attempt = (path, payload) => slot(async () => {
     let res;
     try {
       res = await fetchImpl(root + path, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json', ...(apiKey ? { 'TRON-PRO-API-KEY': apiKey } : {}) },
-        body: JSON.stringify(body),
+        body: payload,
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (e) {
       throw new TronNodeError(`tron: node unreachable (${e?.cause?.code || e?.name || 'network'}) ${path}`, { code: 'rpc_unreachable' });
     }
-    if (!res.ok) throw new TronNodeError(`tron: HTTP ${res.status} ${path}`, { code: 'rpc_http' });
-    let j;
-    try { j = await res.json(); } catch { throw new TronNodeError(`tron: invalid JSON ${path}`, { code: 'rpc_http' }); }
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return { status: res.status, retryAfter: res.headers.get('retry-after') };
+    }
+    try { return { j: await res.json() }; } catch { throw new TronNodeError(`tron: invalid JSON ${path}`, { code: 'rpc_http' }); }
+  });
+
+  async function post(path, body = {}) {
+    const payload = JSON.stringify(body);
+    let r;
+    let wait = 0;
+    for (let n = 1; ; n++) {
+      r = await attempt(path, payload);
+      if (!r.status) break;
+      if (!RETRY_STATUS.has(r.status) || n >= RETRY_ATTEMPTS) {
+        throw new TronNodeError(`tron: HTTP ${r.status} ${path}${n > 1 ? ` (after ${n} attempts)` : ''}`, { code: 'rpc_http', httpStatus: r.status });
+      }
+      // 退避：不比上一次短；Retry-After 有就至少等那么久；每次最多 RETRY_MAX_MS（等待时不占在途名额）
+      wait = Math.min(RETRY_MAX_MS, Math.max(wait, RETRY_BASE_MS * 2 ** (n - 1), retryAfterMs(r.retryAfter)));
+      await sleep(wait);
+    }
+    const j = r.j;
     if (j && !Array.isArray(j) && typeof j === 'object' && j.Error) throw new TronNodeError(`tron: ${path}: ${String(j.Error).slice(0, 200)}`);
     return j;
   }
