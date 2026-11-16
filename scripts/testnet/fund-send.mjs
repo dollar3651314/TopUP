@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { addressOfKey } from '../../server/wallet/evm-tx.js';
 import { preflight, sendAll, pickGasPrice, refuseMainnet } from './evm-send.mjs';
-import { FUND_TARGETS, checkEvmChainId, checkTronNetwork, tokenFor, validatePlan, planFromList, parseChains, erc20TransferData, erc20BalanceOfData, secretList, maskWith, fmtUnits, txLink } from './fund-lib.mjs';
+import { FUND_TARGETS, checkEvmChainId, checkTronNetwork, tokenFor, validatePlan, planFromList, parseChains, erc20TransferData, erc20BalanceOfData, stagingSystemAddresses, secretList, maskWith, fmtUnits, txLink } from './fund-lib.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SEPOLIA_DEFAULT_RPC = 'https://ethereum-sepolia-rpc.publicnode.com';
@@ -51,11 +51,11 @@ const balanceEvm = async (rpc, token, addr) => BigInt(await rpc('eth_call', [{ t
  * 以太坊 Sepolia：核对链 ID → 代币余额 → 整套模拟 → 逐笔发出 → 核对每个收款地址的余额。
  * records：每个地址一条 { customer_id, address, amount, txid, status }（ok / skipped / failed / not-sent）
  */
-export async function fundEvm(rpc, { key, token, plan, wait, gasPriceGwei = '', log = () => {}, onRecords = () => {} }) {
+export async function fundEvm(rpc, { key, token, plan, wait, gasPriceGwei = '', exclude = [], log = () => {}, onRecords = () => {} }) {
   const chainId = Number(BigInt(await rpc('eth_chainId')));
   checkEvmChainId(chainId);
   const from = addressOfKey(key);
-  const p = validatePlan({ chains: { eth: plan } }, { exclude: { eth: [from] } }).chains.eth;
+  const p = validatePlan({ chains: { eth: plan } }, { exclude: { eth: [from, ...exclude] } }).chains.eth;
   const decimals = Number(BigInt(await rpc('eth_call', [{ to: token, data: '0x313ce567' }, 'latest'])));
   if (decimals !== FUND_TARGETS.eth.decimals) throw new Error(`测试 USDT 的小数位数是 ${decimals}，不是 ${FUND_TARGETS.eth.decimals}（一笔都没有发）`);
   const records = p.items.map((it) => ({ ...it, amount: p.amount, txid: '', status: 'not-sent' }));
@@ -78,34 +78,30 @@ export async function fundEvm(rpc, { key, token, plan, wait, gasPriceGwei = '', 
   const balance = BigInt(await rpc('eth_getBalance', [from, 'latest']));
   const pf = await preflight(rpc, { from, txs, gasPrice, balance });
   log(`  部署账户 ${from}：${todo.length} 笔，${pf.simulated ? '整套模拟通过' : '节点不支持整套模拟，只估了第一笔'}，gas 价格 ${gasPrice} wei`);
-  let sentStep = 0;
-  try {
+  // 一笔一笔发：每笔回执成功后立即核对收款地址余额正好增加 AMOUNT，不对就停（后面的不发）
+  for (const [n, t] of txs.entries()) {
+    const r = records[t.idx];
     await sendAll(rpc, {
-      key, from, chainId, gasPrice, txs, explorer: FUND_TARGETS.eth.explorer, wait, log,
-      onTx: (rec) => { const r = records[txs[rec.step - 1].idx]; r.txid = rec.hash; r.status = rec.status === 'ok' ? 'sent' : 'failed'; sentStep = rec.step; onRecords(records); },
+      key, from, chainId, gasPrice, txs: [t], explorer: FUND_TARGETS.eth.explorer, wait, log,
+      onTx: (rec) => { r.txid = rec.hash; r.status = rec.status === 'ok' ? 'sent' : 'failed'; if (rec.status !== 'ok') r.note = `第 ${n + 1}/${txs.length} 笔：${rec.status}`; onRecords(records); },
     });
-  } finally {
-    // 已经上链的逐个核对余额（失败时也核对已经发出的那部分）
-    for (const t of txs.slice(0, sentStep)) {
-      const r = records[t.idx];
-      if (r.status !== 'sent') continue;
-      const after = await balanceEvm(rpc, token, r.address);
-      r.status = after === before[t.idx] + p.amountUnits ? 'ok' : 'failed';
-      if (r.status === 'failed') r.note = `余额 ${fmtUnits(before[t.idx])} → ${fmtUnits(after)}，不是正好加 ${p.amount}`;
-    }
+    const after = await balanceEvm(rpc, token, r.address);
+    r.status = after === before[t.idx] + p.amountUnits ? 'ok' : 'failed';
     onRecords(records);
+    if (r.status === 'failed') {
+      r.note = `回执成功，但余额 ${fmtUnits(before[t.idx])} → ${fmtUnits(after)}，不是正好加 ${p.amount}`;
+      throw new Error(`第 ${n + 1}/${txs.length} 笔（${r.customer_id}）${r.note}，交易 ${txLink('eth', r.txid)}。已停止，后面的没有发`);
+    }
   }
-  const bad = records.filter((r) => r.status === 'failed');
-  if (bad.length) throw new Error(`${bad.length} 个地址的余额没有正好增加 ${p.amount}：${bad.map((r) => r.customer_id).join('、')}`);
   return records;
 }
 
 const balanceTron = async (node, token, addr) => BigInt('0x' + ((await node.call(token, 'balanceOf(address)', ['address'], [addr])) || '0'));
 
 /** TRON Nile：核对是 Nile → 代币余额、TRX 够不够 → 逐笔 transfer、等回执、核对收款地址余额 */
-export async function fundTron(node, signer, { token, plan, log = () => {}, onRecords = () => {} }) {
+export async function fundTron(node, signer, { token, plan, exclude = [], log = () => {}, onRecords = () => {} }) {
   checkTronNetwork(await node.checkNetwork());
-  const p = validatePlan({ chains: { tron: plan } }, { exclude: { tron: [signer.address] } }).chains.tron;
+  const p = validatePlan({ chains: { tron: plan } }, { exclude: { tron: [signer.address, ...exclude] } }).chains.tron;
   const decimals = Number(BigInt('0x' + (await node.call(token, 'decimals()'))));
   if (decimals !== FUND_TARGETS.tron.decimals) throw new Error(`测试 USDT 的小数位数是 ${decimals}，不是 ${FUND_TARGETS.tron.decimals}（一笔都没有发）`);
   const records = p.items.map((it) => ({ ...it, amount: p.amount, txid: '', status: 'not-sent' }));
@@ -138,6 +134,9 @@ export async function fundTron(node, signer, { token, plan, log = () => {}, onRe
     try {
       res = await node.send(signer, token, 'transfer(address,uint256)', ['address', 'uint256'], [r.address, p.amountUnits], { feeLimit: TRON_FEE_LIMIT });
     } catch (e) {
+      // 等回执超时：交易已经广播，把交易号记下来（tron-node 的错误里带着它）
+      const pend = /not confirmed in time: ([0-9a-f]{64})/i.exec(String(e?.message || ''));
+      if (pend) { r.txid = pend[1]; r.status = 'failed'; r.note = '已广播，等回执超时（到浏览器查这笔是否上链）'; onRecords(records); throw new Error(`第 ${n + 1}/${todo.length} 笔（${r.customer_id}）已广播但等回执超时，交易 ${txLink('tron', r.txid)}。已停止，后面的没有发`); }
       r.status = 'failed'; r.note = '发送出错'; onRecords(records);
       throw new Error(`第 ${n + 1}/${todo.length} 笔（${r.customer_id}）发送出错：${e.message}。已停止，后面的没有发`);
     }
@@ -192,9 +191,10 @@ async function main() {
     } else {
       try { raw = JSON.parse(String(env.FUND_PLAN || '')); } catch { throw new Error('没有第 1 步的地址清单（FUND_PLAN），或格式不对'); }
     }
-    const plan = validatePlan(raw); // 整份先核对一遍（格式、上限、重复），有问题一笔都不发
-    result.run = plan.run;
     const wallets = JSON.parse(readFileSync(join(ROOT, 'config/wallets.json'), 'utf8'));
+    // 整份先核对一遍（格式、上限、重复、系统地址），有问题一笔都不发
+    const plan = validatePlan(raw, { exclude: { eth: stagingSystemAddresses(wallets, 'eth'), tron: stagingSystemAddresses(wallets, 'tron') } });
+    result.run = plan.run;
     for (const chain of Object.keys(plan.chains)) {
       const token = tokenFor(chain, wallets);
       const c = result.chains[chain] = { token, amount: plan.chains[chain].amount, records: [] };
@@ -203,11 +203,11 @@ async function main() {
       console.log(`\n== ${FUND_TARGETS[chain].name}：${sub.items.length} 个地址，每个 ${sub.amount} 测试 USDT`);
       try {
         if (chain === 'eth') {
-          await fundEvm(makeRpc(ethUrl), { key, token, plan: sub, gasPriceGwei: env.EVM_GAS_PRICE_GWEI || '', log: (m) => console.log(mask(m)), onRecords });
+          await fundEvm(makeRpc(ethUrl), { key, token, plan: sub, exclude: stagingSystemAddresses(wallets, 'eth'), gasPriceGwei: env.EVM_GAS_PRICE_GWEI || '', log: (m) => console.log(mask(m)), onRecords });
         } else {
           const { createNode, makeSigner } = await import('../tron-nile/tron-node.mjs');
           const node = createNode({ base: NILE_NODE, apiKey: env.TRONGRID_API_KEY || '' });
-          await fundTron(node, makeSigner(key), { token, plan: sub, log: (m) => console.log(mask(m)), onRecords });
+          await fundTron(node, makeSigner(key), { token, plan: sub, exclude: stagingSystemAddresses(wallets, 'tron'), log: (m) => console.log(mask(m)), onRecords });
         }
       } catch (e) {
         c.error = mask(e?.message || String(e));

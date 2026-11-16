@@ -49,6 +49,18 @@ export function tokenFor(chain, wallets) {
   return t.token;
 }
 
+/**
+ * config/wallets.json staging 一节里这条链的系统地址（热钱包、冷钱包、parent、payout、batcher、factory、implementation、usdt）：
+ * 都不能当收款地址（打进去会被当成系统资金，或打乱余额、对账）
+ */
+export function stagingSystemAddresses(wallets, chain) {
+  const st = wallets?.staging || {};
+  const KEYS = ['hot', 'cold', 'parent', 'payout', 'batcher', 'factory', 'implementation', 'usdt'];
+  const pick = (o) => KEYS.map((k) => o?.[k]).filter((v) => typeof v === 'string' && v);
+  const list = chain === 'eth' ? pick(st.evm?.eth) : chain === 'tron' ? [...pick(st), ...pick(st.tron)] : [];
+  return [...new Set(list.filter((a) => isValidAddress(chain, a)))];
+}
+
 /** 链清单（逗号或空白分隔）→ 去重后的数组；只认 eth、tron */
 export function parseChains(text) {
   const list = [...new Set(String(text ?? '').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean))];
@@ -125,7 +137,7 @@ export function validatePlan(plan, { exclude = {} } = {}) {
       const idChain = CUSTOMER_ID_RE.exec(id)[1];
       if (idChain && idChain !== chain) fail(`${where}：客户标识 ${id} 不是这条链的`);
       if (!isValidAddress(chain, addr)) fail(`${where}（${id}）：地址格式不对`);
-      if (banned.some((b) => sameAddr(chain, b, addr))) fail(`${where}（${id}）：${addr} 是代币合约或部署账户，不能打`);
+      if (banned.some((b) => sameAddr(chain, b, addr))) fail(`${where}（${id}）：${addr} 是代币合约、部署账户或 staging 的系统地址，不能打`);
       const key = chain === 'eth' ? lower(addr) : addr;
       if (seenAddr.has(key)) fail(`${where}（${id}）：地址 ${addr} 重复`);
       if (seenId.has(id)) fail(`${where}：客户标识 ${id} 重复`);

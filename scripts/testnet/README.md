@@ -113,5 +113,12 @@ flowchart LR
   - 手动（这个文件进了默认分支 `main` 之后）：Actions → testnet-fund → Run workflow，分支选 `staging`，填 `chains`（`eth,tron` / `eth` / `tron`）、`count`（默认 20）、`amount`（默认 100）。`addresses` 填了就跳过第 1 步、直接给这些地址打（只能选一条链，客户标识记成 `manual-01`…）。
   - 推送触发（不用等进 `main`）：从最新的 `staging` 拉一个 `testnet-fund/<名字>` 分支推上去；参数用仓库变量 `TESTNET_FUND_CHAINS`、`TESTNET_FUND_COUNT`、`TESTNET_FUND_AMOUNT`，没设就是 `eth,tron`、20、100。**先要**在仓库 Settings → Environments 里给 `staging-e2e` 和 `testnet` 两个环境的 Deployment branches 各加一条 `testnet-fund/**`（现在一个只允许 `staging`、`e2e-run/**`，一个只允许 `main`、`staging`、`testnet-run/**`；不能借用这两个前缀，它们会同时触发验收用例或合约部署）。
   - 每次运行管理员批准两次：先 `staging-e2e`（第 1 步），第 1 步完成后再 `testnet`（第 2 步）。
+  - **批准前必看**：批准一次 `testnet-fund/*` 分支上的运行，等于让这个分支上的**任何代码**拿到 `staging-e2e`（测试商户 Key、测试环境地址）或 `testnet`（部署账户私钥）的密钥——包括被改过的流程文件和脚本，上面的"硬性限制"也可能被改掉。所以：`testnet-fund/` 分支**只从最新的 `staging` 拉**、不在上面改任何代码；批准前先在 GitHub 上打开 `compare/staging...testnet-fund/<名字>`，确认**一个文件都没改**（有改动就不批准）。手动运行时分支选 `staging`，同理只批准 `staging` 上的运行。
+- **对共用的 staging 测试商户的副作用**（staging-e2e 的用例也用这个商户；已核对 `e2e/staging-e2e/` 里没有按客户数、订单数断言的用例，不会因此失败）：
+  - 每次运行每条链多 N 个客户（`eth,tron`、20 个就是 40 个），客户标识都是 `fee-ac3-` 开头，商户后台客户列表里能看到；不会自动删除。
+  - 测试商户**开了订单模式**时，每个客户还多一张金额 AMOUNT 的待付款订单（订单号 = 客户标识）；第 2 步打币后订单被匹配，商户配了回调地址的话会收到 `order.matched` 回调。没开订单模式时只有客户和地址，没有订单。
+  - 打了币的地址会进入归集：服务器的定时凑批会把它们凑进"待确认"的批次（要管理员确认才发交易），staging-e2e 的 E09 也会凑批后作废放回。做手续费对比时，先看运营后台的归集页有没有自动凑出来的批次，按验收步骤处理。
+  - 收款地址不能是 staging 的系统地址：`config/wallets.json` staging 一节里的热钱包、冷钱包、parent、payout、batcher、factory、implementation、usdt（两步都核对，`stagingSystemAddresses`）。
+- 两个 job 都用 `npm ci --ignore-scripts`（依赖里没有需要安装脚本的包，持有密钥的 job 不执行第三方安装脚本）。
 - **结果**：运行摘要里有两张表（第 1 步：客户标识、充值地址；第 2 步：客户标识、地址、交易链接、结果），产物 `testnet-fund-addresses`、`testnet-fund-result`（addresses.json / fund.json、.md），只有公开信息。
 - 费用：2026-11-16 查链上（未运行本流程）：部署账户 Sepolia 上约 0.047 ETH、999,900 测试 USDT；Nile 上约 290 TRX、989,900 测试 USDT。每条链 20 笔转账足够；TRON 开始前按节点对第一笔的能量估算 × 1.5 核对 TRX 够不够，不够一笔都不发。

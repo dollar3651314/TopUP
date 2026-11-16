@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   FUND_TARGETS, FUND_MAX_ADDRESSES, checkEvmChainId, checkTronNetwork, tokenFor, parseChains, parseCount, parseAmount,
-  isValidAddress, validatePlan, planFromList, customerIdFor, erc20TransferData, secretList, maskWith,
+  isValidAddress, validatePlan, planFromList, customerIdFor, erc20TransferData, secretList, maskWith, stagingSystemAddresses,
 } from '../scripts/testnet/fund-lib.mjs';
 import { fundEvm, fundTron } from '../scripts/testnet/fund-send.mjs';
 import { merchantClient, addressFor, collect } from '../scripts/testnet/fund-addresses.mjs';
@@ -22,7 +22,8 @@ const FROM = addressOfKey('0x' + KEY);
 const ETH_TOKEN = FUND_TARGETS.eth.token;
 const TRON_TOKEN = FUND_TARGETS.tron.token;
 const evmAddr = (i) => checksumAddress('0x' + (0x1000 + i).toString(16).padStart(40, '0'));
-const TRON_ADDRS = ['TCGmF2ifgV8YTqaUGjUMtPRhnxv9oxVu9k', 'TAntBzsk7JPaF787GnkcLWDgnNza3WYKdn', 'TBd4KacsT3P98a9dAVoGzXtBTS9hbkcGvE'];
+// 普通 TRON 地址（随便的测试私钥算出来的，不是 staging 的系统地址）
+const TRON_ADDRS = ['44', '55', '66'].map((b) => makeSigner(b.repeat(32)).address);
 const hex = (n) => '0x' + BigInt(n).toString(16);
 const fastWait = { timeoutMs: 50, pollMs: 1, sleep: async () => {} };
 const ethPlan = (n, amount = '100') => ({ amount, items: Array.from({ length: n }, (_, i) => ({ customer_id: customerIdFor('eth', '123', i + 1), address: evmAddr(i) })) });
@@ -80,8 +81,16 @@ test('地址格式：以太坊大小写混合要校验和对、零地址拒绝�
   const a = evmAddr(1);
   assert.ok(isValidAddress('eth', a));
   assert.ok(isValidAddress('eth', a.toLowerCase()));
-  const wrongCase = a.slice(0, -1) + (a.at(-1) === a.at(-1).toUpperCase() ? a.at(-1).toLowerCase() : a.at(-1).toUpperCase());
-  if (wrongCase !== a && /[a-f]/i.test(a.at(-1))) assert.ok(!isValidAddress('eth', wrongCase));
+  // 校验和：取一个大小写混合的地址，把其中一个字母的大小写翻过来（格式还对，校验和不对）→ 必须拒绝
+  const mixed = ['33', '44', '55', '66', '77', '88', '99'].map((b) => checksumAddress(addressOfKey('0x' + b.repeat(32)))).find((x) => /[A-F]/.test(x.slice(2)) && /[a-f]/.test(x.slice(2)));
+  assert.ok(mixed, '找到大小写混合的地址');
+  const pos = 2 + mixed.slice(2).search(/[A-Fa-f]/);
+  const flipped = mixed.slice(0, pos) + (mixed[pos] === mixed[pos].toUpperCase() ? mixed[pos].toLowerCase() : mixed[pos].toUpperCase()) + mixed.slice(pos + 1);
+  assert.notEqual(flipped, mixed);
+  assert.ok(/[A-F]/.test(flipped.slice(2)) && /[a-f]/.test(flipped.slice(2)), '翻完还是大小写混合（不是全小写、全大写）');
+  assert.ok(isValidAddress('eth', mixed));
+  assert.ok(!isValidAddress('eth', flipped), '校验和不对的混合大小写地址要拒绝');
+  assert.throws(() => validatePlan({ chains: { eth: { amount: '1', items: [{ customer_id: 'manual-01', address: flipped }] } } }), /地址格式不对/);
   assert.ok(!isValidAddress('eth', '0x' + '0'.repeat(40)));
   assert.ok(!isValidAddress('eth', '0x1234'));
   assert.ok(!isValidAddress('eth', TRON_ADDRS[0]));
@@ -97,9 +106,9 @@ test('清单核对：上限 50、重复（不分大小写）、代币合约、�
   const dup = ethPlan(2); dup.items[1].address = dup.items[0].address.toLowerCase();
   assert.throws(() => validatePlan({ chains: { eth: dup } }), /重复/);
   const tok = ethPlan(1); tok.items[0].address = ETH_TOKEN.toLowerCase();
-  assert.throws(() => validatePlan({ chains: { eth: tok } }), /代币合约或部署账户/);
+  assert.throws(() => validatePlan({ chains: { eth: tok } }), /代币合约、部署账户或 staging 的系统地址/);
   const self = ethPlan(1); self.items[0].address = FROM;
-  assert.throws(() => validatePlan({ chains: { eth: self } }, { exclude: { eth: [FROM] } }), /代币合约或部署账户/);
+  assert.throws(() => validatePlan({ chains: { eth: self } }, { exclude: { eth: [FROM] } }), /代币合约、部署账户或 staging 的系统地址/);
   const other = ethPlan(1); other.items[0].customer_id = customerIdFor('tron', '123', 1);
   assert.throws(() => validatePlan({ chains: { eth: other } }), /不是这条链的/);
   const badId = ethPlan(1); badId.items[0].customer_id = 'someone-else';
@@ -114,6 +123,25 @@ test('手动填的地址：按空白或逗号拆开，客户标识 manual-01…�
   const v = validatePlan(p);
   assert.deepEqual(v.chains.tron.items.map((x) => x.customer_id), ['manual-01', 'manual-02']);
   assert.throws(() => validatePlan(planFromList('tron', 'Tabc', '5')), /地址格式不对/);
+  // TRON 校验和不对（改一个字符）也拒绝
+  const a = TRON_ADDRS[1];
+  const bad = a.slice(0, -1) + (a.endsWith('2') ? '3' : '2');
+  assert.ok(!isValidAddress('tron', bad));
+});
+
+test('staging 的系统地址（热钱包、冷钱包、parent、payout、batcher、factory、implementation、usdt）不能当收款地址', () => {
+  const eth = stagingSystemAddresses(WALLETS, 'eth');
+  const tron = stagingSystemAddresses(WALLETS, 'tron');
+  const st = WALLETS.staging;
+  for (const k of ['hot', 'parent', 'payout', 'batcher', 'factory', 'implementation', 'usdt']) if (st.evm.eth[k]) assert.ok(eth.includes(st.evm.eth[k]), `eth.${k}`);
+  for (const a of [st.hot, st.usdt, st.tron.parent, st.tron.batcher, st.tron.factory, st.tron.implementation].filter(Boolean)) assert.ok(tron.includes(a), a);
+  assert.ok(eth.length >= 5 && tron.length >= 5);
+  for (const [chain, list] of [['eth', eth], ['tron', tron]]) {
+    for (const a of list) {
+      const plan = { chains: { [chain]: { amount: '1', items: [{ customer_id: 'manual-01', address: chain === 'eth' ? a.toLowerCase() : a }] } } };
+      assert.throws(() => validatePlan(plan, { exclude: { [chain]: list } }), /代币合约、部署账户或 staging 的系统地址/, a);
+    }
+  }
 });
 
 test('遮盖表：私钥十六进制和十进制、节点地址和其中的 key、其他密钥值', () => {
@@ -123,7 +151,7 @@ test('遮盖表：私钥十六进制和十进制、节点地址和其中的 key�
 });
 
 // ---------- 第 2 步：以太坊（替身节点） ----------
-function fakeEvm({ chainId = 11155111, balances = {}, deployerToken = 10n ** 12n, decimals = 6, failAt = -1 } = {}) {
+function fakeEvm({ chainId = 11155111, balances = {}, deployerToken = 10n ** 12n, decimals = 6, failAt = -1, noCreditAt = -1 } = {}) {
   const bal = new Map(Object.entries(balances).map(([k, v]) => [k.toLowerCase(), v]));
   bal.set(FROM.toLowerCase(), deployerToken);
   const calls = [];
@@ -157,7 +185,7 @@ function fakeEvm({ chainId = 11155111, balances = {}, deployerToken = 10n ** 12n
         nonce += 1;
         // 替身按发出顺序记账：收款地址取自 calldata（raw 里 transfer 的参数）
         const m = /a9059cbb([0-9a-f]{64})([0-9a-f]{64})/.exec(params[0]);
-        if (i !== failAt) { const to = '0x' + m[1].slice(24); bal.set(to, (bal.get(to) || 0n) + BigInt('0x' + m[2])); }
+        if (i !== failAt && i !== noCreditAt) { const to = '0x' + m[1].slice(24); bal.set(to, (bal.get(to) || 0n) + BigInt('0x' + m[2])); }
         return keccakHex(Buffer.from(params[0].slice(2), 'hex'));
       }
       case 'eth_getTransactionReceipt': return { status: sent.length - 1 === failAt ? '0x0' : '0x1', gasUsed: hex(40_000), blockNumber: '0x10' };
@@ -204,10 +232,30 @@ test('以太坊：一笔链上失败立即停，后面的不发，记录里写�
   assert.deepEqual(last.map((r) => r.status), ['ok', 'failed', 'not-sent']);
 });
 
+test('以太坊：回执成功但收款地址余额没有增加，立即停，后面的不发', async () => {
+  const n = fakeEvm({ noCreditAt: 0 });
+  let last = [];
+  await assert.rejects(fundEvm(n.rpc, { key: KEY, token: ETH_TOKEN, plan: ethPlan(3), wait: fastWait, onRecords: (r) => { last = r; } }), /余额.*不是正好加 100.*已停止/);
+  assert.equal(n.sent.length, 1, '只发了第一笔');
+  assert.deepEqual(last.map((r) => r.status), ['failed', 'not-sent', 'not-sent']);
+  assert.ok(last[0].txid.startsWith('0x'), '失败的那笔也记下交易号');
+});
+
+test('以太坊：清单里有部署账户自己、或传进来的系统地址，一笔都不发', async () => {
+  const self = ethPlan(2); self.items[1].address = FROM;
+  const n = fakeEvm();
+  await assert.rejects(fundEvm(n.rpc, { key: KEY, token: ETH_TOKEN, plan: self, wait: fastWait }), /代币合约、部署账户或 staging 的系统地址/);
+  assert.equal(n.sent.length, 0);
+  const sys = ethPlan(2);
+  const m = fakeEvm();
+  await assert.rejects(fundEvm(m.rpc, { key: KEY, token: ETH_TOKEN, plan: sys, exclude: [sys.items[0].address.toLowerCase()], wait: fastWait }), /代币合约、部署账户或 staging 的系统地址/);
+  assert.equal(m.sent.length, 0);
+});
+
 // ---------- 第 2 步：TRON（替身节点） ----------
-function fakeTron({ network = 'nile', ok = true, credit = true } = {}) {
+function fakeTron({ network = 'nile', ok = true, credit = true, balances = {}, timeoutAt = -1 } = {}) {
   const signer = makeSigner(KEY);
-  const bal = new Map([[signer.address, 10n ** 12n]]);
+  const bal = new Map([[signer.address, 10n ** 12n], ...Object.entries(balances)]);
   const sent = [];
   const node = {
     checkNetwork: async () => ({ network }),
@@ -223,6 +271,7 @@ function fakeTron({ network = 'nile', ok = true, credit = true } = {}) {
       assert.equal(token, TRON_TOKEN);
       assert.equal(sig, 'transfer(address,uint256)');
       sent.push(values);
+      if (sent.length - 1 === timeoutAt) throw new Error(`transaction not confirmed in time: ${'cd'.repeat(32)}`);
       if (credit) bal.set(values[0], (bal.get(values[0]) || 0n) + BigInt(values[1]));
       return { txId: 'ab'.repeat(32), ok, info: { receipt: { result: ok ? 'SUCCESS' : 'REVERT' } } };
     },
@@ -247,10 +296,28 @@ test('TRON：逐笔 transfer、核对余额；回执成功但余额没加（tran
   assert.equal(bad.sent.length, 1);
 });
 
+test('TRON：已经有足够余额的地址跳过（重跑不重复打）', async () => {
+  const plan = tronPlan();
+  const t = fakeTron({ balances: { [plan.items[0].address]: 100_000_000n } });
+  const recs = await fundTron(t.node, t.signer, { token: TRON_TOKEN, plan });
+  assert.deepEqual(recs.map((r) => r.status), ['skipped', 'ok']);
+  assert.equal(t.sent.length, 1);
+  assert.equal(t.sent[0][0], plan.items[1].address);
+});
+
+test('TRON：等回执超时也记下交易号，停下', async () => {
+  const t = fakeTron({ timeoutAt: 0 });
+  let last = [];
+  await assert.rejects(fundTron(t.node, t.signer, { token: TRON_TOKEN, plan: tronPlan(), onRecords: (r) => { last = r; } }), /等回执超时/);
+  assert.equal(last[0].txid, 'cd'.repeat(32));
+  assert.deepEqual(last.map((r) => r.status), ['failed', 'not-sent']);
+  assert.equal(t.sent.length, 1);
+});
+
 test('TRON：部署账户自己不能在清单里', async () => {
   const t = fakeTron();
   const plan = { amount: '1', items: [{ customer_id: 'manual-01', address: t.signer.address }] };
-  await assert.rejects(fundTron(t.node, t.signer, { token: TRON_TOKEN, plan }), /代币合约或部署账户/);
+  await assert.rejects(fundTron(t.node, t.signer, { token: TRON_TOKEN, plan }), /代币合约、部署账户或 staging 的系统地址/);
 });
 
 // ---------- 第 1 步：开放 API（替身） ----------
@@ -309,4 +376,27 @@ test('流程：第 1 步在环境 staging-e2e、第 2 步在环境 testnet；私
   for (const j of [job1, job2]) assert.match(j, /github\.ref == 'refs\/heads\/staging' \|\| \(github\.event_name == 'push' && startsWith\(github\.ref, 'refs\/heads\/testnet-fund\/'\)\)/);
   assert.match(y, /branches: \['testnet-fund\/\*\*'\]/);
   assert.match(job2, /needs: addresses/);
+});
+
+test('流程文件：只读权限、checkout 不留令牌、action 都按提交号固定、run 里没有 ${{ }}、npm ci 不跑安装脚本', () => {
+  const y = readFileSync(new URL('../.github/workflows/testnet-fund.yml', import.meta.url), 'utf8');
+  assert.match(y, /\npermissions:\n {2}contents: read\n/);
+  assert.ok(!/write/.test(y.split('\njobs:')[0].split('permissions:')[1] || ''), '顶层权限里没有 write');
+  const uses = [...y.matchAll(/uses: (\S+)/g)].map((m) => m[1]);
+  assert.ok(uses.length >= 6);
+  for (const u of uses) assert.match(u, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, `${u} 按提交号固定`);
+  const checkouts = y.split('uses: actions/checkout@').slice(1);
+  assert.equal(checkouts.length, 2);
+  for (const c of checkouts) assert.match(c.split('- uses:')[0], /persist-credentials: false/);
+  // run: 后面（单行或 | 块）不出现 ${{ }}：参数一律经环境变量传
+  const lines = y.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s*)(?:- )?run: ?(.*)$/.exec(lines[i]);
+    if (!m) continue;
+    const block = [m[2]];
+    if (/^[|>]/.test(m[2].trim())) for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || lines[j].search(/\S/) > m[1].length); j++) block.push(lines[j]);
+    assert.ok(!block.join('\n').includes('${{'), `第 ${i + 1} 行的 run 里有 \${{ }}`);
+  }
+  const npm = [...y.matchAll(/run: (npm ci.*)/g)].map((m) => m[1]);
+  assert.deepEqual(npm, ['npm ci --ignore-scripts', 'npm ci --ignore-scripts']);
 });

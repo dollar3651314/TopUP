@@ -10,12 +10,14 @@
 // 环境变量：STAGING_URL（仓库密钥）、STAGING_E2E_MERCHANT_KEY、STAGING_E2E_MERCHANT_SECRET（环境 staging-e2e 的密钥）、
 //   FUND_CHAINS（eth,tron）、FUND_COUNT（每条链几个，1～50）、FUND_AMOUNT（每个地址打多少，1000 以内；这一步只记进清单、建单金额）、
 //   FUND_RUN（运行编号，GitHub 上是 run_id）、OUT_DIR（默认 testnet-fund）
-import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { signRequest } from '../../server/pay/api-v1.js';
-import { parseChains, parseCount, parseAmount, customerIdFor, validatePlan, secretList, maskWith, FUND_TARGETS } from './fund-lib.mjs';
+import { parseChains, parseCount, parseAmount, customerIdFor, validatePlan, secretList, maskWith, stagingSystemAddresses, FUND_TARGETS } from './fund-lib.mjs';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /** 失败说明只给 HTTP 状态和错误码（不带响应内容、不带测试环境地址） */
 const why = (r) => `HTTP ${r.status}${r.body?.error?.code ? ` ${String(r.body.error.code).replace(/[^\w.-]/g, '')}` : ''}`;
@@ -61,7 +63,7 @@ export async function addressFor(call, { chain, customerId, amount }) {
 }
 
 /** 每条链建 count 个客户、拿地址，返回（已经过 validatePlan 核对的）清单 */
-export async function collect(call, { chains, count, amount, run, log = () => {} }) {
+export async function collect(call, { chains, count, amount, run, exclude = {}, log = () => {} }) {
   const plan = { run, chains: {} };
   for (const chain of chains) {
     const items = [];
@@ -72,7 +74,7 @@ export async function collect(call, { chains, count, amount, run, log = () => {}
     }
     plan.chains[chain] = { amount, items };
   }
-  const v = validatePlan(plan);
+  const v = validatePlan(plan, { exclude });
   return { run: v.run, chains: Object.fromEntries(Object.entries(v.chains).map(([c, p]) => [c, { amount: p.amount, items: p.items }])) };
 }
 
@@ -100,7 +102,9 @@ async function main() {
     const run = String(env.FUND_RUN || `local-${randomUUID().slice(0, 8)}`);
     const call = merchantClient({ base, key: String(env.STAGING_E2E_MERCHANT_KEY || '').trim(), secret });
     console.log(`测试网充值第 1 步：${chains.join('、')} 每条链 ${count} 个地址`);
-    const plan = await collect(call, { chains, count, amount, run, log: (m) => console.log(m) });
+    const wallets = JSON.parse(readFileSync(join(ROOT, 'config/wallets.json'), 'utf8'));
+    const exclude = Object.fromEntries(chains.map((c) => [c, stagingSystemAddresses(wallets, c)]));
+    const plan = await collect(call, { chains, count, amount, run, exclude, log: (m) => console.log(m) });
     mkdirSync(OUT, { recursive: true });
     writeFileSync(join(OUT, 'addresses.json'), mask(JSON.stringify(plan, null, 2)) + '\n');
     const md = mask(planMarkdown(plan));

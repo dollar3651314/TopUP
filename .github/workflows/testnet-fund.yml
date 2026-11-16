@@ -6,6 +6,10 @@
 #   不碰主网、不改 config/wallets.json；结果（客户标识、地址、交易号）写进运行摘要和产物，没有密钥、没有商户名
 # 触发：在 Actions 页面手动运行（这个文件进了默认分支之后才有按钮），或推送到 testnet-fund/ 开头的分支（不用先进默认分支，参数用仓库变量或默认值）。
 #   推送触发要管理员先在两个环境（staging-e2e、testnet）的 Deployment branches 里加 testnet-fund/**；job 上的 if 只是防手误，安全边界是两个环境的 Required reviewers
+# 批准前必看：批准一次 testnet-fund/* 分支上的运行 = 让这个分支上的任何代码（包括被改过的这个流程文件和脚本）拿到 staging-e2e 或 testnet 的密钥。
+#   批准前先看这个分支相对 staging 的改动（GitHub 上 compare staging...testnet-fund/<名字>，应该一个文件都没改）；testnet-fund/ 分支只从最新的 staging 拉、不在上面改代码。
+# 副作用（共用的 staging 测试商户）：每次运行每条链多 N 个客户（eth,tron 就是 2×N 个，客户标识 fee-ac3-…）；测试商户开了订单模式时还会多 N 张待付款订单，
+#   打币后订单被匹配，配了回调地址的话会发 order.matched 回调；打了币的地址会被定时凑批或 staging-e2e 的 E09 凑进归集批次（E09 凑出后会作废放回）。详见 README 第 5 节
 name: testnet-fund
 on:
   workflow_dispatch:
@@ -50,7 +54,7 @@ jobs:
         with:
           node-version: 26
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       # 参数都经过环境变量传给脚本（不拼进命令行）；客户标识 fee-ac3-<链>-<运行号>-<序号>
       - name: 建客户、生成充值地址
         id: collect
@@ -87,7 +91,7 @@ jobs:
         with:
           node-version: 26
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       # 私钥只给这一步；地址清单是第 1 步的输出（公开地址），脚本整份核对后才发
       - name: 转测试 USDT 并核对到账
         env:
