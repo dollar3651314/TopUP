@@ -47,8 +47,8 @@
         "parent": "0x1220AFA2cAF72D81D84aBc3eCb66228c83b9A67a",
         "batcher": "0x33c83C41c7C3868b30fA842Df17f93Dc736ED135",
         "ver": 1,
-        "hot": "",
-        "payout": ""
+        "hot": "0x09044361e2459144fcD32C5968beE853797e1939",
+        "payout": "0xc0Dd7cc39A243C51Edc226823ccA598B38E8faaB"
       },
       "bsc": {
         "usdt": "",
