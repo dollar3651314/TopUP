@@ -144,7 +144,9 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
 function todayCard(ui: WalletUi, r: any): HTMLElement {
   const L = r.limits;
   const pLeft = Math.max(0, u(L.perDay) - u(r.today_approved));
-  const meter = (v: number, max: number) => h('meter', { class: 'meter-row', min: '0', max: String(max || 1), value: String(Math.min(v, max || 1)) });
+  // 用满（= 上限）变橙、超过（上限改到低于今天已通过）变红：data-meter="full" / "over"
+  const meter = (v: number, max: number) => h('meter', { class: 'meter-row', min: '0', max: String(max || 1), value: String(Math.min(v, max || 1)),
+    ...(max > 0 && v > max ? { 'data-meter': 'over' } : max > 0 && v >= max ? { 'data-meter': 'full' } : {}) });
   const mrows = ((r.merchants_today || []) as any[]).map((m) => {
     const used = u(m.approved), mLeft = Math.max(0, u(L.perMerchantDay) - used), left = Math.min(mLeft, pLeft);
     return h('div', { class: 'stack-sm', 'data-today-merchant': m.merchant_id },
@@ -406,18 +408,30 @@ function editLimits(ui: WalletUi, L: any, todayApproved?: unknown) {
   };
   ins.perDay.addEventListener('input', rewarn);
   rewarn();
-  ui.dialog('改上限', h('div', { class: 'stack' }, ...names.map(([k, l]) => field(`pl-${k}`, `${l}（USDT）`, ins[k], hints[k])), warn, field('pl-reason', '原因（记进审计）', reason), field('pl-code', '验证器动态码（6 位）', code)), '保存', async () => {
+  // 检查几个上限：金额本身，再看几个上限之间的关系（和服务器同一套规则），出错的写在那一格下面。
+  // 点过一次"保存"后，改任何一格都重新检查一遍：改对了错字就消失（例如把全平台每天调大后，每个商户每天那格的错字跟着消失）
+  const checkLimits = (): boolean => {
     let bad = false;
-    for (const [k] of names) bad = fieldErr(ins[k], parseUsdt(ins[k].value) ? null : '请输入大于 0 的金额') || bad;
+    for (const [k] of names) bad = fieldErr(ins[k], parseUsdt(ins[k].value.replace(/,/g, '')) ? null : '请输入大于 0 的金额') || bad;
+    if (bad) return false;
+    const v = Object.fromEntries(names.map(([k]) => [k, parseUsdt(ins[k].value.replace(/,/g, '')) ?? 0]));
+    let ok = true;
+    for (const [k, r] of [['perItem', 'per_item_le_per_batch'], ['perBatch', 'per_batch_le_per_day'], ['perMerchantDay', 'per_merchant_day_le_per_day'], ['hotLow', 'hot_low_le_hot_max']] as const) {
+      const broken = r === 'per_item_le_per_batch' ? v.perItem > v.perBatch : r === 'per_batch_le_per_day' ? v.perBatch > v.perDay : r === 'per_merchant_day_le_per_day' ? v.perMerchantDay > v.perDay : v.hotLow > v.hotMax;
+      if (broken && ok) { fieldErr(ins[k], LIMIT_RULE[r]); ok = false; }
+    }
+    return ok;
+  };
+  let tried = false;
+  for (const [k] of names) ins[k].addEventListener('input', () => { if (tried) checkLimits(); });
+  // "全平台每天上限低于今天已通过"的黄字紧跟在全平台每天上限那一格下面
+  const fields = names.flatMap(([k, l]) => { const f = field(`pl-${k}`, `${l}（USDT）`, ins[k], hints[k]); return k === 'perDay' ? [f, warn] : [f]; });
+  ui.dialog('改上限', h('div', { class: 'stack' }, ...fields, field('pl-reason', '原因（记进审计）', reason), field('pl-code', '验证器动态码（6 位）', code)), '保存', async () => {
+    tried = true;
+    let bad = !checkLimits();
     bad = fieldErr(reason, reason.value.trim() ? null : '请写原因') || bad;
     bad = fieldErr(code, /^\d{6}$/.test(code.value.trim()) ? null : '请输入 6 位动态码') || bad;
     if (bad) return false;
-    // 几个上限之间的关系，保存前就指出是哪一条不满足（和服务器同一套规则）
-    const v = Object.fromEntries(names.map(([k]) => [k, parseUsdt(ins[k].value) ?? 0]));
-    for (const [k, r] of [['perItem', 'per_item_le_per_batch'], ['perBatch', 'per_batch_le_per_day'], ['perMerchantDay', 'per_merchant_day_le_per_day'], ['hotLow', 'hot_low_le_hot_max']] as const) {
-      const broken = r === 'per_item_le_per_batch' ? v.perItem > v.perBatch : r === 'per_batch_le_per_day' ? v.perBatch > v.perDay : r === 'per_merchant_day_le_per_day' ? v.perMerchantDay > v.perDay : v.hotLow > v.hotMax;
-      if (broken) { fieldErr(ins[k], LIMIT_RULE[r]); return false; }
-    }
     let res: any;
     try { res = await ui.call('payout-limits-save', { values: Object.fromEntries(names.map(([k]) => [k, ins[k].value.replace(/,/g, '')])), reason: reason.value.trim(), code: code.value.trim() }); }
     catch (e: any) { const f = e?.field && ins[e.field] ? ins[e.field] : e?.code === 'bad_code' ? code : reason; fieldErr(f, e?.code === 'invalid_param' ? LIMIT_RULE[e?.rows?.[0]?.rule] || '请输入大于 0 的金额，最多 6 位小数' : errOf(ui, e)); return false; }
