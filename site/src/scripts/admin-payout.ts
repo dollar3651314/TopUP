@@ -27,6 +27,8 @@ const u = (v: unknown) => parseUsdt(String(v ?? '0')) ?? 0;
 const usd = (v: unknown) => fmtUsdt(u(v));
 const rawOf = (chain: string, usdtText: unknown) => BigInt(u(usdtText)) * 10n ** BigInt(DECIMALS[chain] - 6);
 const fromRaw = (chain: string, raw: bigint) => fmtUsdt(Number(raw / 10n ** BigInt(DECIMALS[chain] - 6)));
+/** 商户：名称下面一行小字显示商户编号（m_ 开头，和商户后台、API 里的一致；同名商户也分得清） */
+const merchantCell = (x: any) => (x.merchant_id ? h('span', { class: 'cell-2' }, x.merchant, h('span', { class: 'hint muted mono', 'data-merchant-id': '' }, x.merchant_id)) : x.merchant);
 const minsOf = (iso: string) => Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
 const waitText = (m: number) => (m < 60 ? `${m} 分钟` : `${Math.floor(m / 60)} 小时 ${m % 60} 分`);
 const waitAttr = (m: number) => (m > 60 ? 'late' : m > 30 ? 'warn' : 'ok');
@@ -76,10 +78,10 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
     const wait = h('span', { class: m > 60 ? 'wait-late' : m > 30 ? 'wait-warn' : '' }, `等了 ${waitText(m)}`);
     if (x.group) {
       const chains = [...new Set(x.items.map((i: any) => i.chain))] as string[];
-      return [mono(x.batch_no), x.merchant, `商户批量 · ${x.source === 'api' ? 'API' : '后台上传'}`, h('span', { class: 'row-actions' }, ...chains.map(chainTag)), `${x.count} 笔`, h('b', {}, usd(x.total)), wait,
+      return [mono(x.batch_no), merchantCell(x), `商户批量 · ${x.source === 'api' ? 'API' : '后台上传'}`, h('span', { class: 'row-actions' }, ...chains.map(chainTag)), `${x.count} 笔`, h('b', {}, usd(x.total)), wait,
         h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: (e: Event) => { e.stopPropagation(); open(x); } }, '逐行审')];
     }
-    return [mono(x.id), x.merchant, `${x.kind === 'payout' ? '代付' : '提币'} · ${x.source === 'api' ? 'API' : '后台'}`, chainTag(x.chain), h('span', { class: 'cell-2' }, mono(shortAddr(x.to), x.to),
+    return [mono(x.id), merchantCell(x), `${x.kind === 'payout' ? '代付' : '提币'} · ${x.source === 'api' ? 'API' : '后台'}`, chainTag(x.chain), h('span', { class: 'cell-2' }, mono(shortAddr(x.to), x.to),
       h('span', { class: 'hint muted' }, x.registered ? '✓ 登记的提币地址' : x.first_time ? '代付：第一次给这个地址付' : '代付：付过这个地址')), h('b', {}, usd(x.amount)), wait,
       h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: (e: Event) => { e.stopPropagation(); open(x); } }, '去审这笔')];
   }), '现在没有等你审的打款。', { onRow: (i) => open(rows[i]), rowAttrs: (i) => (rows[i].group ? { 'data-payout-group': rows[i].batch_no, 'data-wait': waitAttr(minsOf(rows[i].created_at)) } : { 'data-payout-row': rows[i].id, 'data-wait': waitAttr(minsOf(rows[i].created_at)) }) });
@@ -91,7 +93,7 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
   // 已审核、还没凑进批次的单：可以驳回（退冻结、回调）；挂起的（收款地址转不了）排最前、标红
   const appr = (r.approved || []) as any[];
   const held = appr.filter((x) => x.hold).length;
-  const approvedT = table(['单号', '商户', '链', '收款地址', '金额 USDT', '情况', ''], appr.map((x) => [mono(x.id), x.merchant, chainTag(x.chain), mono(shortAddr(x.to), x.to), usd(x.amount),
+  const approvedT = table(['单号', '商户', '链', '收款地址', '金额 USDT', '情况', ''], appr.map((x) => [mono(x.id), merchantCell(x), chainTag(x.chain), mono(shortAddr(x.to), x.to), usd(x.amount),
     x.hold ? h('span', { class: 'bad' }, `已挂起：${HOLD[x.hold] || x.hold}`) : h('span', { class: 'muted' }, x.batch_no ? `批量 ${x.batch_no} · 等凑批` : '等凑批'),
     h('span', { class: 'row-actions' },
       x.hold ? h('button', { type: 'button', class: 'btn btn-primary btn-sm', 'data-unhold': x.id, onclick: (e: Event) => { e.stopPropagation(); unhold(ui, x); } }, '解除挂起') : null,
@@ -191,7 +193,7 @@ function batchDetail(ui: WalletUi, b: any, legacyTron: TronSign) {
           h('span', { class: 'hint muted', id: `vc-why-${d.id}`, 'data-void-why': '' }, '现在不能作废：热钱包的这个 nonce 还没被用掉，这笔随时可能上链，系统在用原来签好的交易重发'))
         : null;
     ui.dialog(`签名批次 ${b.id}`, h('div', { class: 'stack' }, kv([['链', chainTag(d.chain)], ['状态', batchState(d)], ['交易', d.tx_hash ? mono(d.tx_hash) : '—']]), acts,
-      table(['单号', '商户', '收款地址', '金额', '状态'], d.withdrawals.map((w: any) => [mono(w.id), w.merchant, mono(shortAddr(w.to), w.to), usd(w.amount),
+      table(['单号', '商户', '收款地址', '金额', '状态'], d.withdrawals.map((w: any) => [mono(w.id), merchantCell(w), mono(shortAddr(w.to), w.to), usd(w.amount),
         h('span', { class: w.hold ? 'bad' : '' }, `${WST[w.status] || w.status}${w.hold ? `，已挂起：${HOLD[w.hold] || w.hold}` : ''}${w.reason ? ` · ${w.reason}` : ''}`)]), '—')), '关闭', null, false, true);
   }).catch((e) => ui.say(errOf(ui, e)));
 }
@@ -230,7 +232,7 @@ function voidBatch(ui: WalletUi, b: any) {
 }
 /** 点整行（手机上按钮可能要横着滑才看得到）：弹出这一笔的操作 */
 function approvedActions(ui: WalletUi, x: any) {
-  ui.dialog(`已审核 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', x.merchant], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['情况', x.hold ? `已挂起：${HOLD[x.hold] || x.hold}` : '等凑批']]),
+  ui.dialog(`已审核 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', merchantCell(x)], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['情况', x.hold ? `已挂起：${HOLD[x.hold] || x.hold}` : '等凑批']]),
     h('div', { class: 'row-actions' },
       x.hold ? h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: () => unhold(ui, x) }, '解除挂起') : null,
       h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => rejectApproved(ui, x) }, '驳回这笔'))), '关闭', null, false, true);
@@ -238,7 +240,7 @@ function approvedActions(ui: WalletUi, x: any) {
 /** 解除挂起：确认收款地址没问题（例如代币已解除拉黑）后，回到普通的已审核，下一轮照常凑批 */
 function unhold(ui: WalletUi, x: any) {
   const msg = h('div');
-  ui.dialog(`解除挂起 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', x.merchant], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['挂起原因', HOLD[x.hold] || x.hold]]),
+  ui.dialog(`解除挂起 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', merchantCell(x)], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['挂起原因', HOLD[x.hold] || x.hold]]),
     h('p', { class: 'hint muted m0' }, '确认这个收款地址现在能收款后再解除。解除后回到已审核，下一轮凑批照常付；如果还是转不了，会再被挂起。记审计。'), msg), '解除挂起', async () => {
     try { await ui.call('payout-unhold', { id: x.id }); } catch (e) { msg.replaceChildren(h('p', { class: 'alert m0' }, errOf(ui, e))); return false; }
     ui.say(`已解除挂起 ${x.id}，下一轮凑批照常付`); ui.rerender(); return true;
@@ -249,7 +251,7 @@ function rejectApproved(ui: WalletUi, x: any) {
   const reason = h('textarea', { rows: '2' }) as HTMLTextAreaElement;
   if (x.hold) reason.value = HOLD[x.hold] || '';
   const msg = h('div');
-  ui.dialog(`驳回 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', x.merchant], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`]]),
+  ui.dialog(`驳回 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', merchantCell(x)], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`]]),
     x.hold ? h('p', { class: 'warn-box m0' }, `这笔已挂起：${HOLD[x.hold] || x.hold}。驳回后冻结的金额退回商户，商户会收到回调。`) : h('p', { class: 'hint muted m0' }, '这笔已经审核通过、还没付。驳回后冻结的金额退回商户，商户会收到回调。'),
     field('ra-reason', '驳回原因（商户能看到）', reason), msg), '驳回这笔', async () => {
     if (fieldErr(reason, reason.value.trim() ? null : '请填写驳回原因')) return false;
@@ -267,7 +269,7 @@ function reviewOne(ui: WalletUi, x: any, r: any) {
   const L = r.limits;
   const over = u(x.amount) > u(L.perItem);
   const body = h('div', { class: 'stack' },
-    kv([['单号', mono(x.id)], ['商户', x.merchant], ['类型', `${x.kind === 'payout' ? '代付' : '提币（商户提现）'} · ${x.source === 'api' ? 'API' : '后台'}`], ['链', chainTag(x.chain)],
+    kv([['单号', mono(x.id)], ['商户', merchantCell(x)], ['类型', `${x.kind === 'payout' ? '代付' : '提币（商户提现）'} · ${x.source === 'api' ? 'API' : '后台'}`], ['链', chainTag(x.chain)],
       ['收款地址', h('span', { class: 'stack-sm' }, mono(x.to), h('span', { class: x.registered ? 'ok' : 'hint' }, x.registered ? '✓ 登记地址：商户在这条链登记过的提币地址' : x.first_time ? '代付：第一次给这个地址付（代付没有白名单，靠你审核）' : '代付：以前付过这个地址'))],
       ['金额', h('b', {}, `${usd(x.amount)} USDT`)], ['手续费', `${usd(x.fee)} USDT（已和金额一起冻结）`],
       ['上限检查', h('span', { class: over ? 'bad' : '' }, `${over ? '✗' : '✓'} 单笔 ≤ ${usd(L.perItem)} · 今天已通过 ${usd(r.today_approved)} / ${usd(L.perDay)}`)]]),
@@ -296,7 +298,7 @@ function reviewGroup(ui: WalletUi, g: any, r: any) {
   // 超过单笔上限的行：标红、默认不勾（勾上服务器也会拒，整批审核不生效）
   const boxes = g.items.map((i: any) => h('input', { type: 'checkbox', class: 'check', checked: !overOf(i), 'data-review-item': i.id, 'aria-label': `通过 ${i.id}` }) as HTMLInputElement);
   const body = h('div', { class: 'stack' },
-    h('p', { class: 'm0' }, `${g.merchant} 的批量打款 ${g.batch_no}：${g.count} 笔，合计 ${usd(g.total)} USDT。勾上的通过，不勾的驳回（驳回的退冻结、逐笔发回调，其余照付）。`),
+    h('p', { class: 'm0' }, `${g.merchant}${g.merchant_id ? `（${g.merchant_id}）` : ''}的批量打款 ${g.batch_no}：${g.count} 笔，合计 ${usd(g.total)} USDT。勾上的通过，不勾的驳回（驳回的退冻结、逐笔发回调，其余照付）。`),
     table(['通过', '单号', '链', '收款地址', '金额', '检查'], g.items.map((i: any, k: number) => [boxes[k], mono(i.id), chainTag(i.chain), mono(shortAddr(i.to), i.to), usd(i.amount),
       overOf(i) ? h('span', { class: 'bad' }, '超过单笔上限，只能驳回') : i.first_time ? h('span', { class: 'hint' }, '第一次给这个地址付') : '✓']), '—', { rowAttrs: (k) => (overOf(g.items[k]) ? { class: 'row-over', 'data-over-limit': g.items[k].id } : {}) }),
     field('pr-reason', '驳回原因（有不勾的要填，商户能看到）', reason), msg);
