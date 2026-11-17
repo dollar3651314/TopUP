@@ -5,7 +5,7 @@ import { createHash, createHmac } from 'node:crypto';
 import { json } from '../kyb/http.js';
 import { decryptJson, safeEqual } from '../kyb/crypto.js';
 import { PayError } from './core.js';
-import { money, errorResponse, limitOf } from './common.js';
+import { money, errorResponse, limitOf, timeRange } from './common.js';
 
 const MAX_SKEW_S = 300;
 const MAX_BODY = 32 * 1024;
@@ -119,10 +119,13 @@ export function createApiV1({ db, keys, ops, getIp = () => '', now = () => Date.
     'GET customers/list': (m, q) => ops.listCustomers(m, { q: q.get('q') || '', cursor: q.get('cursor'), limit: limitOf(q) }),
     'GET customers/stats': (m, q) => ops.customerStats(m, q.get('customer_id') || '', { from: q.get('from'), to: q.get('to') }),
     'GET balance': (m) => ops.balance(m),
-    'GET ledger': (m, q) => ops.ledger(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '' }),
-    'GET deposits': (m, q) => ops.deposits(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '', matched: q.get('matched') || '' }),
+    // v1.1 对账查询：from、to（带时区 ISO 8601，[from, to)，最多 31 天，只带一个时补另一个）；带了就从早到晚，都没带的旧调用照旧从新到旧
+    'GET ledger': (m, q) => ops.ledger(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '', range: timeRange(q, now()) }),
+    'GET deposits': (m, q) => ops.deposits(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '', matched: q.get('matched') || '', txid: q.get('txid') || '', range: timeRange(q, now()) }),
     'POST withdrawals': async (m, q, b, request) => { await needIp(m, request); return ops.withdraw(m, b, 'api'); },
-    'GET withdrawals': (m, q) => ops.getWithdrawal(m, q.get('withdrawal_no')),
+    'GET withdrawals': (m, q) => ops.getWithdrawal(m, q.get('withdrawal_no'), q.get('merchant_ref')),
+    // 总按时间段查：to 不传 = 现在，from 不传 = to − 31 天；从早到晚
+    'GET withdrawals/list': (m, q) => ops.withdrawalList(m, { status: q.get('status') || '', chain: q.get('chain') || '', range: timeRange(q, now(), { always: true }), cursor: q.get('cursor'), limit: limitOf(q) }),
     'POST withdrawals/cancel': (m, q, b) => ops.cancelWithdrawal(m, b.withdrawal_no),
     // 批量打款（第 3 批）：一次最多 500 笔；有一行不对整个请求 422 invalid_rows（error.rows 列出 index 和原因），不做"只收没问题的"
     'POST payouts/batch': async (m, q, b, request) => {

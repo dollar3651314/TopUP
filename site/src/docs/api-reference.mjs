@@ -104,6 +104,7 @@ export const OBJECTS = {
     ['order_no', 'string', ['Matched order', '匹配到的订单'], true],
     ['matched_by', 'string', ['deposit, order or manual', 'deposit、order、manual 之一'], true],
     ['time', 'time', ['Block time of the payment', '链上付款时间']],
+    ['credited_at', 'time', ['When TopUP credited the deposit to your balance (from / to of deposits/ filter by this)', 'TopUP 入账时间（deposits/ 的 from、to 按它筛选）']],
   ],
   PayoutBatch: [
     ['batch_no', 'string', ['Batch number', '批次号']],
@@ -129,7 +130,7 @@ export const OBJECTS = {
     ['status', 'string', ['pending, approved, broadcast, completed, rejected, cancelled or failed', 'pending、approved、broadcast、completed、rejected、cancelled、failed 之一']],
     ['txid', 'string', ['On-chain transaction ID once broadcast', '广播后的链上交易哈希'], true],
     ['reason', 'string', ['Rejection or failure reason', '驳回或失败的原因'], true],
-    ['merchant_ref', 'string', ['Your reference', '你的备注编号'], true],
+    ['merchant_ref', 'string', ['Your withdrawal reference (unique per account, forever)', '你的提现单号（同一商户永久唯一）'], true],
     ['source', 'string', ['api or web (merchant dashboard)', 'api（开放 API）或 web（商户后台）']],
     ['created_at', 'time', ['Created at', '创建时间']],
   ],
@@ -148,8 +149,17 @@ export const OBJECTS = {
 
 /** 列表接口的外层：{ items, next_cursor } */
 export const LIST = [
-  ['items', 'array', ['Items, newest first', '记录，按时间倒序']],
+  ['items', 'array', ['Items. Order: see each endpoint (without from / to: newest first; with from or to, and withdrawals/list/: oldest first)', '记录；顺序见各接口（不带 from、to：从新到旧；带 from 或 to，以及 withdrawals/list/：从早到晚）']],
   ['next_cursor', 'string', ['Pass as cursor to get the next page; null on the last page', '传给 cursor 取下一页；最后一页为 null'], true],
+];
+/** v1.1 对账查询的时间段参数 */
+const RANGE = (what) => [
+  ['from', 'time', false, [`Start of the period, inclusive: ISO 8601 with time zone, e.g. 2026-11-15T00:00:00+08:00 or 2026-11-14T16:00:00Z; filters by ${what[0]}. Default: to − 31 days`, `开始时间（含）：带时区的 ISO 8601，例如 2026-11-15T00:00:00+08:00 或 2026-11-14T16:00:00Z；按${what[1]}筛选。不传时 = to − 31 天`]],
+  ['to', 'time', false, ['End of the period, exclusive. Default: now. The period [from, to) is at most 31 days', '结束时间（不含）；不传时 = 现在。区间是 [from, to)，一次最多 31 天']],
+];
+const RANGE_NOTE = (extra = ['', '']) => [
+  `With from or to: the period is [from, to) (from included, to excluded), at most 31 days, results oldest first (ties by ID), and records arriving while you page do not change pages already read. A record's time is when it was created, but it only becomes visible when its transaction commits, so a record committed a moment late can carry a slightly earlier time than records you have already read. For reconciliation, query periods that ended at least 5 minutes ago: for those, consecutive periods [from, to) neither overlap nor leave gaps. Missing time zone, invalid date, from later than to, or more than 31 days → 422 invalid_param (error.field = from or to). Without from and to the order stays as before: newest first.${extra[0]}`,
+  `带 from 或 to 时：区间是 [from, to)（含 from、不含 to），一次最多 31 天，从早到晚排（时间相同按编号），翻页途中新进的记录不改变已翻过的页。记录的时间是它创建的时间，但要等所在的数据库事务提交后才查得到，所以晚一点提交的记录，时间可能比你已经查到的记录还早一点。对账时请查已经结束至少 5 分钟的时间段：这样的时间段 [from, to) 首尾相接时不重不漏。没带时区、日期不对、from 晚于 to、超过 31 天 → 422 invalid_param（error.field 是 from 或 to）。from、to 都不带时顺序和以前一样：从新到旧。${extra[1]}`,
 ];
 const PAGING = [
   ['cursor', 'string', false, ['next_cursor from the previous page', '上一页返回的 next_cursor']],
@@ -189,6 +199,7 @@ export const ENDPOINTS = [
       ...PAGING,
     ],
     returns: ['OrderListItem'], list: true,
+    note: ['Newest first.', '从新到旧。'],
   },
   {
     method: 'POST', path: 'orders/match/', title: ['Match a deposit to an order', '手动匹配'],
@@ -227,6 +238,7 @@ export const ENDPOINTS = [
     method: 'GET', path: 'customers/list/', title: ['List customers', '客户列表'],
     query: [['q', 'string', false, ['Search by customer ID, name or email (partial, case-insensitive), or by exact address', '按客户标识、名称或邮箱搜索（部分匹配，不区分大小写），或按地址精确搜索']], ...PAGING],
     returns: ['Customer'], list: true,
+    note: ['Newest first.', '从新到旧。'],
   },
   {
     method: 'GET', path: 'customers/stats/', title: ['Customer statistics', '客户统计'],
@@ -240,17 +252,21 @@ export const ENDPOINTS = [
   { method: 'GET', path: 'balance/', title: ['Balance', '余额'], returns: ['Balance'] },
   {
     method: 'GET', path: 'ledger/', title: ['Ledger', '账本明细'],
-    query: [['customer_id', 'string', false, ['Filter by customer', '按客户筛选']], ...PAGING],
-    returns: ['LedgerEntry'], list: true,
+    query: [['customer_id', 'string', false, ['Filter by customer', '按客户筛选']], ...RANGE(['created_at', '记账时间 created_at']), ...PAGING],
+    returns: ['LedgerEntry'], list: true, errors: ['invalid_param'],
+    note: RANGE_NOTE(),
   },
   {
     method: 'GET', path: 'deposits/', title: ['Deposits', '到账明细'],
     query: [
       ['customer_id', 'string', false, ['Filter by customer', '按客户筛选']],
       ['matched', 'string', false, ['"false" = credited and not matched to an order; "true" = matched', '"false" 表示已入账但没有匹配订单；"true" 表示已匹配']],
+      ['txid', 'string', false, ['Exact on-chain transaction ID; can be combined with the other filters', '链上交易哈希（精确匹配），可以和其他条件一起用']],
+      ...RANGE(['the time TopUP credited the deposit, not the block time', 'TopUP 入账时间（不是链上付款时间）']),
       ...PAGING,
     ],
-    returns: ['Deposit'], list: true,
+    returns: ['Deposit'], list: true, errors: ['invalid_param'],
+    note: RANGE_NOTE(),
   },
   {
     method: 'POST', path: 'withdrawals/', title: ['Request a withdrawal', '发起提币'],
@@ -260,15 +276,29 @@ export const ENDPOINTS = [
       ['to', 'string', true, ['Destination address on that chain (ETH / BSC: 0x address, mixed case must match the EIP-55 checksum; TRON: Base58). For cashout it must be a wallet registered for that chain', '收款地址：以太坊、BSC 是 0x 地址（大小写混合的必须校验和正确），TRON 是 T 开头的地址；cashout 必须是这条链上登记过的钱包']],
       ['amount', 'amount', true, ['Amount in USDT, up to 6 decimals', '金额（USDT），最多 6 位小数']],
       ['customer_id', 'string', false, ['For payouts: the customer being paid', '代付时填写收款的客户']],
-      ['merchant_ref', 'string', false, ['Your reference, up to 64 characters', '你的备注编号，最多 64 个字符']],
+      ['merchant_ref', 'string', false, ['Your withdrawal reference, up to 64 characters (longer is rejected with 422 invalid_param, not truncated; leading and trailing spaces are removed; empty means none). Optional, case-sensitive, but once used it is unique per account forever: across single withdrawals, dashboard withdrawals and batch payout items, in any status including rejected and cancelled. Reusing it returns 409 duplicate_merchant_ref with error.withdrawal_no of the original withdrawal', '你的提现单号，最多 64 个字符（超过拒收，返回 422 invalid_param，不截断；首尾空格去掉，空串算没填）。选填，区分大小写，填了就同一商户永久唯一：单笔提币、商户后台提币、批量打款的每一笔一起算，任何状态都算（驳回、取消的也算）；重复时返回 409 duplicate_merchant_ref，error.withdrawal_no 是原来那笔的提币单号']],
     ],
-    returns: ['Withdrawal'], errors: ['ip_not_allowed', 'invalid_address', 'address_not_registered', 'insufficient_balance', 'invalid_param'],
-    note: ['Requires an IP whitelist. Amount + fee is frozen immediately. Every withdrawal is reviewed manually.', '需要先设置 IP 白名单；提交后立即冻结"金额 + 手续费"；每一笔都经过人工审核。'],
+    returns: ['Withdrawal'], errors: ['ip_not_allowed', 'invalid_address', 'address_not_registered', 'insufficient_balance', 'duplicate_merchant_ref', 'invalid_param'],
+    note: ['Requires an IP whitelist. Amount + fee is frozen immediately. Every withdrawal is reviewed manually. To be safe against retries after the Idempotency-Key expires (24 hours), always send merchant_ref: a duplicate is rejected and nothing is frozen.', '需要先设置 IP 白名单；提交后立即冻结"金额 + 手续费"；每一笔都经过人工审核。Idempotency-Key 只保留 24 小时，建议每笔都填 merchant_ref：重复的会被拒收、不冻结。'],
   },
   {
     method: 'GET', path: 'withdrawals/', title: ['Get a withdrawal', '查询提币'],
-    query: [['withdrawal_no', 'string', true, ['Withdrawal number', '提币单号']]],
+    query: [
+      ['withdrawal_no', 'string', false, ['Withdrawal number (send this or merchant_ref; if both are sent, withdrawal_no is used)', '提币单号（和 merchant_ref 二选一；两个都传时按 withdrawal_no 查）']],
+      ['merchant_ref', 'string', false, ['Your withdrawal reference (single or batch payout item; exact, case-sensitive match)', '你的提现单号（单笔提币或批量打款的一笔；精确匹配，区分大小写）']],
+    ],
     returns: ['Withdrawal'], errors: ['not_found'],
+  },
+  {
+    method: 'GET', path: 'withdrawals/list/', title: ['List withdrawals (reconciliation)', '提币列表（对账）'],
+    query: [
+      ['status', 'string', false, ['Filter by status: pending, approved, broadcast, completed, rejected, cancelled or failed', '按状态筛选：pending、approved、broadcast、completed、rejected、cancelled、failed']],
+      ['chain', 'string', false, ['Filter by chain: eth, bsc or tron', '按链筛选：eth、bsc、tron']],
+      ...RANGE(['created_at', '创建时间 created_at']),
+      ...PAGING,
+    ],
+    returns: ['Withdrawal'], list: true, errors: ['invalid_param'],
+    note: RANGE_NOTE([' This endpoint always uses a period (default: the last 31 days) and is always oldest first.', '这个接口总按时间段查（默认最近 31 天），总是从早到晚。']),
   },
   {
     method: 'POST', path: 'withdrawals/cancel/', title: ['Cancel a withdrawal', '取消提币'],
@@ -280,8 +310,8 @@ export const ENDPOINTS = [
     body: [
       ['items', 'array', true, ['Up to 500 items: [{ chain, to, amount, customer_id?, merchant_ref? }] (chain: eth, bsc or tron; amount in USDT, up to 6 decimals)', '最多 500 笔：[{ chain, to, amount, customer_id?, merchant_ref? }]（chain 是 eth、bsc 或 tron；amount 是 USDT，最多 6 位小数）']],
     ],
-    returns: ['PayoutBatch', 'PayoutBatchService'], errors: ['ip_not_allowed', 'too_many_items', 'invalid_rows', 'insufficient_balance', 'invalid_param'],
-    note: ['Requires an IP whitelist. If any item is invalid the whole request is rejected with 422 invalid_rows and error.rows = [{ index, line, code, errors }] (index starts at 0, line = index + 1; code is the first problem of the item, errors lists all of them); nothing is frozen. Otherwise amount + fee of every item is frozen at once and each item is reviewed manually. Network fees are not charged separately. Body limit for this endpoint is 256 KB.', '需要先设置 IP 白名单。有一笔不对整个请求返回 422 invalid_rows，error.rows 列出 [{ index, line, code, errors }]（index 从 0 起，line = index + 1；code 是这一笔的第一个问题，errors 列出全部问题），不冻结任何金额；全部没问题时一次冻结每笔的"金额 + 手续费"，每一笔都经过人工审核。网络费不另收。这个接口的请求体上限是 256 KB。'],
+    returns: ['PayoutBatch', 'PayoutBatchService'], errors: ['ip_not_allowed', 'too_many_items', 'invalid_rows', 'insufficient_balance', 'duplicate_merchant_ref', 'invalid_param'],
+    note: ['Requires an IP whitelist. If any item is invalid the whole request is rejected with 422 invalid_rows and error.rows = [{ index, line, code, errors }] (index starts at 0, line = index + 1; code is the first problem of the item, errors lists all of them); nothing is frozen. Item codes include duplicate_merchant_ref (the merchant_ref appears earlier in the same request, or is already used by one of your withdrawals; the later item is the one reported) and invalid_merchant_ref (over 64 characters). Otherwise amount + fee of every item is frozen at once and each item is reviewed manually. Network fees are not charged separately. Body limit for this endpoint is 256 KB.', '需要先设置 IP 白名单。有一笔不对整个请求返回 422 invalid_rows，error.rows 列出 [{ index, line, code, errors }]（index 从 0 起，line = index + 1；code 是这一笔的第一个问题，errors 列出全部问题），不冻结任何金额；行错误码包括 duplicate_merchant_ref（merchant_ref 在同一个请求的前面出现过，或已被你的某笔提币用过，报在后出现的那一笔）和 invalid_merchant_ref（超过 64 个字符）；全部没问题时一次冻结每笔的"金额 + 手续费"，每一笔都经过人工审核。网络费不另收。这个接口的请求体上限是 256 KB。'],
   },
   {
     method: 'GET', path: 'payouts/batch/', title: ['Get a batch payout', '查询批量打款'],
@@ -314,6 +344,7 @@ export const ERRORS = [
   ['403', 'ip_not_allowed', ['Withdrawal request not from a whitelisted IP (or no whitelist set)', '提币请求不是来自白名单 IP（或没有设置白名单）']],
   ['404', 'not_found', ['Unknown endpoint, or no such object in your account', '接口不存在，或你的账户里没有这条记录']],
   ['409', 'duplicate_merchant_order_no', ['merchant_order_no already used', '商户订单号已经存在']],
+  ['409', 'duplicate_merchant_ref', ['merchant_ref already used by one of your withdrawals (any status, forever); error.field is merchant_ref and error.withdrawal_no is the original withdrawal', '提现单号已经被你的某笔提币用过（任何状态、永久）；error.field 是 merchant_ref，error.withdrawal_no 是原来那笔的提币单号']],
   ['409', 'idempotency_conflict', ['Same Idempotency-Key with a different request', '同一个 Idempotency-Key 用在了不同的请求上']],
   ['409', 'request_in_progress', ['A request with this Idempotency-Key is still running; retry shortly', '同一个 Idempotency-Key 的请求还在处理中，请稍后重试']],
   ['409', 'cannot_match', ['The deposit cannot be matched to this order (other customer, already matched, not credited, or order closed)', '这笔到账不能匹配到这个订单（不是同一个客户、已经匹配过、没有入账或订单已关闭）']],

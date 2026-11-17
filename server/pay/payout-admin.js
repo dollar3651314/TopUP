@@ -114,7 +114,7 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
       const names = new Map((mids.length ? await db.query(`select id, name from merchants where id = any($1::text[])`, [mids]) : []).map((m) => [m.id, m.name]));
       const merchantsToday = mids.map((id) => ({ merchant_id: id, merchant: names.get(id) ?? null, approved: usdt(today.m.get(id) || 0) }))
         .sort((a, b) => (today.m.get(b.merchant_id) || 0) - (today.m.get(a.merchant_id) || 0) || String(a.merchant).localeCompare(String(b.merchant)));
-      const approved = appr.map((w) => ({ id: w.id, merchant: w.merchant, kind: w.kind, chain: w.chain, to: w.to_address, amount: usdt(w.amount), batch_no: w.batch_ref || null, approved_at: iso(w.approved_at), hold: w.hold_reason || null }));
+      const approved = appr.map((w) => ({ id: w.id, merchant_id: w.merchant_id, merchant: w.merchant, kind: w.kind, chain: w.chain, to: w.to_address, amount: usdt(w.amount), batch_no: w.batch_ref || null, approved_at: iso(w.approved_at), hold: w.hold_reason || null }));
       return { singles, groups, pending_count: rows.length, approved, batches: recent.map(txBatchOut), ...(await plans()), today_approved: usdt(today.v), per_day: usdt(limits.perDay), per_merchant_day: usdt(limits.perMerchantDay), merchants_today: merchantsToday, service: payout.serviceWindow(now()) };
     },
     /** 单笔（或几笔）审核通过：超单笔、这家商户每天、全平台每天上限的留在待审核，返回原因 */
@@ -175,9 +175,9 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
     async 'payout-tx-batch'(b, actor, q) {
       const [x] = await db.query('select * from payout_tx_batches where id = $1', [q.get('id') || '']);
       if (!x) throw new PayError('not_found', 404);
-      const items = await db.query(`select w.id, w.chain, w.to_address, w.amount, w.status, w.txid, w.reason, w.hold_reason, m.name merchant from withdrawals w join merchants m on m.id = w.merchant_id where w.id = any($1::text[])`, [x.item_ids]);
+      const items = await db.query(`select w.id, w.chain, w.to_address, w.amount, w.status, w.txid, w.reason, w.hold_reason, w.merchant_id, m.name merchant from withdrawals w join merchants m on m.id = w.merchant_id where w.id = any($1::text[])`, [x.item_ids]);
       const resumable = x.status === 'planned' && (x.chain !== 'tron' ? Boolean(x.raw_hex) : Boolean(await tronSignBatch(x.id)));
-      return { ...txBatchOut(x), resumable, voidable: x.status === 'planned', withdrawals: items.map((w) => ({ id: w.id, merchant: w.merchant, to: w.to_address, amount: usdt(w.amount), status: w.status, txid: w.txid, reason: w.reason, hold: w.hold_reason || null })) };
+      return { ...txBatchOut(x), resumable, voidable: x.status === 'planned', withdrawals: items.map((w) => ({ id: w.id, merchant_id: w.merchant_id, merchant: w.merchant, to: w.to_address, amount: usdt(w.amount), status: w.status, txid: w.txid, reason: w.reason, hold: w.hold_reason || null })) };
     },
     'payout-limits': async () => limitsOut(await payout.getPayoutLimits(db)),
     /** 改上限：values 是 USDT 字符串（含每个商户每天上限 perMerchantDay，不能大于全平台每天 perDay）；原因 + 动态码 + 审计 */
