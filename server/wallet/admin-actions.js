@@ -25,6 +25,10 @@ const usdt = (u) => fmtUsdt(Number(u)).replace(/,/g, '');
 export function nodeFailure(e) {
   if (e instanceof PayError) return e;
   if (e?.code === 'rpc_http' && [429, 503].includes(e.httpStatus)) return new PayError('node_busy', 503);
+  // 老 TronGrid 客户端（server/pay/trongrid.js）现在的写法：HTTP 错误是 Error("trongrid <状态码> <路径>") 带 .status；
+  // 连不上是 fetch 抛的 TypeError；返回不是 JSON 是 res.json() 抛的 SyntaxError（改成 rpc_http / rpc_unreachable 写法后走上面两行）
+  if (/^trongrid \d{3}\b/.test(String(e?.message || '')) && Number.isInteger(e?.status)) return new PayError([429, 503].includes(e.status) ? 'node_busy' : 'rpc_unreachable', 503);
+  if ((e instanceof TypeError && /fetch failed/i.test(e.message)) || (e instanceof SyntaxError && /JSON/.test(e.message))) return new PayError('rpc_unreachable', 503);
   if (['rpc_unreachable', 'rpc_http'].includes(e?.code) || e?.name === 'TimeoutError' || e?.name === 'AbortError') return new PayError('rpc_unreachable', 503);
   if (e instanceof TronNodeError && e.code === 'rpc_error') return new PayError('node_error', 502);
   return e;

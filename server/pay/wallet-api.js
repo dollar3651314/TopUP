@@ -29,16 +29,10 @@ const USDT_FEE_LIMIT = 30 * TRX;
 const LEGACY_BUILD = new Set(['withdraw-plan', 'sweep-plan']); // 向老 TronGrid 建交易的动作
 
 /**
- * 节点出错给后台的口径（K-13）：老 TronGrid 客户端（trongrid.js）的错也换成和合约钱包、以太坊 / BSC 一样的错误码——
- * HTTP 429 / 503 → node_busy 503；连不上、超时、其他 HTTP 错误、返回的不是 JSON（json = true 的动作）→ rpc_unreachable 503；
- * 节点回了 JSON 但没给结果（build_failed、balance_query_failed）→ node_error 502。返回里只有错误码，不带节点地址、Key、接口路径
+ * 节点出错给后台的口径（K-13）：老 TronGrid 客户端、合约钱包、以太坊 / BSC 的错一律经 nodeFailure 换成 node_busy / rpc_unreachable 503、node_error 502；
+ * 老 TRON 建交易的动作（json = true）里节点回了 JSON 但没给结果（build_failed、balance_query_failed）也算 node_error 502。返回里只有错误码，不带节点地址、Key、接口路径
  */
 export function gridFailure(e, { json = false } = {}) {
-  if (e instanceof PayError) return e;
-  const http = e?.httpStatus ?? (/^trongrid \d{3}\b/.test(String(e?.message || '')) ? e.status : undefined);
-  if (http !== undefined && e?.code !== 'rpc_unreachable') return new PayError([429, 503].includes(Number(http)) ? 'node_busy' : 'rpc_unreachable', 503);
-  if (e instanceof TypeError && /fetch failed/i.test(e.message)) return new PayError('rpc_unreachable', 503);
-  if (json && e instanceof SyntaxError) return new PayError('rpc_unreachable', 503);
   if (json && ['build_failed', 'balance_query_failed'].includes(e?.message)) return new PayError('node_error', 502);
   return nodeFailure(e);
 }
