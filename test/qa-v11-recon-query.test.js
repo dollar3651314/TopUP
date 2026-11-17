@@ -4,23 +4,27 @@
 // 给研发的接口约定（需求没写死的地方由测试定，照着做）：
 //   - GET withdrawals/list/：查询参数 status（对外状态，同 Withdrawal.status：pending、approved、broadcast、completed、rejected、cancelled、failed）、
 //     chain（eth / bsc / tron）、from、to、cursor、limit（1–100，默认 50）；返回 { items: Withdrawal[], next_cursor }，items 和 GET withdrawals/ 同一个对象。
-//     按 created_at 从早到晚排（相同时间按提现号），不论带不带 from。
+//     按 created_at 从早到晚排（相同时间按记录号），不论带不带 from / to。
 //   - GET deposits/、GET ledger/：加 from、to；deposits/ 再加 txid（精确匹配，可以和别的条件一起用）。
-//     带 from 时从早到晚排；**不带 from 的旧调用顺序不变（从新到旧）**，翻页参数照旧。
-//   - 时间段按哪个字段：提现 created_at；到账 time（链上付款时间，返回里的 time）；账本 created_at。区间是 [from, to)：含 from、不含 to，
-//     相邻两段首尾相接时不重不漏。to 不传 = 现在。
+//     带了 from 或 to（任一个）就从早到晚排（相同时间按记录号）；**from、to 都不带的旧调用顺序不变（从新到旧）**，翻页参数照旧。
+//   - 时间段按哪个字段（产品 11/17 补充说明第 4 条）：提现 created_at；到账按 TopUP 入账时间 deposits.created_at（不是链上时间 time），
+//     到账对象新增字段 credited_at（= deposits.created_at，ISO 8601），链上时间 time 照旧；账本 created_at。
+//     区间是 [from, to)：含 from、不含 to，相邻两段首尾相接时不重不漏。
+//   - 缺省（补充说明第 2 条）：to 不传 = 现在；from 不传 = to − 31 天。withdrawals/list 什么都不传就是最近 31 天；
+//     deposits、ledger 只带了 from 或 to 其中一个时，缺的那个按同样规则补。
 //   - from、to 是带时区的 ISO 8601（2026-11-15T00:00:00+08:00、2026-11-14T16:00:00Z、带毫秒也行）；没带时区、格式错、不存在的日期 →
 //     422 invalid_param（error.field = 'from' 或 'to'）；from 晚于 to → 422 invalid_param（field = 'from'）；
 //     to − from 超过 31 天 → 422 invalid_param（field = 'to'）；正好 31 天可以。
 //   - cursor 是不透明字符串（只能用上一页的 next_cursor）；翻页过程中新进的记录不改变已翻过的页、也不让后面的页重复或漏掉已存在的记录。
 //   - 只返回自己商户的记录。低于 1 USDT 的到账照旧不给商户看。
-//   - 开发者文档：补 GET withdrawals/list/ 和三个参数（from、to、txid），写明区间 [from, to)、最多 31 天、带 from 时从早到晚。
+//   - 开发者文档：补 GET withdrawals/list/ 和三个参数（from、to、txid），写明区间 [from, to)、最多 31 天、带 from / to 时从早到晚、
+//     到账按入账时间筛；Deposit 对象加 credited_at。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { world, U, TO, ETH_TO, HOUR, DAY } from './qa-v11-helpers.js';
 import * as core from '../server/pay/core.js';
 import { dayStart } from '../server/pay/payout.js';
-import { ENDPOINTS } from '../site/src/docs/api-reference.mjs';
+import { ENDPOINTS, OBJECTS } from '../site/src/docs/api-reference.mjs';
 
 const enc = encodeURIComponent;
 /** 东八区写法：2026-11-15T00:00:00+08:00 */
@@ -44,8 +48,10 @@ async function seeded() {
       await w.db.query('update withdrawals set created_at = $2 where id = $1', [r.body.withdrawal_no, new Date(t)]);
       wds[who.id].push(r.body.withdrawal_no);
       const tx = w.txid();
-      const d = await core.recordDeposit(w.db, { txid: tx, logIndex: 0, block: 100 + i, to: addr, amount: (10 + i) * U, time: new Date(t) });
+      // 链上时间比入账时间早 3 分钟：0 点前上链、0 点后入账的那笔按入账时间算进后一天
+      const d = await core.recordDeposit(w.db, { txid: tx, logIndex: 0, block: 100 + i, to: addr, amount: (10 + i) * U, time: new Date(t - 3 * 60_000) });
       assert.equal(d.status, 'credited');
+      await w.db.query('update deposits set created_at = $2 where id = $1', [d.deposit.id, new Date(t)]);
       deps[who.id].push({ id: String(d.deposit.id), txid: tx, time: t });
       await w.db.query(`insert into ledger (merchant_id, type, amount, available_after, frozen_after, ref, created_at) values ($1, 'deposit', 1, 0, 0, $2, $3)`, [who.id, `seed${i}`, new Date(t)]);
     }
@@ -72,7 +78,7 @@ async function all(w, who, path, limit = 2) {
   return { items: pages.flat(), pages };
 }
 const dbWithdrawals = async (db, mid, from, to) => (await db.query('select id from withdrawals where merchant_id = $1 and created_at >= $2 and created_at < $3 order by created_at, id', [mid, new Date(from), new Date(to)])).map((r) => r.id);
-const dbDeposits = async (db, mid, from, to) => (await db.query(`select id from deposits where merchant_id = $1 and result = 'credited' and time >= $2 and time < $3 order by time, id`, [mid, new Date(from), new Date(to)])).map((r) => String(r.id));
+const dbDeposits = async (db, mid, from, to) => (await db.query(`select id from deposits where merchant_id = $1 and result = 'credited' and created_at >= $2 and created_at < $3 order by created_at, id`, [mid, new Date(from), new Date(to)])).map((r) => String(r.id));
 const dbLedger = async (db, mid, from, to) => (await db.query('select id from ledger where merchant_id = $1 and created_at >= $2 and created_at < $3 order by created_at, id', [mid, new Date(from), new Date(to)])).map((r) => String(r.id));
 const noDup = (ids, where) => assert.equal(new Set(ids).size, ids.length, `${where} 有重复：${ids}`);
 const ascending = (items, key, where) => { for (let i = 1; i < items.length; i++) assert.ok(Date.parse(items[i - 1][key]) <= Date.parse(items[i][key]), `${where} 不是从早到晚：${items[i - 1][key]} > ${items[i][key]}`); };
@@ -121,13 +127,50 @@ test('TG-2 ① 提现列表：状态、链筛选；items 和 GET withdrawals/ �
   await w.db.end();
 });
 
+test('TG-2 到账按入账时间筛（不是链上时间）：0 点前上链、0 点后入账的算后一天', async () => {
+  const { w, D0, deps } = await seeded();
+  // times[3] = D0 + 1 秒入账，链上时间 D0 − 2 分 59 秒
+  const day = (await all(w, w.a, `deposits/?from=${enc(cst(D0))}&to=${enc(cst(D0 + DAY))}`)).items.map((x) => x.id);
+  assert.ok(day.includes(deps.ma[3].id), '入账在当天的要算进当天');
+  assert.ok(day.includes(deps.ma[2].id), '正好 0 点入账的算进当天（含 from）');
+  const prev = (await all(w, w.a, `deposits/?from=${enc(cst(D0 - DAY))}&to=${enc(cst(D0))}`)).items.map((x) => x.id);
+  assert.ok(!prev.includes(deps.ma[3].id) && !prev.includes(deps.ma[2].id), '链上时间在前一天、入账在当天的不能算进前一天');
+  assert.ok(prev.includes(deps.ma[1].id));
+  await w.db.end();
+});
+
+test('TG-2 缺省：withdrawals/list 不带 from = 最近 31 天；deposits、ledger 只带 to 时 from = to − 31 天，只带 from 时 to = 现在，都是从早到晚', async () => {
+  const { w, D0 } = await seeded();
+  const old = await w.api(w.a, 'POST', 'withdrawals/', { kind: 'payout', chain: 'tron', to: TO, amount: '1', merchant_ref: 'OLD-40D' });
+  await w.db.query('update withdrawals set created_at = $2 where id = $1', [old.body.withdrawal_no, new Date(Date.now() - 40 * DAY)]);
+  const mid = await w.api(w.a, 'POST', 'withdrawals/', { kind: 'payout', chain: 'tron', to: TO, amount: '1', merchant_ref: 'MID-20D' });
+  await w.db.query('update withdrawals set created_at = $2 where id = $1', [mid.body.withdrawal_no, new Date(Date.now() - 20 * DAY)]);
+  const nofrom = (await all(w, w.a, 'withdrawals/list/', 5)).items.map((x) => x.withdrawal_no);
+  assert.ok(nofrom.includes(mid.body.withdrawal_no), '20 天前的在最近 31 天里');
+  assert.ok(!nofrom.includes(old.body.withdrawal_no), '40 天前的不在');
+  assert.deepEqual(nofrom, await dbWithdrawals(w.db, 'ma', Date.now() - 31 * DAY, Date.now() + 1000));
+  // 只带 to：from = to − 31 天
+  const to = D0 + DAY;
+  const onlyTo = (await all(w, w.a, `withdrawals/list/?to=${enc(cst(to))}`)).items.map((x) => x.withdrawal_no);
+  assert.deepEqual(onlyTo, await dbWithdrawals(w.db, 'ma', to - 31 * DAY, to));
+  assert.ok(onlyTo.includes(mid.body.withdrawal_no) && !onlyTo.includes(old.body.withdrawal_no));
+  const depTo = (await all(w, w.a, `deposits/?to=${enc(cst(to))}`)).items;
+  assert.deepEqual(depTo.map((x) => x.id), await dbDeposits(w.db, 'ma', to - 31 * DAY, to), 'deposits 只带 to：从早到晚、from = to − 31 天');
+  const ledTo = (await all(w, w.a, `ledger/?to=${enc(cst(to))}`)).items;
+  assert.deepEqual(ledTo.map((x) => x.id), await dbLedger(w.db, 'ma', to - 31 * DAY, to), 'ledger 只带 to：从早到晚');
+  const ledFrom = (await all(w, w.a, `ledger/?from=${enc(cst(D0))}`)).items;
+  assert.deepEqual(ledFrom.map((x) => x.id), await dbLedger(w.db, 'ma', D0, Date.now() + 1000), 'ledger 只带 from：到现在、从早到晚');
+  await w.db.end();
+});
+
 test('TG-2 ① 到账 deposits 和账本 ledger 带 from / to：条数和数据库一致、不重不漏、从早到晚；低于 1 USDT 的照旧看不到', async () => {
   const { w, D0, times } = await seeded();
   for (const [from, to] of [[D0 - DAY, D0 + 2 * DAY], [D0, D0 + DAY], [D0 - 1000, D0 + 1000], [times[4], times[7]]]) {
     const deps = (await all(w, w.a, `deposits/?from=${enc(cst(from))}&to=${enc(cst(to))}`)).items;
     noDup(deps.map((x) => x.id), 'deposits');
     assert.deepEqual(deps.map((x) => x.id), await dbDeposits(w.db, 'ma', from, to), `deposits [${cst(from)}, ${cst(to)})`);
-    ascending(deps, 'time', 'deposits');
+    ascending(deps, 'credited_at', 'deposits');
+    for (const x of deps) assert.ok(x.time && x.credited_at && x.time !== x.credited_at, '到账返回链上时间 time 和入账时间 credited_at 两个时间');
     assert.ok(deps.every((x) => x.result !== 'below_min'));
     const led = (await all(w, w.a, `ledger/?from=${enc(z(from))}&to=${enc(z(to))}`)).items;
     noDup(led.map((x) => x.id), 'ledger');
@@ -208,7 +251,7 @@ test('TG-2 ③ 超 31 天、from 晚于 to、时间格式错、没带时区：�
   await w.db.end();
 });
 
-test('TG-2 ③ 不带 from 的旧调用：deposits、ledger 返回顺序和改前一致（按 id 从新到旧），旧的 cursor 翻页照旧', async () => {
+test('TG-2 ③ from、to 都不带的旧调用：deposits、ledger 返回顺序和改前一致（按 id 从新到旧），旧的 cursor 翻页照旧', async () => {
   const { w } = await seeded();
   for (const [path, table, extra] of [['deposits/', 'deposits', `and result = 'credited'`], ['ledger/', 'ledger', '']]) {
     const { items } = await all(w, w.a, path, 4);
@@ -245,6 +288,10 @@ test('TG-2 ⑤ 开发者文档：GET withdrawals/list/ 和 from、to、txid 参�
   for (const p of ['status', 'chain', 'from', 'to', 'cursor', 'limit']) assert.ok(names(list).includes(p), `withdrawals/list/ 缺参数 ${p}`);
   const deps = ENDPOINTS.find((e) => e.method === 'GET' && e.path === 'deposits/');
   for (const p of ['from', 'to', 'txid']) assert.ok(names(deps).includes(p), `deposits/ 缺参数 ${p}`);
+  assert.match(JSON.stringify(deps.query.find((q) => q[0] === 'from')[3]), /入账时间/, 'deposits/ 的 from 要写按入账时间筛');
+  const ca = OBJECTS.Deposit.find((f) => f[0] === 'credited_at');
+  assert.ok(ca, 'Deposit 对象要有 credited_at（入账时间）');
+  assert.equal(ca[1], 'time');
   const led = ENDPOINTS.find((e) => e.method === 'GET' && e.path === 'ledger/');
   for (const p of ['from', 'to']) assert.ok(names(led).includes(p), `ledger/ 缺参数 ${p}`);
   for (const e of [list, deps, led]) {
