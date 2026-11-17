@@ -87,7 +87,7 @@ export function decodeSweep(data) {
 }
 
 /**
- * 替身 TRON 全节点。state 可覆盖：head（最新区块号）、solidLag（固化落后几个块，默认 19）、
+ * 替身 TRON 全节点。state 可覆盖：head（最新区块号）、genesis（0 号块的 blockID，核对网络用）、solidLag（固化落后几个块，默认 19）、
  * energyFee（sun / 能量，默认 100）、scheme + usdt（批量合约收到 sweep 时用）、
  * onchain：{ parent, factory, implementation }（只读调用 parent()/factory()/implementationAddress() 返回什么；值为 '' 表示空结果）
  */
@@ -177,6 +177,7 @@ export function fakeTronNode(state = {}) {
       case '/walletsolidity/getnowblock': { const n = s.head - s.solidLag; return { blockID: blockId(n), block_header: { raw_data: { number: n, timestamp: blockTime(n) } } }; }
       case '/wallet/getblockbynum': case '/walletsolidity/getblockbynum': {
         const n = Number(body.num);
+        if (n === 0 && s.genesis) return { blockID: s.genesis, block_header: { raw_data: { number: 0, timestamp: 0 } } }; // genesis：测试指定的创世块哈希（核对主网 / Nile）
         return n > s.head ? {} : { blockID: blockId(n), block_header: { raw_data: { number: n, timestamp: blockTime(n) } } };
       }
       case '/wallet/gettransactioninfobyblocknum': case '/walletsolidity/gettransactioninfobyblocknum': {
@@ -257,4 +258,28 @@ export function fakeTronNode(state = {}) {
       return { url: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((ok) => { srv.closeAllConnections?.(); srv.close(ok); }) };
     },
   };
+}
+
+/**
+ * 不连外网的 TronGrid：把全局 fetch 换成替身，凡是 *.trongrid.io（以及 hosts 里另列的主机）的请求都在本机回答——
+ * 0 号块（/wallet/getblockbynum {num:0}）按主机回创世块哈希（nile.trongrid.io = Nile、api.trongrid.io = 主网，hosts 可覆盖），其余回 {}；
+ * 别的地址（例如测试自己在 127.0.0.1 开的假以太坊节点）照常走真的 fetch。返回 restore()。
+ * 给走 createPayDeps 的测试用：K-4 之后测试环境要核对 TRON 节点真是 Nile，不能依赖外网上的 nile.trongrid.io。
+ */
+export const TRON_GENESIS_MAINNET = '00000000000000001ebf88508a03865c71d452e25f4d51194196a1d22b6653dc';
+export const TRON_GENESIS_NILE = '0000000000000000d698d4192c56cb6be724a558448e2684802de4d6cd8690dc';
+export function fakeTronGridNet(hosts = {}) {
+  const map = { 'nile.trongrid.io': TRON_GENESIS_NILE, 'api.trongrid.io': TRON_GENESIS_MAINNET, ...hosts };
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(typeof url === 'string' ? url : url.url ?? String(url));
+    if (!(u.host in map) && !u.host.endsWith('.trongrid.io')) return real(url, init);
+    const g = map[u.host];
+    if (!g || g === 'down') throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+    let body = {};
+    try { body = JSON.parse(init.body || '{}'); } catch { body = {}; }
+    if (u.pathname.endsWith('/wallet/getblockbynum') && Number(body.num) === 0) return Response.json({ blockID: g, block_header: { raw_data: { number: 0 } } });
+    return Response.json({});
+  };
+  return () => { globalThis.fetch = real; };
 }
