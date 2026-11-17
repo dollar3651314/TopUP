@@ -126,6 +126,7 @@ export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetc
   await step('callbacks', () => deliverDue(db, { getTarget, fetchImpl, resolve }));
   await step('mail', () => notifyWithdrawals(db, notify, adminUrl));
   out.ms = Date.now() - t0;
-  await setMeta(db, 'tick_last', { at: new Date().toISOString(), ...out });
+  // commit：这个 worker 自己的版本（写的时候读环境变量）；健康检查原样转给 topup.sh，用来确认新版本的 worker 真的在跑
+  await setMeta(db, 'tick_last', { at: new Date().toISOString(), commit: (process.env.GIT_COMMIT || '').slice(0, 7), ...out });
   return out;
 }
