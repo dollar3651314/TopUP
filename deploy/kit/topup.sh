@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# TopUP 服务器上的部署命令（测试环境；生产换服务器后沿用）。说明见 deploy/README.md。
-# 第一次：管理员在云控制台"远程连接"终端里粘贴一条命令（下载本文件并运行 install）；之后用 sudo topup <子命令>：
+# TopUP 服务器上的部署命令（测试环境和生产共用）。说明见 deploy/README.md。
+# 第一次：管理员在服务器终端里粘贴一条命令（下载本文件并运行 install）：
+#   测试环境：TOPUP_IMAGE=… bash topup.sh install <域名> <证书提醒邮箱>
+#   生产（平台网关模式，TLS 由平台做）：TOPUP_IMAGE=… TOPUP_ENV=production TOPUP_GATEWAY=platform TOPUP_HTTP_PORT=8080 bash topup.sh install <平台发布的主机名>
+#   环境写进 deploy.env 以后就固定了：测试环境装过的机器不能直接改成生产，反过来也一样。镜像标签跟着环境：staging / production。
+# 之后用 sudo topup <子命令>：
 #   sudo topup status            版本、容器、健康检查、内存、磁盘、备份、证书（不显示任何密钥）
 #   sudo topup keys              哪些变量已填、哪些没填（只显示名字）
 #   sudo topup set-key 变量名     填一个密钥（粘贴时屏幕上不显示），写进 .env 并自动生效
@@ -18,6 +22,7 @@
 #                                异地备份默认关闭；生产要开时 set BACKUP_OFFSITE r2 并填 R2_…，restore-drill --from-r2 从 R2 下载演练
 #   sudo topup rollback          换回上一个版本，并且不再自动更新到当前这个版本
 #   sudo topup retry             清掉"不再重试"的记录，下一分钟重新尝试最新版本
+#   sudo topup set TOPUP_REAL_IP_FROM 地址段 / set TOPUP_REAL_IP_HEADER X-Forwarded-For   平台网关模式：实测网关后打开真实 IP（默认关）
 #   sudo topup stop / start      停下 TopUP（停定时器 → 停应用 → 备份 → 停数据库，数据保留）/ 重新启动
 # 定时器调用（不用手动运行）：update（每分钟看有没有新版本）、watch（每 5 分钟检查一次，状态变化时发邮件）、backup（每天）。
 # 规矩：每步一行 ✓ / ✗；失败时写原因和下一步，然后停下；中途不问 y/n；可以重复运行；摘要和日志里不出现任何密钥的值。
@@ -32,25 +37,31 @@ CERT_NAME=topup
 OTHERS_ROOT=${TOPUP_OTHERS_ROOT:-/opt}
 # 演练模式（只在开发机上用，服务器上不要设）：不装软件、不碰 systemd、证书用自签名、镜像只用本机已有的
 DRILL=${TOPUP_DRILL:-}
-# 所有容器内存上限之和（MB），和 compose.yml 一致：postgres 256 + redis 80 + web 256 + worker 256 + nginx 32
-# （按 1.6 GB 的测试服务器定：停掉别的项目后可用约 1,050 MB；依据和实测峰值见 deploy/README.md 第 3 节）
-LIMITS_MB=880
+# 环境（staging / production）：install 时从这里来（默认 staging），之后一律以 deploy.env 为准；两边不一致就拒绝（不能换环境）
+ENV_ARG=${TOPUP_ENV:-}
+GW_ARG=${TOPUP_GATEWAY:-}
+PORT_ARG=${TOPUP_HTTP_PORT:-}
+# 系统信息文件（测试时可以换）
+OS_RELEASE=${TOPUP_OS_RELEASE:-/etc/os-release}
+# 容器内存上限按环境放在 deploy/profiles/<环境>.env（compose 也读同一个文件）；合计由 limits_mb 算
 # 容器之外 Docker 还要的（MB）：每个容器一个 containerd-shim、每个对外端口一个 docker-proxy（开发机实测 RSS 合计约 77 MB，见 README 第 3 节）
 # 启动前要求可用内存 ≥ 上限之和 + 这个数
 RESERVE_MB=100
 HEALTH=http://127.0.0.1:18080/api/health/
-# 备份：本机保留 7 天、至少 3 份；本机备份合计超过这个大小时从最旧的删起（至少留 3 份）
-BACKUP_MAX_MB=${TOPUP_BACKUP_MAX_MB:-2048}
+# 备份：本机保留 7 天、至少 3 份；本机备份合计超过 TOPUP_BACKUP_MAX_MB（按环境，deploy/profiles/；环境变量可以临时改）时从最旧的删起（至少留 3 份）
 # 本机备份的加密密钥（服务器自己生成，只在本机，600）
 BACKUP_IDENTITY_REL=state/backup-identity
 # 可以用 set-key 填的密钥（屏幕上不显示）；R2_ 开头的写进 deploy.env，其余写进 .env
 SECRET_KEYS="RESEND_API_KEY SMTP_PASS TRONGRID_API_KEY ETH_RPC_URL BSC_RPC_URL TRON_NODE_URL SWEEP_OPERATOR_KEY SWEEP_OPERATOR_KEY_TRON TRONSAVE_API_KEY R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY"
 # 可以用 set 填的普通设置（不是密钥，会显示）
 # TEST_MERCHANT_IP_BYPASS 只能在测试环境设（check_value 挡）；关掉用 test-merchant-ip-off
-PLAIN_KEYS="MAIL_FROM MAIL_TO SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER ETH_CONFIRMATIONS BSC_CONFIRMATIONS TRON_CONFIRMATIONS TRONSAVE_MAX_PRICE_SUN TRON_RENT_MAX_ENERGY USDT_CONTRACT BACKUP_OFFSITE R2_ACCOUNT_ID R2_BUCKET TEST_MERCHANT_IP_BYPASS"
+# TOPUP_REAL_IP_HEADER、TOPUP_REAL_IP_FROM 只在平台网关模式用（真实 IP，写进 deploy.env）
+PLAIN_KEYS="MAIL_FROM MAIL_TO SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER ETH_CONFIRMATIONS BSC_CONFIRMATIONS TRON_CONFIRMATIONS TRONSAVE_MAX_PRICE_SUN TRON_RENT_MAX_ENERGY USDT_CONTRACT BACKUP_OFFSITE R2_ACCOUNT_ID R2_BUCKET TEST_MERCHANT_IP_BYPASS TOPUP_REAL_IP_HEADER TOPUP_REAL_IP_FROM"
 # 由部署决定的变量（compose.yml 的 environment 或镜像），不写进 .env
 MANAGED_KEYS="APP_ENV PUBLIC_URL HOST PORT TRUST_PROXY GIT_COMMIT DATABASE_URL REDIS_URL BLOB_DIR"
-DEPLOY_KEYS=" BACKUP_OFFSITE R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET BACKUP_AGE_RECIPIENT "
+DEPLOY_KEYS=" BACKUP_OFFSITE R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET BACKUP_AGE_RECIPIENT TOPUP_REAL_IP_HEADER TOPUP_REAL_IP_FROM "
+# 生产不能有的测试环境变量（应用看到也会拒绝启动）
+TEST_ONLY_KEYS="TEST_ADMIN_TOKEN_SHA256 TEST_MERCHANT_IP_BYPASS"
 
 LOG=/dev/null
 say() { echo "$*" | tee -a "$LOG"; }
@@ -77,10 +88,35 @@ envval() { sed -n "s/^$1=//p" "${2:-$TOPUP_DIR/.env}" 2> /dev/null | tail -1; }
 dval() { envval "$1" "$TOPUP_DIR/deploy.env"; }
 cur_tag() { sed -n 's/^IMAGE_TAG=//p' "$TOPUP_DIR/state/image.env" 2> /dev/null || true; }
 
-compose() {
-  docker compose --project-name topup --project-directory "$TOPUP_DIR" -f "$KIT/compose.yml" \
-    --env-file "$TOPUP_DIR/deploy.env" --env-file "$TOPUP_DIR/state/image.env" "$@"
+# 环境：deploy.env 里的为准；还没有 deploy.env（第一次 install）时用 TOPUP_ENV，默认 staging。镜像标签和环境同名（staging / production）
+topup_env() { local e; e=$(dval TOPUP_ENV); echo "${e:-${ENV_ARG:-staging}}"; }
+track() { topup_env; }
+gateway() { [ "$(dval TOPUP_GATEWAY)" = platform ]; }
+# 按环境的参数（deploy/profiles/<环境>.env）；第二个参数是没有这个文件或这一项时的默认值
+profile_file() { echo "$KIT/profiles/$(topup_env).env"; }
+pval() { local v; v=$(envval "$1" "$(profile_file)"); echo "${v:-$2}"; }
+# 所有容器内存上限之和（MB）：和 compose 实际生效的一样（同一个文件、同样的默认值 = 测试环境）
+limits_mb() {
+  local k d v sum=0
+  for k in POSTGRES:256m REDIS:80m WEB:256m WORKER:256m NGINX:32m; do
+    d=${k#*:}; v=$(pval "TOPUP_MEM_${k%%:*}" "$d")
+    case "$v" in *[gG]) v=$(( ${v%[gG]} * 1024 )) ;; *[mM]) v=${v%[mM]} ;; *) v=${d%m} ;; esac
+    sum=$((sum + v))
+  done
+  echo "$sum"
 }
+# 对外端口：平台网关模式只有 TOPUP_HTTP_PORT，否则 80、443
+public_ports() { if gateway; then dval TOPUP_HTTP_PORT; else echo "80 443"; fi; }
+
+# deploy.env 说了算：环境变量里的 TOPUP_ENV / TOPUP_GATEWAY / TOPUP_HTTP_PORT 不传给 compose（已经核对过和 deploy.env 一致）
+compose() {
+  local files=(-f "$KIT/compose.yml") envs=(--env-file "$TOPUP_DIR/deploy.env")
+  gateway && files+=(-f "$KIT/compose.gateway.yml")
+  [ ! -f "$(profile_file)" ] || envs+=(--env-file "$(profile_file)")
+  env -u TOPUP_ENV -u TOPUP_GATEWAY -u TOPUP_HTTP_PORT \
+    docker compose --project-name topup --project-directory "$TOPUP_DIR" "${files[@]}" "${envs[@]}" --env-file "$TOPUP_DIR/state/image.env" "$@"
+}
+
 
 # 把文件里 KEY 的值换成环境变量 VAL 的值（值不出现在命令行参数里）；没有这一行就加在最后；保持权限 600
 env_write() {
@@ -165,9 +201,175 @@ stop_other() {
   return 0
 }
 
-port_busy_by_others() {
-  docker ps --format '{{.Names}} {{.Ports}}' | grep -E '(0\.0\.0\.0|\[::\]):(80|443)->' | grep -v '^topup-' || true
+# 端口被谁占着（每个占用一行："端口 谁"）：别的容器发布了这个端口（TopUP 自己的 topup-* 不算），
+# 或者本机进程在监听（ss -ltnp；Docker 端口转发的 docker-proxy 不算——那是容器的端口，上面按容器名已经查过）
+port_holders() {
+  local p
+  for p in "$@"; do
+    docker ps --format '{{.Names}} {{.Ports}}' 2> /dev/null | grep -v '^topup-' | grep -E "[: ]$p->" | awk -v p="$p" '{print p " 容器" $1}'
+    command -v ss > /dev/null || continue
+    ss -ltnp 2> /dev/null | awk -v p="$p" '$1 == "LISTEN" && $4 ~ (":" p "$") {
+      n = "未知程序"; if (match($0, /users:\(\("[^"]+"/)) n = substr($0, RSTART + 9, RLENGTH - 10)
+      if (n != "docker-proxy") print p " 本机程序" n }'
+  done | sort -u
 }
+# 检查对外端口；被占着就停下并说出是谁（第一个参数是提示前缀）
+check_ports() {
+  local busy ports
+  ports=$(public_ports)
+  busy=$(port_holders $ports)
+  [ -z "$busy" ] || die "${1}端口 $(echo "$ports" | sed 's/ / \/ /g') 被占着：$(echo "$busy" | tr '\n' ';' | sed 's/;$//; s/;/；/g')" \
+    "先停掉占着端口的程序，再运行同一条命令；$(gateway && echo '或者换一个端口（平台上发布的端口要跟着换）' || echo '截图发运维')"
+}
+
+# 生产从不停别的项目：只列出在运行的名字（提醒）；测试环境照旧轮流用（停掉别的项目）
+others_running() { local p; for p in $(other_projects); do project_running "$p" && printf '%s ' "$p"; done; }
+
+# 环境和 .env 对不上的原因（空 = 没问题）：生产必须连主网、不能有测试环境专用的变量；测试环境必须连 Nile。只说变量名，不说值
+# .env 每一行只能是"变量名=值"（或注释、空行）。docker compose 还认 "export X=…"、"X = …"、行首空格这些写法，
+# 而这里的 envval 只认最简单的写法：两边读法不一样就可能放过实际是 nile 或带着测试变量的配置，所以这类行直接拒绝（只报行号）
+env_bad_lines() {
+  [ -f "$TOPUP_DIR/.env" ] || return 0
+  awk '/^[[:space:]]*(#|$)/ { next } !/^[A-Za-z_][A-Za-z0-9_]*=/ { printf "%s%d", (n++ ? "、" : ""), NR }' "$TOPUP_DIR/.env"
+}
+env_refusal() {
+  local net k bad
+  bad=$(env_bad_lines)
+  [ -z "$bad" ] || { echo ".env 第 ${bad} 行写法不对（只能是 变量名=值：不要 export、等号两边不要空格、行首不要空格）"; return; }
+  net=$(envval TRON_NETWORK)
+  if [ "$(topup_env)" = production ]; then
+    [ "$net" = mainnet ] || { echo "生产必须连 TRON 主网：.env 里 TRON_NETWORK 要是 mainnet（现在是 ${net:-空的}）"; return; }
+    for k in $TEST_ONLY_KEYS; do
+      [ -z "$(envval "$k")" ] || { echo "生产的 .env 里不能有 $k（测试环境专用；应用也会拒绝启动）"; return; }
+    done
+  else
+    [ "$net" = nile ] || echo "测试环境只能连 TRON 测试网：.env 里 TRON_NETWORK 要是 nile（现在是 ${net:-空的}）"
+  fi
+}
+refusal_next() {
+  case "$1" in
+    *TEST_ADMIN_TOKEN_SHA256*) echo "sudo topup test-admin-off 删掉它，再运行同一条命令" ;;
+    *TEST_MERCHANT_IP_BYPASS*) echo "sudo topup test-merchant-ip-off 删掉它，再运行同一条命令" ;;
+    *写法不对*) echo "把那几行改成 变量名=值 的写法（sudo nano $TOPUP_DIR/.env），再运行同一条命令" ;;
+    *) echo "截图发运维（不要自己改环境：测试环境和生产要分开两台机器）" ;;
+  esac
+}
+# 会重建 web、worker 之前都要过这一关（install、start、update、自动换回、rollback、set / set-key 之后的生效）
+env_guard() {
+  local why; why=$(env_refusal)
+  [ -z "$why" ] || die "${why}；${1:-TopUP 没有动}" "$(refusal_next "$why")"
+}
+
+# TOPUP_REAL_IP_FROM 的一段：IPv4（前缀 16～32）或 IPv6（前缀 48～128），不写前缀 = 单个地址；
+# 不能和 Docker 默认地址池 172.17.0.0～172.31.255.255 重叠（端口转发经过 docker-proxy 时 Nginx 看到的来源在这里面，信任它等于信任所有人带的请求头）
+ipv4_int() {
+  local IFS=. o n=0 parts
+  read -ra parts <<< "$1"
+  [ "${#parts[@]}" = 4 ] || return 1
+  for o in "${parts[@]}"; do
+    [[ $o =~ ^[0-9]{1,3}$ ]] && [ $((10#$o)) -le 255 ] || return 1
+    n=$(( n * 256 + 10#$o ))
+  done
+  echo "$n"
+}
+ipv6_ok() {
+  local a=$1 left right g n=0 groups=()
+  [[ $a =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+  if [[ $a == *::* ]]; then
+    left=${a%%::*}; right=${a#*::}
+    [[ $right != *::* ]] || return 1
+    [ -z "$left" ] || { IFS=: read -ra g <<< "$left"; groups+=("${g[@]}"); [[ $left != *: ]] || return 1; }
+    [ -z "$right" ] || { IFS=: read -ra g <<< "$right"; groups+=("${g[@]}"); [[ $right != :* && $right != *: ]] || return 1; }
+    [ "${#groups[@]}" -le 7 ] || return 1
+  else
+    IFS=: read -ra groups <<< "$a"
+    [ "${#groups[@]}" = 8 ] && [[ $a != *: ]] || return 1
+  fi
+  for g in "${groups[@]}"; do [[ $g =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1; done
+}
+realip_from_ok() {
+  local v=$1 item addr pfx n start end lo hi
+  case "$v" in '' | ,* | *, | *,,*) return 1 ;; esac
+  lo=$(ipv4_int 172.17.0.0); hi=$(ipv4_int 172.31.255.255)
+  for item in ${v//,/ }; do
+    addr=${item%%/*}; pfx=
+    [[ $item == */* ]] && { pfx=${item#*/}; [[ $pfx =~ ^[0-9]{1,3}$ ]] || return 1; pfx=$((10#$pfx)); }
+    if n=$(ipv4_int "$addr"); then
+      pfx=${pfx:-32}; [ "$pfx" -ge 16 ] && [ "$pfx" -le 32 ] || return 1
+      start=$(( n & ~((1 << (32 - pfx)) - 1) )); end=$(( start + (1 << (32 - pfx)) - 1 ))
+      [ "$end" -lt "$lo" ] || [ "$start" -gt "$hi" ] || return 1
+    elif ipv6_ok "$addr"; then
+      pfx=${pfx:-128}; [ "$pfx" -ge 48 ] && [ "$pfx" -le 128 ] || return 1
+    else
+      return 1
+    fi
+  done
+}
+
+
+# 平台网关模式的真实 IP（nginx-gateway/ 模板 include 这个文件）：deploy.env 的 TOPUP_REAL_IP_HEADER（off / X-Forwarded-For / X-Real-IP）
+# 和 TOPUP_REAL_IP_FROM（逗号分隔的网关地址段）都填了才打开；默认关（不信任任何请求头）
+realip_mode() {
+  local h f
+  h=$(dval TOPUP_REAL_IP_HEADER); f=$(dval TOPUP_REAL_IP_FROM)
+  case "$h" in X-Forwarded-For | X-Real-IP) [ -n "$f" ] && { echo "$h"; return; } ;; esac
+  echo off
+}
+write_realip() {
+  local dir="$TOPUP_DIR/state/nginx" mode a
+  mkdir -p "$dir"; chmod 755 "$dir"
+  mode=$(realip_mode)
+  {
+    echo "# 由 deploy/kit/topup.sh 按 deploy.env 生成，不要手改（改用 sudo topup set TOPUP_REAL_IP_HEADER / TOPUP_REAL_IP_FROM）"
+    if [ "$mode" = off ]; then
+      echo "# 真实 IP：关（不信任任何请求头；应用看到的访客 IP 都是平台网关的地址）"
+      echo "# 第一道限流：所有访客共用网关的地址，按 IP 的额度等于全站的额度，所以放宽成只防整站被打满（每秒 200 个、瞬间多 400 个、同时 512 个连接）"
+      echo "limit_req_zone \$binary_remote_addr zone=topup_req:10m rate=200r/s;"
+      echo "limit_conn_zone \$binary_remote_addr zone=topup_conn:10m;"
+      echo "limit_req zone=topup_req burst=400 nodelay;"
+      echo "limit_conn topup_conn 512;"
+    else
+      for a in $(dval TOPUP_REAL_IP_FROM | tr ',' ' '); do echo "set_real_ip_from $a;"; done
+      echo "real_ip_header $mode;"
+      echo "real_ip_recursive on;"
+      echo "# 第一道限流（按访客的真实 IP，和测试环境一样）：每个 IP 每秒 20 个，瞬间最多多出 200 个；同时 100 个连接"
+      echo "limit_req_zone \$binary_remote_addr zone=topup_req:10m rate=20r/s;"
+      echo "limit_conn_zone \$binary_remote_addr zone=topup_conn:10m;"
+      echo "limit_req zone=topup_req burst=200 nodelay;"
+      echo "limit_conn topup_conn 100;"
+    fi
+  } > "$dir/realip.conf.new"
+  chmod 644 "$dir/realip.conf.new"
+  mv "$dir/realip.conf.new" "$dir/realip.conf"
+}
+# 改了真实 IP 的设置以后：写 realip.conf → 运行中的 Nginx 里 nginx -t → reload → 经 Nginx 的端口查健康检查。
+# 任何一步不通过：deploy.env 的这一项、realip.conf 都换回原来的（再 reload 一次），退出码 1
+apply_realip() {
+  local key=$1 old=$2 conf="$TOPUP_DIR/state/nginx/realip.conf" bak port body i
+  bak=$(mktemp); [ -f "$conf" ] && cp "$conf" "$bak"
+  write_realip
+  if [ -f "$TOPUP_DIR/state/stopped" ] || [ ! -s "$TOPUP_DIR/state/image.env" ]; then rm -f "$bak"; ok "TopUP 现在没有在运行，下次启动时生效"; return 0; fi
+  realip_undo() {
+    VAL="$old" env_write "$key" "$TOPUP_DIR/deploy.env"
+    if [ -s "$bak" ]; then cp "$bak" "$conf"; chmod 644 "$conf"; else write_realip; fi
+    rm -f "$bak"
+    compose exec -T nginx nginx -s reload >> "$LOG" 2>&1 || true
+    die "$1；已换回原来的 $key 和 Nginx 设置" "截图发运维（日志 $LOG）"
+  }
+  compose exec -T nginx nginx -t >> "$LOG" 2>&1 || realip_undo "Nginx 不接受新的设置（nginx -t 没通过）"
+  compose exec -T nginx nginx -s reload >> "$LOG" 2>&1 || realip_undo "Nginx 重新加载设置失败"
+  port=$(dval TOPUP_HTTP_PORT); body=""
+  for i in 1 2 3 4 5; do
+    body=$(curl -s --max-time 5 "http://127.0.0.1:$port/api/health/" 2> /dev/null || true)
+    app_alive "$body" "$(cur_tag)" && break
+    body=""; [ -n "$DRILL" ] || sleep 2
+  done
+  [ -n "$body" ] || realip_undo "改了以后经 Nginx 的端口 $port 健康检查没有通过"
+  rm -f "$bak"
+  ok "已生效。真实 IP：$(realip_mode)$( [ "$(realip_mode)" = off ] && echo '（关；两项都填了才开）')"
+}
+
+
 
 # ---------- 部署工具包 ----------
 # 从镜像里取出 /topup-kit（compose.yml、nginx、kit）放到 $TOPUP_DIR/kit；.env、deploy.env、data、state、backup 不动
@@ -189,20 +391,25 @@ sync_kit() {
 switch_to() {
   printf 'IMAGE_TAG=%s\n' "$1" > "$TOPUP_DIR/state/image.env.new"
   mv "$TOPUP_DIR/state/image.env.new" "$TOPUP_DIR/state/image.env"
+  ! gateway || write_realip
   compose up -d --remove-orphans >> "$LOG" 2>&1
 }
 
-# 本机只留最近 5 个版本的镜像（正在用的和上一个不删）
+# 本机只留最近几个版本的镜像：正在用的、上一个，再加 TOPUP_KEEP_IMAGES 个（测试环境 3、生产 1，deploy/profiles/）；
+# 环境标签（staging、production）不删——它和某个提交号是同一个镜像，删标签也省不了空间
 prune_images() {
-  local image cur prev n=0 tag
+  local image cur prev n=0 tag keep
   image=$(dval TOPUP_IMAGE); cur=$(cur_tag); prev=$(cat "$TOPUP_DIR/state/previous" 2> /dev/null || true)
+  keep=$(pval TOPUP_KEEP_IMAGES 5)
   for tag in $(docker image ls "$image" --format '{{.Tag}}'); do
-    [ "$tag" = staging ] && continue
+    case "$tag" in staging | production | '<none>') continue ;; esac
+    [ "$tag" != "$cur" ] && [ "$tag" != "$prev" ] || continue
     n=$((n + 1))
-    if [ "$n" -gt 5 ] && [ "$tag" != "$cur" ] && [ "$tag" != "$prev" ]; then docker image rm "$image:$tag" > /dev/null 2>&1 || true; fi
+    [ "$n" -gt "$keep" ] && docker image rm "$image:$tag" > /dev/null 2>&1 || true
   done
   docker image prune -f > /dev/null 2>&1 || true
 }
+
 
 # ---------- 发邮件（用应用自己的发信设置：.env 的 MAIL_FROM、MAIL_TO、Resend 或 SMTP；测试环境标题自动带"[测试环境]"）----------
 send_mail() {
@@ -221,46 +428,78 @@ console.log("sent");' 2>> "$LOG")
 
 # ---------- install：第一次部署（一条命令）----------
 cmd_install() {
-  local domain=${1:-} email=${2:-} image=${TOPUP_IMAGE:-} f pub resolved others p tag new
+  local domain=${1:-} email=${2:-} image=${TOPUP_IMAGE:-} f pub resolved others p tag new env gw port had name track
   start_log install
-  say "TopUP 测试环境第一次部署（$(date '+%F %T %Z')）"
-  [ -n "$domain" ] && [ -n "$email" ] || die "要写域名和证书提醒邮箱：sudo topup install <域名> <邮箱>"
+  env=${ENV_ARG:-staging}; gw=$GW_ARG; port=$PORT_ARG
+  case "$env" in staging) name=测试环境 ;; production) name=生产 ;; *) die "TOPUP_ENV 只能是 staging 或 production（现在是 $env）" ;; esac
+  say "TopUP ${name}第一次部署（$(date '+%F %T %Z')）"
+  # 环境写进 deploy.env 以后就固定了：测试环境装过的机器不能直接改成生产（反过来也一样），什么都不改
+  had=$(dval TOPUP_ENV)
+  [ -z "$had" ] || [ "$had" = "$env" ] || die "这台机器已经按 ${had} 部署过，不能直接改成 ${env}（什么都没有改）" \
+    "测试环境和生产要分开两台机器；确实要重装，截图发运维（要先备份、清空 $TOPUP_DIR，数据会丢）"
+  case "$gw" in '' | platform) ;; *) die "TOPUP_GATEWAY 只能是 platform（平台网关模式）或者不写" ;; esac
+  if [ -n "$had" ] && [ "$(dval TOPUP_GATEWAY)" != "$gw" ]; then
+    die "这台机器部署时的网关模式是「$(dval TOPUP_GATEWAY || true)」，这次是「${gw}」，不能直接改（什么都没有改）" "用第一次部署的那条命令；要改截图发运维"
+  fi
+  if [ -n "$gw" ]; then
+    port=${port:-8080}
+    printf '%s' "$port" | grep -Eq '^[1-9][0-9]{0,4}$' && [ "$port" -le 65535 ] || die "TOPUP_HTTP_PORT 要是端口号（例如 8080）"
+    [ "$port" != 18080 ] || die "18080 是部署脚本看健康检查用的端口，TOPUP_HTTP_PORT 换一个（例如 8080）"
+    [ -z "$had" ] || [ "$(dval TOPUP_HTTP_PORT)" = "$port" ] || die "这台机器部署时的端口是 $(dval TOPUP_HTTP_PORT)，这次是 ${port}（什么都没有改）" "用第一次部署的那条命令"
+    [ -n "$domain" ] || die "要写平台发布的主机名：install <主机名>（例如 ${port}-xxxx.<平台域名>，不要 https:// 和斜杠）"
+  else
+    [ -n "$domain" ] && [ -n "$email" ] || die "要写域名和证书提醒邮箱：sudo topup install <域名> <邮箱>"
+  fi
   printf '%s' "$domain" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$' \
     || die "域名写法不对（只写域名，不要 https:// 和斜杠）"
   [ -n "$image" ] || image=$(dval TOPUP_IMAGE)
   [ -n "$image" ] || die "不知道镜像在哪里（TOPUP_IMAGE）" "用部署方案里给的那条完整命令"
+  track=$env
 
-  # 第 1 步：软件
+  # 第 1 步：软件。机器上已经有 Docker 时不重装、不改 Docker 的设置、不重启 Docker（会把机器上别的容器一起重启）
   if [ -n "$DRILL" ]; then
     ok "第 1 步：软件——演练模式，跳过"
   else
-    . /etc/os-release
-    [ "${VERSION_ID:-}" = "24.04" ] || detail "提醒：本脚本按 Ubuntu 24.04 编写，这台是 ${PRETTY_NAME:-未知}"
-    local need=()
-    command -v docker > /dev/null || need+=(docker.io docker-compose-v2)
-    # rclone 只有打开异地备份时才要（backup 会提示安装），默认不装
-    for p in certbot age jq curl openssl; do command -v "$p" > /dev/null || need+=("$p"); done
+    local os_id os_ver os_name
+    os_id=$(sed -n 's/^ID=//p' "$OS_RELEASE" 2> /dev/null | tr -d '"')
+    os_ver=$(sed -n 's/^VERSION_ID=//p' "$OS_RELEASE" 2> /dev/null | tr -d '"')
+    os_name=$(sed -n 's/^PRETTY_NAME=//p' "$OS_RELEASE" 2> /dev/null | tr -d '"')
+    case "$os_id $os_ver" in
+      "ubuntu 24.04" | "debian 13") ;;
+      *) detail "提醒：本脚本按 Ubuntu 24.04、Debian 13 编写，这台是 ${os_name:-未知}" ;;
+    esac
+    local need=() fresh_docker=""
+    if ! command -v docker > /dev/null; then
+      need+=(docker.io)
+      # Ubuntu 的 compose 插件包叫 docker-compose-v2，Debian 13 叫 docker-compose
+      [ "$os_id" = debian ] && need+=(docker-compose) || need+=(docker-compose-v2)
+      fresh_docker=1
+    fi
+    # rclone 只有打开异地备份时才要（backup 会提示安装），默认不装；平台网关模式不要 certbot
+    for p in age jq curl openssl; do command -v "$p" > /dev/null || need+=("$p"); done
+    [ -n "$gw" ] || command -v certbot > /dev/null || need+=(certbot)
     if [ "${#need[@]}" -gt 0 ]; then
       say "  … 第 1 步：安装 ${need[*]}（约 1～3 分钟）"
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -q >> "$LOG" 2>&1 && apt-get install -y -q "${need[@]}" >> "$LOG" 2>&1 || die "第 1 步：安装软件失败" "等 1 分钟再粘贴同一条命令；还不行就截图"
     fi
     docker compose version > /dev/null 2>&1 || die "第 1 步：没有 docker compose" "截图发运维"
-    if [ ! -f /etc/docker/daemon.json ]; then
+    # 只有这次刚装的 Docker 才写日志大小的设置并重启（那时机器上还没有别的容器）
+    if [ -n "$fresh_docker" ] && [ ! -f /etc/docker/daemon.json ]; then
       echo '{ "log-driver": "json-file", "log-opts": { "max-size": "50m", "max-file": "3" } }' > /etc/docker/daemon.json
       systemctl restart docker >> "$LOG" 2>&1
     fi
-    ok "第 1 步：软件（Docker $(docker --version | awk '{print $3}' | tr -d ,)、certbot、age、jq）"
+    ok "第 1 步：软件（Docker $(docker --version | awk '{print $3}' | tr -d ,)${fresh_docker:+，这次新装}$([ -n "$gw" ] || echo '、certbot')、age、jq）"
   fi
 
-  # 第 2 步：取部署工具包（镜像 staging 标签里的 /topup-kit）
+  # 第 2 步：取部署工具包（镜像 <环境> 标签里的 /topup-kit）
   mkdir -p "$TOPUP_DIR"/{state,logs,backup,data/postgres,data/redis,data/blobs}
   chmod 700 "$TOPUP_DIR/state" "$TOPUP_DIR/backup"
   # web、worker 在镜像里用 node（uid 1000）运行，开户文件目录要能写
   chown 1000:1000 "$TOPUP_DIR/data/blobs"
-  pull "$image:staging" || die "第 2 步：下载镜像失败" "确认镜像已经公开（或已登录镜像仓库），再粘贴同一条命令"
-  sync_kit "$image:staging" || die "第 2 步：从镜像取部署工具包失败" "截图发运维"
-  ok "第 2 步：部署工具包（$KIT${DRILL:+；演练模式}）"
+  pull "$image:$track" || die "第 2 步：下载镜像 :$track 失败" "确认镜像已经公开（或已登录镜像仓库）$([ "$track" = production ] && echo '、并且已经有一次合并到 main 经管理员批准推出了 :production')，再粘贴同一条命令"
+  sync_kit "$image:$track" || die "第 2 步：从镜像取部署工具包失败" "截图发运维"
+  ok "第 2 步：部署工具包（$KIT，镜像标签 :$track${DRILL:+；演练模式}）"
 
   # 第 3 步：两个配置文件。已有的值不覆盖；内部口令随机生成、不显示
   for f in .env deploy.env; do [ -f "$TOPUP_DIR/$f" ] || { : > "$TOPUP_DIR/$f"; }; chmod 600 "$TOPUP_DIR/$f"; done
@@ -269,60 +508,78 @@ cmd_install() {
     f=${line%%=*}
     # 这几项由部署决定（compose.yml 的 environment），不放进 .env；GIT_COMMIT 空着会盖掉镜像里的提交号
     case " $MANAGED_KEYS " in *" $f "*) continue ;; esac
+    # 测试环境专用的变量不放进生产的 .env（空行也不放，免得以为能填）
+    [ "$env" = production ] && case " $TEST_ONLY_KEYS " in *" $f "*) continue ;; esac
     grep -q "^$f=" "$TOPUP_DIR/.env" || echo "$f=" >> "$TOPUP_DIR/.env"
   done < "$KIT/kit/app.env.example"
   set_default() { [ -n "$(envval "$1" "$3")" ] || VAL="$2" env_write "$1" "$3"; }
   set_default TOPUP_DIR "$TOPUP_DIR" "$TOPUP_DIR/deploy.env"
   set_default TOPUP_IMAGE "$image" "$TOPUP_DIR/deploy.env"
-  set_default TOPUP_ENV staging "$TOPUP_DIR/deploy.env"
+  set_default TOPUP_ENV "$env" "$TOPUP_DIR/deploy.env"
   set_default DOMAIN "$domain" "$TOPUP_DIR/deploy.env"
-  set_default CERT_EMAIL "$email" "$TOPUP_DIR/deploy.env"
-  set_default CERT_NAME "$CERT_NAME" "$TOPUP_DIR/deploy.env"
-  set_default LE_DIR "$LE_DIR" "$TOPUP_DIR/deploy.env"
-  set_default WEBROOT_DIR "$WEBROOT_DIR" "$TOPUP_DIR/deploy.env"
+  if [ -n "$gw" ]; then
+    set_default TOPUP_GATEWAY "$gw" "$TOPUP_DIR/deploy.env"
+    set_default TOPUP_HTTP_PORT "$port" "$TOPUP_DIR/deploy.env"
+    # 真实 IP 默认关：实测平台网关带的是哪个请求头、从哪些地址来之后再开（deploy/README.md 第 7 节）
+    set_default TOPUP_REAL_IP_HEADER off "$TOPUP_DIR/deploy.env"
+    grep -q '^TOPUP_REAL_IP_FROM=' "$TOPUP_DIR/deploy.env" || echo "TOPUP_REAL_IP_FROM=" >> "$TOPUP_DIR/deploy.env"
+  else
+    set_default CERT_EMAIL "$email" "$TOPUP_DIR/deploy.env"
+    set_default CERT_NAME "$CERT_NAME" "$TOPUP_DIR/deploy.env"
+    set_default LE_DIR "$LE_DIR" "$TOPUP_DIR/deploy.env"
+    set_default WEBROOT_DIR "$WEBROOT_DIR" "$TOPUP_DIR/deploy.env"
+  fi
   set_default POSTGRES_PASSWORD "$(rand 24)" "$TOPUP_DIR/deploy.env"
   set_default REDIS_PASSWORD "$(rand 24)" "$TOPUP_DIR/deploy.env"
   set_default BACKUP_OFFSITE off "$TOPUP_DIR/deploy.env"
   for k in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY BACKUP_AGE_RECIPIENT; do grep -q "^$k=" "$TOPUP_DIR/deploy.env" || echo "$k=" >> "$TOPUP_DIR/deploy.env"; done
   backup_identity > /dev/null || die "第 3 步：生成本机备份的加密密钥失败" "截图发运维"
-  set_default TRON_NETWORK nile "$TOPUP_DIR/.env"
+  set_default TRON_NETWORK "$([ "$env" = production ] && echo mainnet || echo nile)" "$TOPUP_DIR/.env"
   # 主密钥：派生全部加密、签名密钥，换了以后旧数据解不开。只生成一次，不显示（加密备份里有它）
   set_default APP_SECRET "$(rand 32)" "$TOPUP_DIR/.env"
   set_default ADMIN_SETUP_TOKEN "$(rand 16)" "$TOPUP_DIR/.env"
   [ "$(dval DOMAIN)" = "$domain" ] || die "第 3 步：这台服务器已经配过别的域名 $(dval DOMAIN)" "要换域名先截图发运维"
-  [ "$(dval TOPUP_ENV)" = staging ] && [ "$(envval TRON_NETWORK)" = nile ] || die "第 3 步：deploy.env 里 TOPUP_ENV 不是 staging 或 .env 里 TRON_NETWORK 不是 nile" "测试环境只能连测试网；截图发运维"
-  ok "第 3 步：配置文件（内部口令、主密钥已随机生成，不显示；已有的值没有动）"
+  [ "$(dval TOPUP_ENV)" = "$env" ] || die "第 3 步：deploy.env 里 TOPUP_ENV 不是 $env" "截图发运维"
+  local why; why=$(env_refusal)
+  [ -z "$why" ] || die "第 3 步：$why；TopUP 没有启动" "$(refusal_next "$why")"
+  ok "第 3 步：配置文件（${name}，TRON_NETWORK=$(envval TRON_NETWORK)；内部口令、主密钥已随机生成，不显示；已有的值没有动）"
 
-  # 第 4 步：别的项目（同一时间只运行一个项目）
+  # 第 4 步：别的项目。测试环境同一时间只运行一个项目（停掉别的）；生产从不停别的项目，只报出名字
   others=$(other_projects)
-  for p in $others; do
-    if project_running "$p"; then
-      say "  … 第 4 步：停 $p（停定时器 → 停应用 → 它自己的备份 → 停数据库，数据都保留，约 1～2 分钟）"
-      stop_other "$p"
-      case $? in
-        0) ok "第 4 步：已停 $p（要换回去：先 sudo topup stop，再按 $p 自己的方法启动）" ;;
-        2) die "第 4 步：$p 的备份失败，已把 $p 恢复运行，TopUP 没有启动" "截图发运维" ;;
-        *) die "第 4 步：停 $p 失败" "截图发运维" ;;
-      esac
-    fi
-  done
-  [ -z "$others" ] && ok "第 4 步：没有别的项目在这台服务器上"
-  local busy; busy=$(port_busy_by_others)
-  [ -z "$busy" ] || die "第 4 步：80 / 443 端口被别的容器占着：$(echo "$busy" | awk '{print $1}' | tr '\n' ' ')" "截图发运维"
+  if [ "$env" = production ]; then
+    local running; running=$(others_running)
+    if [ -n "$running" ]; then ok "第 4 步：这台机器上还有别的项目在运行：${running% }（生产不停别的项目，只提醒；第 5 步按实际剩下的内存检查）"
+    else ok "第 4 步：没有别的项目在运行"; fi
+  else
+    for p in $others; do
+      if project_running "$p"; then
+        say "  … 第 4 步：停 $p（停定时器 → 停应用 → 它自己的备份 → 停数据库，数据都保留，约 1～2 分钟）"
+        stop_other "$p"
+        case $? in
+          0) ok "第 4 步：已停 $p（要换回去：先 sudo topup stop，再按 $p 自己的方法启动）" ;;
+          2) die "第 4 步：$p 的备份失败，已把 $p 恢复运行，TopUP 没有启动" "截图发运维" ;;
+          *) die "第 4 步：停 $p 失败" "截图发运维" ;;
+        esac
+      fi
+    done
+    [ -z "$others" ] && ok "第 4 步：没有别的项目在这台服务器上"
+  fi
+  check_ports "第 4 步："
 
   # 第 5 步：内存和磁盘（容器上限之和 + 余量要低于可用内存）
-  local avail free_gb
-  if project_running topup; then avail=$(( $(mem_avail_mb) + $(docker stats --no-stream --format '{{.MemUsage}}' $(docker ps -q --filter label=com.docker.compose.project=topup) 2> /dev/null | awk '{v=$1; if (v ~ /GiB/) {sub(/GiB/,"",v); s+=v*1024} else if (v ~ /MiB/) {sub(/MiB/,"",v); s+=v} else if (v ~ /KiB/) {sub(/KiB/,"",v); s+=v/1024}} END {print int(s)}') ))
-  else avail=$(mem_avail_mb); fi
-  [ -n "${TOPUP_DRILL_MEM_MB:-}" ] && avail=$TOPUP_DRILL_MEM_MB
-  [ "$avail" -ge $((LIMITS_MB + RESERVE_MB)) ] || die "第 5 步：内存不够：可用 ${avail} MB，TopUP 需要 $((LIMITS_MB + RESERVE_MB)) MB" "截图（含 free -m）发运维；可能要先停别的程序，或者加一台服务器（部署方案第 7 节）"
+  local avail free_gb limits
+  limits=$(limits_mb)
+  avail=$(avail_for_topup)
+  [ "$avail" -ge $((limits + RESERVE_MB)) ] || die "第 5 步：内存不够：可用 ${avail} MB，TopUP 需要 $((limits + RESERVE_MB)) MB" "截图（含 free -m）发运维；可能要先停别的程序，或者加一台服务器（部署方案第 7 节）"
   free_gb=$(df -BG --output=avail "$TOPUP_DIR" | tail -1 | tr -dc 0-9)
   [ -n "${TOPUP_DRILL_DISK_GB:-}" ] && free_gb=$TOPUP_DRILL_DISK_GB
   [ "$free_gb" -ge 5 ] || die "第 5 步：磁盘只剩 ${free_gb} GB（至少要 5 GB）" "截图发运维"
-  ok "第 5 步：内存可用 ${avail} MB（容器上限合计 ${LIMITS_MB} MB）、磁盘剩 ${free_gb} GB"
+  ok "第 5 步：内存可用 ${avail} MB（容器上限合计 ${limits} MB）、磁盘剩 ${free_gb} GB"
 
-  # 第 6 步：证书
-  if [ -f "$LE_DIR/live/$CERT_NAME/fullchain.pem" ]; then
+  # 第 6 步：证书（平台网关模式由平台做 TLS，这里不申请、不生成）
+  if [ -n "$gw" ]; then
+    ok "第 6 步：HTTPS 证书——平台网关负责（这台机器只开普通 HTTP 端口 $port，不申请证书）"
+  elif [ -f "$LE_DIR/live/$CERT_NAME/fullchain.pem" ]; then
     ok "第 6 步：HTTPS 证书——已有，跳过"
   elif [ -n "$DRILL" ]; then
     mkdir -p "$LE_DIR/live/$CERT_NAME" "$WEBROOT_DIR"
@@ -340,28 +597,30 @@ cmd_install() {
     ok "第 6 步：HTTPS 证书（Let's Encrypt，$domain）"
   fi
 
-  # 第 7 步：启动 staging 最新版本
+  # 第 7 步：启动 <环境> 标签指向的版本
   tag=$(cur_tag)
-  new=$(revision "$image:staging")
+  new=$(revision "$image:$track")
   [ -n "$new" ] || die "第 7 步：镜像里没有版本号" "截图发运维"
   if [ "$tag" = "$new" ] && app_alive "$(health_json)" "$new"; then
     ok "第 7 步：启动——版本 ${new:0:7} 已经在运行，跳过"
   else
     say "  … 第 7 步：启动版本 ${new:0:7}（第一次要初始化数据库，约 1～3 分钟）"
-    docker tag "$image:staging" "$image:$new" >> "$LOG" 2>&1
+    docker tag "$image:$track" "$image:$new" >> "$LOG" 2>&1
     switch_to "$new" || die "第 7 步：docker compose 启动失败" "截图发运维（日志 $LOG）"
     wait_alive "$new" || die "第 7 步：3 分钟内健康检查没有通过" "sudo topup status 截图发运维"
     ok "第 7 步：已启动版本 ${new:0:7}，健康检查通过"
   fi
 
-  # 第 8 步：证书改为经 Nginx 续期；打开定时器
+  # 第 8 步：证书改为经 Nginx 续期（平台网关模式没有证书）；打开定时器
   if [ -z "$DRILL" ]; then
-    certbot reconfigure -n --cert-name "$CERT_NAME" --webroot -w "$WEBROOT_DIR" \
-      --deploy-hook "docker exec topup-nginx-1 nginx -s reload" >> "$LOG" 2>&1 || detail "提醒：证书续期方式没有改成功（不影响现在使用），截图发运维"
+    if [ -z "$gw" ]; then
+      certbot reconfigure -n --cert-name "$CERT_NAME" --webroot -w "$WEBROOT_DIR" \
+        --deploy-hook "docker exec topup-nginx-1 nginx -s reload" >> "$LOG" 2>&1 || detail "提醒：证书续期方式没有改成功（不影响现在使用），截图发运维"
+    fi
     cp "$KIT"/kit/systemd/topup-*.service "$KIT"/kit/systemd/topup-*.timer /etc/systemd/system/
     systemctl daemon-reload
     systemctl enable --now topup-update.timer topup-backup.timer topup-watch.timer >> "$LOG" 2>&1 || die "第 8 步：打开定时器失败" "截图发运维"
-    ok "第 8 步：自动更新（每分钟）、每天备份、每 5 分钟检查已打开；证书自动续期"
+    ok "第 8 步：自动更新（每分钟看 :$track）、每天备份、每 5 分钟检查已打开$([ -n "$gw" ] || echo '；证书自动续期')"
   else
     ok "第 8 步：定时器——演练模式，跳过"
   fi
@@ -369,20 +628,38 @@ cmd_install() {
   summary
 }
 
+# 给 TopUP 用的可用内存（MB）：TopUP 已经在运行时，把它自己正在用的也算进去（重复运行 install 不会因为自己占着而失败）
+avail_for_topup() {
+  local avail
+  if project_running topup; then avail=$(( $(mem_avail_mb) + $(docker stats --no-stream --format '{{.MemUsage}}' $(docker ps -q --filter label=com.docker.compose.project=topup) 2> /dev/null | awk '{v=$1; if (v ~ /GiB/) {sub(/GiB/,"",v); s+=v*1024} else if (v ~ /MiB/) {sub(/MiB/,"",v); s+=v} else if (v ~ /KiB/) {sub(/KiB/,"",v); s+=v/1024}} END {print int(s)}') ))
+  else avail=$(mem_avail_mb); fi
+  [ -n "${TOPUP_DRILL_MEM_MB:-}" ] && avail=$TOPUP_DRILL_MEM_MB
+  echo "$avail"
+}
+
 summary() {
-  local body
+  local body env
+  env=$(topup_env)
   body=$(health_json)
   say ""
   say "======== 摘要（不含任何密钥，可以直接截图）========"
   say "地址：https://$(dval DOMAIN)/"
-  say "版本：$(cur_tag | cut -c1-7)    环境：$(jq -r '.env // "?"' <<< "$body" 2> /dev/null)"
+  say "版本：$(cur_tag | cut -c1-7)    环境：$(jq -r '.env // "?"' <<< "$body" 2> /dev/null)    镜像标签：:$(track)"
   say "健康检查：$(jq -c '{ok, db, storage, secret, blob, mail, mailMode, pay, worker}' <<< "$body" 2> /dev/null || echo 没有响应)"
   say "还没填的（只列名字）：$(missing_list)"
   say "默认关着的功能："
   say "  · 邮件：填好 MAIL_FROM、MAIL_TO 和 RESEND_API_KEY（或 SMTP）之前不发任何邮件，告警也发不出"
-  say "  · ETH、BSC：ETH_RPC_URL / BSC_RPC_URL 没填、合约地址没进 config/wallets.json 之前不开通"
-  say "  · TRON 合约钱包：config/wallets.json 的 staging.tron 没填之前不开通；归集要 SWEEP_OPERATOR_KEY_TRON"
-  say "  · 异地备份：测试环境不开（D6），备份只加密保存在这台服务器上；整台服务器丢了备份也跟着丢"
+  if [ "$env" = production ]; then
+    say "  · 收付款：config/wallets.json 的 production 一节合约地址全空，ETH、BSC、TRON 三条链都没开通（健康检查 not_enabled）——先搭起来，不算上线"
+    say "  · 异地备份：关（备份只加密保存在这台机器上；整台机器丢了备份也跟着丢）"
+    if gateway; then
+      say "  · 真实 IP：$( [ "$(realip_mode)" = off ] && echo '关——应用看到的访客 IP 都是平台网关的地址：按 IP 限流大家共用一个额度，商户 IP 白名单在生产上未验证、不能用；实测网关后再开（deploy/README.md 第 7 节）' || echo "开（$(realip_mode)，只认 $(dval TOPUP_REAL_IP_FROM) 来的）")"
+    fi
+  else
+    say "  · ETH、BSC：ETH_RPC_URL / BSC_RPC_URL 没填、合约地址没进 config/wallets.json 之前不开通"
+    say "  · TRON 合约钱包：config/wallets.json 的 staging.tron 没填之前不开通；归集要 SWEEP_OPERATOR_KEY_TRON"
+    say "  · 异地备份：测试环境不开（D6），备份只加密保存在这台服务器上；整台服务器丢了备份也跟着丢"
+  fi
   say "下一步：按部署方案的清单用 sudo topup set-key 变量名 填密钥；sudo topup status 随时看状态。"
 }
 
@@ -400,16 +677,20 @@ cmd_update() {
   start_log update
   exec 9> "$TOPUP_DIR/state/update.lock"
   flock -n 9 || exit 0
-  local image new cur
-  image=$(dval TOPUP_IMAGE)
+  local image new cur track why
+  image=$(dval TOPUP_IMAGE); track=$(track)
   [ -f "$TOPUP_DIR/state/stopped" ] && { rm -f "$LOG"; exit 0; }
-  pull "$image:staging" || { note "下载 staging 镜像失败"; exit 1; }
-  new=$(revision "$image:staging"); cur=$(cur_tag)
-  [ -n "$new" ] || { note "staging 镜像没有版本号"; exit 1; }
+  # 跟着本环境的标签（测试环境 :staging、生产 :production），不看别的环境
+  pull "$image:$track" || { note "下载 $track 镜像失败"; exit 1; }
+  new=$(revision "$image:$track"); cur=$(cur_tag)
+  [ -n "$new" ] || { note "$track 镜像没有版本号"; exit 1; }
   # 没有新版本、或者这个版本失败过（state/skip）：什么都不做，也不留日志
   if [ "$new" = "$cur" ] || [ "$new" = "$(cat "$TOPUP_DIR/state/skip" 2> /dev/null)" ]; then rm -f "$LOG"; exit 0; fi
   note "发现新版本 $new（当前 ${cur:-无}）"
-  docker tag "$image:staging" "$image:$new" >> "$LOG" 2>&1
+  # .env 和环境对不上（生产里有测试变量、TRON 网络不对）：新旧版本都起不来，不换版本，等人处理（watch 会发邮件）
+  why=$(env_refusal)
+  [ -z "$why" ] || { note "不更新：$why"; exit 1; }
+  docker tag "$image:$track" "$image:$new" >> "$LOG" 2>&1
   sync_kit "$image:$new" || { note "取部署工具包失败"; exit 1; }
   [ -z "$cur" ] || bash "$KIT/kit/topup.sh" backup "before-${new:0:7}" >> "$LOG" 2>&1 || note "更新前备份失败（继续更新）"
   switch_to "$new"
@@ -422,7 +703,9 @@ cmd_update() {
   note "更新失败：$new。web 最后 50 行日志："
   compose logs --no-color --tail 50 web worker >> "$LOG" 2>&1 || true
   echo "$new" > "$TOPUP_DIR/state/skip"
-  if [ -n "$cur" ]; then
+  if [ -n "$cur" ] && [ -n "$(env_refusal)" ]; then
+    note "没有自动换回：$(env_refusal)"
+  elif [ -n "$cur" ]; then
     sync_kit "$image:$cur" >> "$LOG" 2>&1 || true
     switch_to "$cur"
     if wait_alive "$cur"; then note "已自动换回 $cur"; else note "换回 $cur 后仍然没有通过健康检查，需要人工处理"; fi
@@ -449,6 +732,7 @@ cmd_rollback() {
   cur=$(cur_tag); prev=$(cat "$TOPUP_DIR/state/previous" 2> /dev/null || true)
   [ -n "$prev" ] || die "没有上一个版本可以换回" "截图发运维"
   [ "$prev" != "$cur" ] || die "上一个版本就是现在这个" "截图发运维"
+  env_guard "没有换回（.env 不对时哪个版本都起不来）"
   say "  … 换回 ${prev:0:7}（当前 ${cur:0:7}，换回后不再自动更新到 ${cur:0:7}）"
   echo "$cur" > "$TOPUP_DIR/state/skip"
   sync_kit "$(dval TOPUP_IMAGE):$prev" || die "取上一个版本的部署工具包失败" "截图发运维"
@@ -504,7 +788,7 @@ cmd_backup() {
       detail "异地备份打开了但没配好（R2_… 或备份公钥没填），这次只在本机"; offsite=not_configured
     elif ! command -v rclone > /dev/null; then
       detail "异地备份要 rclone：sudo apt-get install -y rclone，这次只在本机"; offsite=not_configured
-    elif r2 copyto "$out" "r2:$(dval R2_BUCKET)/topup-staging/$(basename "$out")" >> "$LOG" 2>&1; then
+    elif r2 copyto "$out" "r2:$(dval R2_BUCKET)/topup-$(topup_env)/$(basename "$out")" >> "$LOG" 2>&1; then
       ok "备份：已上传到 R2（只有密文）"; offsite=ok
     else
       offsite=failed
@@ -518,12 +802,13 @@ cmd_backup() {
 
 # 本机保留：7 天以上的删掉；合计超过 BACKUP_MAX_MB 时从最旧的删起；无论如何至少留最新 3 份
 backup_prune() {
-  local f total n=0
+  local f total n=0 max
+  max=${TOPUP_BACKUP_MAX_MB:-$(pval TOPUP_BACKUP_MAX_MB 2048)}
   total=$(du -ck "$TOPUP_DIR"/backup/topup-*.tar.age 2> /dev/null | tail -1 | cut -f1)
   while read -r f; do
     [ -n "$f" ] || continue
     n=$((n + 1)); [ "$n" -gt 3 ] || continue
-    if [ -n "$(find "$f" -mtime +7)" ] || [ "${total:-0}" -gt $((BACKUP_MAX_MB * 1024)) ]; then
+    if [ -n "$(find "$f" -mtime +7)" ] || [ "${total:-0}" -gt $((max * 1024)) ]; then
       total=$(( total - $(du -k "$f" | cut -f1) )); rm -f "$f"
     fi
   done <<< "$(ls -1t "$TOPUP_DIR"/backup/topup-*.tar.age 2> /dev/null)"
@@ -571,9 +856,9 @@ cmd_restore_drill() {
   trap "docker rm -f topup-drill-pg topup-drill-redis > /dev/null 2>&1; rm -rf '$tmp'" EXIT
   if [ "$src" = "--from-r2" ]; then
     local name
-    name=$(r2 lsf "r2:$(dval R2_BUCKET)/topup-staging/" 2>> "$LOG" | sort | tail -1)
+    name=$(r2 lsf "r2:$(dval R2_BUCKET)/topup-$(topup_env)/" 2>> "$LOG" | sort | tail -1)
     [ -n "$name" ] || die "R2 里没有找到备份" "先 sudo topup backup，确认上传成功"
-    r2 copyto "r2:$(dval R2_BUCKET)/topup-staging/$name" "$tmp/b.tar.age" >> "$LOG" 2>&1 || die "从 R2 下载失败"
+    r2 copyto "r2:$(dval R2_BUCKET)/topup-$(topup_env)/$name" "$tmp/b.tar.age" >> "$LOG" 2>&1 || die "从 R2 下载失败"
     [ -r /dev/tty ] || die "这里不能输入（没有终端）" "在云控制台的'远程连接'终端里运行"
     echo "请粘贴备份私钥（AGE-SECRET-KEY- 开头那一行），然后按回车（屏幕上不显示）：" > /dev/tty
     key=$(mktemp -p /dev/shm 2> /dev/null || mktemp); chmod 600 "$key"
@@ -626,7 +911,7 @@ cmd_restore_drill() {
 
 # ---------- watch：每 5 分钟检查一次，状态变化时发邮件（问题不变不重复发）----------
 watch_problems() {
-  local body p=() used avail age
+  local body p=() used avail age free_gb why
   body=$(health_json)
   if [ -z "$body" ]; then p+=("web 没有响应")
   else
@@ -635,6 +920,9 @@ watch_problems() {
   fi
   used=$(df --output=pcent "$TOPUP_DIR" | tail -1 | tr -dc 0-9)
   [ "${used:-0}" -lt 85 ] || p+=("磁盘已用 ${used}%")
+  # 小磁盘（生产 16 GB）：按百分比还没到 85% 时剩余空间可能已经放不下一次更新（新镜像 + 更新前备份）
+  free_gb=$(df -BG --output=avail "$TOPUP_DIR" | tail -1 | tr -dc 0-9)
+  [ "${free_gb:-99}" -ge 2 ] || p+=("磁盘只剩 ${free_gb} GB（不够下一次更新）")
   avail=$(mem_avail_mb)
   [ "$avail" -ge 100 ] || p+=("可用内存只剩 ${avail} MB")
   if [ -f "$TOPUP_DIR/state/last-backup.json" ]; then
@@ -643,7 +931,10 @@ watch_problems() {
     [ "$(jq -r .r2 "$TOPUP_DIR/state/last-backup.json")" != failed ] || p+=("上一次上传 R2 失败")
     [ "$(jq -r .local "$TOPUP_DIR/state/last-backup.json")" = encrypted ] || p+=("上一次备份没有加密（旧版本留下的，sudo topup backup 重做一次）")
   fi
+  # 环境和 .env 对不上（例如生产的 TRON_NETWORK 被改成了 nile）
+  why=$(env_refusal); [ -z "$why" ] || case "$why" in *TEST_*) ;; *) p+=("$why") ;; esac
   # 测试管理员只在测试环境：不是测试环境的服务器 .env 里有它（应用会拒绝启动）
+
   [ "$(dval TOPUP_ENV)" = staging ] || [ -z "$(envval TEST_ADMIN_TOKEN_SHA256)" ] || p+=(".env 里有 TEST_ADMIN_TOKEN_SHA256，但这台不是测试环境（应用会拒绝启动）：sudo topup test-admin-off")
   [ "$(dval TOPUP_ENV)" = staging ] || [ -z "$(envval TEST_MERCHANT_IP_BYPASS)" ] || p+=(".env 里有 TEST_MERCHANT_IP_BYPASS，但这台不是测试环境（应用会拒绝启动）：sudo topup test-merchant-ip-off")
   [ ! -f "$TOPUP_DIR/state/skip" ] || p+=("版本 $(cut -c1-7 "$TOPUP_DIR/state/skip") 更新失败、不再重试（sudo topup retry）")
@@ -674,7 +965,7 @@ $now
 cmd_status() {
   start_log status
   local body
-  say "== TopUP（$TOPUP_DIR）"
+  say "== TopUP（$TOPUP_DIR）：$( [ "$(topup_env)" = production ] && echo 生产 || echo 测试环境)，镜像标签 :$(track)$(gateway && echo "，平台网关模式（本机端口 $(dval TOPUP_HTTP_PORT)）")"
   detail "版本：$(cur_tag | cut -c1-7)    上一个：$(cut -c1-7 "$TOPUP_DIR/state/previous" 2> /dev/null || echo 无)    不再重试：$(cut -c1-7 "$TOPUP_DIR/state/skip" 2> /dev/null || echo 无)"
   [ ! -f "$TOPUP_DIR/state/stopped" ] || detail "已用 sudo topup stop 停下（sudo topup start 重新启动）"
   docker ps -a --filter label=com.docker.compose.project=topup --format '    {{.Names}}  {{.Status}}' | tee -a "$LOG"
@@ -683,6 +974,7 @@ cmd_status() {
   detail "钱包：$(jq -c '.wallet // {}' <<< "$body" 2> /dev/null)"
   [ "$(dval TOPUP_ENV)" != staging ] || detail "测试管理员：$(jq -r 'if .test_admin == true then "开着（sudo topup test-admin-off 关）" else "关着（sudo topup gen-test-admin 开）" end' <<< "$body" 2> /dev/null)"
   [ "$(dval TOPUP_ENV)" != staging ] || detail "测试商户免 IP 白名单：$(jq -r 'if .test_merchant_ip_bypass == true then "开着（sudo topup test-merchant-ip-off 关）" else "关着（sudo topup set TEST_MERCHANT_IP_BYPASS 商户编号 开）" end' <<< "$body" 2> /dev/null)"
+  ! gateway || detail "真实 IP：$( [ "$(realip_mode)" = off ] && echo '关（访客 IP 都是平台网关的地址；按 IP 限流共用一个额度，商户 IP 白名单在生产上未验证、不能用）' || echo "开（$(realip_mode)，只认 $(dval TOPUP_REAL_IP_FROM) 来的）")"
   detail "还没填的：$(missing_list)"
   detail "备份：$(cat "$TOPUP_DIR/state/last-backup.json" 2> /dev/null || echo 还没有)    恢复演练：$(cat "$TOPUP_DIR/state/last-drill.json" 2> /dev/null || echo 还没有)"
   [ -f "$LE_DIR/live/$CERT_NAME/fullchain.pem" ] && detail "证书到期：$(openssl x509 -enddate -noout -in "$LE_DIR/live/$CERT_NAME/fullchain.pem" | cut -d= -f2)"
@@ -706,14 +998,25 @@ cmd_keys() {
   detail "BACKUP_AGE_RECIPIENT     $([ -n "$(dval BACKUP_AGE_RECIPIENT)" ] && echo 已生成 || echo '未生成（只有打开异地备份才要：sudo topup backup-key）')"
   detail "TEST_ADMIN_TOKEN_SHA256  $([ -n "$(envval TEST_ADMIN_TOKEN_SHA256)" ] && echo '已生成（测试管理员开着；sudo topup test-admin-off 关）' || echo '未生成（只在测试环境用：sudo topup gen-test-admin）')"
 }
+# 改了要重建 web、worker 的设置（写进 .env 的）：.env 现在就和环境对不上时什么都不改（改了也起不来）
+guard_before_change() {
+  case "$DEPLOY_KEYS" in *" $1 "*) return 0 ;; esac
+  env_guard "什么都没有改（这一项要重建 web、worker 才生效，带着这样的 .env 起不来）"
+}
 key_file() { case "$DEPLOY_KEYS" in *" $1 "*) echo "$TOPUP_DIR/deploy.env" ;; *) echo "$TOPUP_DIR/.env" ;; esac; }
 key_value() { envval "$1" "$(key_file "$1")"; }
 
 # 填写后：应用正在运行就重建 web、worker 让它生效，再看健康检查
 apply_env() {
   local key=$1 body
+  case "$key" in
+    TOPUP_REAL_IP_HEADER | TOPUP_REAL_IP_FROM)
+      apply_realip "$key" "${2:-}"
+      return 0 ;;
+  esac
   case "$DEPLOY_KEYS" in *" $key "*) ok "下一次备份开始使用（可以 sudo topup backup 立刻试一次）"; return 0 ;; esac
   if [ -f "$TOPUP_DIR/state/stopped" ] || [ ! -s "$TOPUP_DIR/state/image.env" ]; then ok "TopUP 现在没有在运行，下次启动时生效"; return 0; fi
+  env_guard "已经写进 .env，但没有重建 web、worker"
   say "  … 让它生效（重建 web、worker，数据不动，约 1 分钟）"
   compose up -d web worker >> "$LOG" 2>&1 || die "重建容器失败" "截图发运维"
   wait_alive "$(cur_tag)" || die "改了以后 3 分钟内健康检查没有通过" "截图发运维；也可以再运行一次 set-key 换回原来的值"
@@ -753,6 +1056,13 @@ check_value() {
       printf '%s' "$val" | grep -Eq '^[^@]+@[^@]+\.[^@]+$' || die "$key 应该是一个邮箱地址；什么都没有改" ;;
     BACKUP_OFFSITE)
       case "$val" in off | r2) ;; *) die "BACKUP_OFFSITE 只能是 off（默认，只在本机）或 r2；什么都没有改" ;; esac ;;
+    TOPUP_REAL_IP_HEADER)
+      gateway || die "只在平台网关模式用（这台不是）；什么都没有改"
+      case "$val" in off | X-Forwarded-For | X-Real-IP) ;; *) die "TOPUP_REAL_IP_HEADER 只能是 off、X-Forwarded-For、X-Real-IP（按实测网关带的那个填）；什么都没有改" ;; esac ;;
+    TOPUP_REAL_IP_FROM)
+      gateway || die "只在平台网关模式用（这台不是）；什么都没有改"
+      realip_from_ok "$val" \
+        || die "TOPUP_REAL_IP_FROM 不合格；什么都没有改" "填网关的地址或地址段，多个用逗号隔开（不要空格、结尾不要逗号）；IPv4 前缀 16～32、IPv6 前缀 48～128；不能和 Docker 默认网段 172.17.0.0～172.31.255.255 重叠" ;;
     TEST_MERCHANT_IP_BYPASS)
       [ "$(dval TOPUP_ENV)" = staging ] || die "只用于测试环境；生产不能有这一项（应用会拒绝启动），什么都没有改"
       printf '%s' "$val" | grep -Eq '^[A-Za-z0-9_-]{1,64}$' || die "TEST_MERCHANT_IP_BYPASS 应该是一个商户编号（例如运营后台商户列表里 m_ 开头的那一列）；什么都没有改" ;;
@@ -775,6 +1085,7 @@ cmd_set_key() {
   val=$(printf '%s' "$val" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   [ -n "$val" ] || { say "没有输入，什么都没有改。"; exit 0; }
   check_value "$key" "$val"
+  guard_before_change "$key"
   file=$(key_file "$key")
   if [ "$(envval "$key" "$file")" = "$val" ]; then unset val; say "和原来的值一样，没有改。"; exit 0; fi
   VAL="$val" env_write "$key" "$file"
@@ -791,11 +1102,14 @@ cmd_set() {
   [ -f "$TOPUP_DIR/.env" ] || die "还没有部署过" "先粘贴第一次部署的那条命令"
   [ -n "$val" ] || die "要写值，例如：sudo topup set $key 值"
   check_value "$key" "$val"
+  guard_before_change "$key"
   file=$(key_file "$key")
-  [ "$(envval "$key" "$file")" != "$val" ] || { say "和原来的值一样，没有改。"; exit 0; }
+  local old; old=$(envval "$key" "$file")
+  [ "$old" != "$val" ] || { say "和原来的值一样，没有改。"; exit 0; }
   VAL="$val" env_write "$key" "$file"
   ok "已设置 $key=$val"
-  apply_env "$key"
+  apply_env "$key" "$old"
+
 }
 
 # 第一次进运营后台要的初始化口令：只显示在终端上（不进日志）；初始化完成后它就没用了（后台会拒绝再次初始化）
@@ -921,23 +1235,33 @@ cmd_stop() {
   fi
   ok "第 2 步：已备份"
   compose stop >> "$LOG" 2>&1 || die "停数据库失败" "截图发运维"
-  ok "第 3 步：数据库和 Redis 已停。数据都保留；80、443 端口已空出。重新启动：sudo topup start"
+  ok "第 3 步：数据库和 Redis 已停。数据都保留；端口 $(public_ports | sed 's/ /、/g') 已空出。重新启动：sudo topup start"
 }
 
 cmd_start() {
   start_log start
-  local p busy avail
-  for p in $(other_projects); do
-    if project_running "$p"; then
-      say "  … 先停 $p（定时器 → 应用 → 它的备份 → 数据库）"
-      stop_other "$p" || die "停 $p 失败或它的备份失败（已恢复它）" "截图发运维"
-      ok "已停 $p"
-    fi
-  done
-  busy=$(port_busy_by_others); [ -z "$busy" ] || die "80 / 443 被占着：$(echo "$busy" | awk '{print $1}' | tr '\n' ' ')" "截图发运维"
-  avail=$(mem_avail_mb); [ -n "${TOPUP_DRILL_MEM_MB:-}" ] && avail=$TOPUP_DRILL_MEM_MB
-  [ "$avail" -ge $((LIMITS_MB + RESERVE_MB)) ] || die "内存不够：可用 ${avail} MB，需要 $((LIMITS_MB + RESERVE_MB)) MB" "截图发运维"
+  local p avail limits running
+  [ -s "$TOPUP_DIR/state/image.env" ] || die "还没有部署过" "先粘贴第一次部署的那条命令"
+  env_guard "TopUP 没有启动"
+
+  if [ "$(topup_env)" = production ]; then
+    # 生产从不停别的项目
+    running=$(others_running)
+    [ -z "$running" ] || ok "这台机器上还有别的项目在运行：${running% }（生产不停别的项目，只提醒）"
+  else
+    for p in $(other_projects); do
+      if project_running "$p"; then
+        say "  … 先停 $p（定时器 → 应用 → 它的备份 → 数据库）"
+        stop_other "$p" || die "停 $p 失败或它的备份失败（已恢复它）" "截图发运维"
+        ok "已停 $p"
+      fi
+    done
+  fi
+  check_ports ""
+  limits=$(limits_mb); avail=$(avail_for_topup)
+  [ "$avail" -ge $((limits + RESERVE_MB)) ] || die "内存不够：可用 ${avail} MB，需要 $((limits + RESERVE_MB)) MB" "截图发运维"
   rm -f "$TOPUP_DIR/state/stopped"
+  ! gateway || write_realip
   compose up -d >> "$LOG" 2>&1 || die "启动失败" "截图发运维"
   wait_alive "$(cur_tag)" || die "3 分钟内健康检查没有通过" "sudo topup status 截图发运维"
   [ -n "$DRILL" ] || systemctl enable --now topup-update.timer topup-backup.timer topup-watch.timer >> "$LOG" 2>&1 || true
@@ -948,7 +1272,16 @@ usage() {
   echo "用法（都要 sudo）："; sed -n 's/^#   \(sudo topup .*\)/  \1/p' "$0"
 }
 
-[ "$(id -u)" = 0 ] || { echo "✗ 请用 sudo 运行，例如：sudo topup status"; exit 1; }
+# 要 root（服务器上部署目录在 /opt 下）。只有部署目录（还没有时看它的上一级）当前用户本来就能写时才不要求——开发机、CI 上的测试用临时目录
+if [ "$(id -u)" != 0 ]; then
+  if [ -d "$TOPUP_DIR" ]; then [ -w "$TOPUP_DIR" ]; else [ -w "$(dirname "$TOPUP_DIR")" ]; fi \
+    || { echo "✗ 请用 sudo 运行，例如：sudo topup status"; exit 1; }
+fi
+# 环境写进 deploy.env 以后就固定了：命令行带的 TOPUP_ENV 和它不一样就停下（install 自己核对，还会核对网关模式和端口）
+if [ "${1:-}" != install ] && [ -n "$ENV_ARG" ] && [ -n "$(dval TOPUP_ENV)" ] && [ "$ENV_ARG" != "$(dval TOPUP_ENV)" ]; then
+  echo "✗ 这台机器是按 $(dval TOPUP_ENV) 部署的，命令里却写了 TOPUP_ENV=$ENV_ARG；什么都没有做"; exit 1
+fi
+
 command -v jq > /dev/null || [ "${1:-}" = install ] || { echo "✗ 没有 jq，先重新粘贴第一次部署的那条命令"; exit 1; }
 cmd=${1:-help}; shift || true
 case "$cmd" in
