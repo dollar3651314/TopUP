@@ -98,7 +98,8 @@ test('Q-B3 单笔一单一审：通过后对外 approved；超单笔上限的不
   for (let i = 0; i < 6; i++) five.push((await req(db, m1, { chain: 'bsc', to: evm(), amount: 5000 * U })).withdrawal_no);
   const r2 = await p.approvePayouts(db, { ids: five, actor: 'admin' });
   assert.equal(r2.approved.length, 5);
-  assert.deepEqual(r2.refused.map((x) => x.reason), ['exceeds_daily_limit']);
+  // v1.1：这里只有一个商户，商户每天和全平台每天都是 30,000，先碰到商户每天上限（两道都超时先报商户，见 test/qa-v11-daily-limit.test.js）
+  assert.deepEqual(r2.refused.map((x) => x.reason), ['exceeds_merchant_daily_limit']);
 });
 
 test('Q-B4 商户批量：逐行勾选一次审完——勾的通过、其余驳回（原因必填），驳回的逐笔退冻结、逐笔回调，批次"部分被驳回"', async () => {
