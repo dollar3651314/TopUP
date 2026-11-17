@@ -4,7 +4,9 @@
 // 二、升级前初始化的管理员记录（topup:admin 里没有 sid）：只认同样没有标识的 Cookie；退出登录时补上标识。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSession, readSession, newAdminSid } from '../server/kyb/auth.js';
@@ -44,4 +46,27 @@ test('升级前的管理员记录（没有 sid）：没有标识的 Cookie 照�
   assert.ok(readSession(key, `topup_admin=${fresh}`, { version: 1, sid }, now + 1000));
   assert.equal(readSession(key, `topup_admin=${fresh}`, { version: 1, sid: newAdminSid() }, now + 1000), null, '别的标识');
   assert.equal(readSession(key, `topup_admin=${fresh}`, { version: 1 }, now + 1000), null, '记录没有标识时不认带标识的 Cookie');
+});
+
+// 三、worker 暂停时（state/worker-hold）只查一次的"活着"（真实 IP 的 set 之后经 Nginx 的核对）只看 web，和 wait_alive 一样
+const fnOf = (name) => {
+  const i = src.indexOf(`${name}() {`); assert.ok(i >= 0, `topup.sh 里有 ${name}`);
+  const eol = src.indexOf('\n', i);
+  return src.slice(i, eol).trimEnd().endsWith('}') ? src.slice(i, eol + 1) : src.slice(i, src.indexOf('\n}\n', i) + 3); // 一行的函数 / 多行的函数
+};
+test('alive_now：worker 暂停时只看 web（worker 心跳旧、没有 commit 也算活着）；没暂停时和 app_alive 一样；真实 IP 的核对用它', () => {
+  const lib = ['app_alive', 'worker_held', 'web_alive', 'alive_now'].map(fnOf).join('\n');
+  const dir = mkdtempSync(join(tmpdir(), 'p1-hold-'));
+  try {
+    mkdirSync(join(dir, 'state'));
+    const run = (b) => spawnSync('bash', ['-c', `HOLD_REL=state/worker-hold\n${lib}\nalive_now "$1" "$2"`, 'x', b, T], { encoding: 'utf8', env: { ...process.env, TOPUP_DIR: dir } }).status === 0;
+    const stale = body({ age_s: 4000, ok: false, commit: null });
+    assert.equal(run(stale), false, '没暂停：worker 没报到不算活着');
+    assert.equal(run(body({ age_s: 0, ok: true, commit: T.slice(0, 7) })), true, '没暂停：新 worker 报到');
+    writeFileSync(join(dir, 'state/worker-hold'), 'reason=restore\n');
+    assert.equal(run(stale), true, '暂停中：只看 web');
+    assert.equal(run(body({ age_s: 4000, ok: false, commit: null }, OLDV.slice(0, 7))), false, '暂停中：web 的提交号仍然要对得上');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+  const realip = src.slice(src.indexOf('改了以后经 Nginx 的端口') - 600, src.indexOf('改了以后经 Nginx 的端口'));
+  assert.match(realip, /alive_now "\$body" "\$\(cur_tag\)"/, '真实 IP 的核对用 alive_now（不是 app_alive）');
 });

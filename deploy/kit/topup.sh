@@ -178,6 +178,8 @@ web_alive() {
   [ -z "$want" ] || [ "$(jq -r '.commit // empty' <<< "$body" 2> /dev/null)" = "${want:0:7}" ] || return 1
   jq -e '.db == true and .storage == true and .secret == true and (.wallet | type) == "object" and .wallet.error == null' <<< "$body" > /dev/null 2>&1
 }
+# 只查一次的"活着"（不等）：worker 暂停时只看 web，和 wait_alive 一样
+alive_now() { if worker_held; then web_alive "$1" "${2:-}"; else app_alive "$@"; fi; }
 # 启动 / 重建全部容器；worker 暂停时不建 worker（--scale worker=0）
 compose_up() { if worker_held; then compose up -d --remove-orphans --scale worker=0 "$@"; else compose up -d --remove-orphans "$@"; fi; }
 wait_alive() {
@@ -391,7 +393,7 @@ apply_realip() {
   port=$(dval TOPUP_HTTP_PORT); body=""
   for i in 1 2 3 4 5; do
     body=$(curl -s --max-time 5 "http://127.0.0.1:$port/api/health/" 2> /dev/null || true)
-    app_alive "$body" "$(cur_tag)" && break
+    alive_now "$body" "$(cur_tag)" && break
     body=""; [ -n "$DRILL" ] || sleep 2
   done
   [ -n "$body" ] || realip_undo "改了以后经 Nginx 的端口 $port 健康检查没有通过"
