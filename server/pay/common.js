@@ -82,7 +82,7 @@ export function parseIsoTime(v, field) {
   if (!m) throw bad();
   const [y, mo, d, h, mi, s = 0] = m.slice(1, 7).map((x) => Number(x || 0));
   const frac = (m[7] || '').padEnd(6, '0');
-  if (y < 1970 || mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || s > 59) throw bad();
+  if (mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || s > 59) throw bad();
   if (new Date(Date.UTC(y, mo - 1, d)).getUTCDate() !== d) throw bad(); // 2 月 30 日之类
   let off = 0;
   if (m[9]) {
@@ -91,7 +91,7 @@ export function parseIsoTime(v, field) {
     off = (m[9] === '-' ? -1 : 1) * (oh * 60 + om) * 60_000;
   }
   const sec = Date.UTC(y, mo - 1, d, h, mi, s) - off; // 整秒（毫秒数）
-  if (!Number.isFinite(sec) || sec < 0) throw bad();
+  if (!Number.isFinite(sec) || sec < 0) throw bad(); // 换成 UTC 后早于 1970 年的也拒（所以要先算时区再比）
   return { us: sec * 1000 + Number(frac), sql: `${new Date(sec).toISOString().slice(0, 19)}.${frac}Z` };
 }
 /**
@@ -112,12 +112,21 @@ export function timeRange(q, nowMs, { always = false } = {}) {
 }
 /** 从早到晚翻页的游标：上一页最后一条的（时间，编号），时间保留到微秒；对外是不透明字符串 */
 export const encodeCursor = (t, id) => Buffer.from(JSON.stringify([t, String(id)])).toString('base64url');
-export function decodeCursor(c) {
-  try {
-    const [t, id] = JSON.parse(Buffer.from(String(c), 'base64url').toString('utf8'));
-    if (typeof t !== 'string' || typeof id !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(t)) throw new Error('bad');
-    return { t, id };
-  } catch { throw new PayError('invalid_param', 422, 'cursor'); }
+const CURSOR_ID = { bigint: /^\d{1,18}$/, text: /^[A-Za-z0-9_-]{1,64}$/ };
+/** 解开游标；被改过的（解不开、时间不是真实日期、编号格式不对）→ 422 invalid_param（field cursor），不让它跑到数据库报 500 */
+export function decodeCursor(c, idCast = 'bigint') {
+  const bad = () => new PayError('invalid_param', 422, 'cursor');
+  let t, id;
+  try { [t, id] = JSON.parse(Buffer.from(String(c), 'base64url').toString('utf8')); } catch { throw bad(); }
+  if (typeof t !== 'string' || typeof id !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(t) || !(CURSOR_ID[idCast] || CURSOR_ID.text).test(id)) throw bad();
+  try { parseIsoTime(t, 'cursor'); } catch { throw bad(); }
+  return { t, id };
+}
+/** 旧接口（不带时间段）的数字游标：只认 maxDigits 位以内的数字，别的 → 422 invalid_param（field cursor） */
+export function numCursor(c, maxDigits = 15) {
+  const s = String(c);
+  if (!new RegExp(`^\\d{1,${maxDigits}}$`).test(s)) throw new PayError('invalid_param', 422, 'cursor');
+  return Number(s);
 }
 /** select 里取出微秒精度的 UTC 时间字符串（游标用） */
 export const usText = (col) => `to_char(${col} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
@@ -128,13 +137,16 @@ export const usText = (col) => `to_char(${col} at time zone 'UTC', 'YYYY-MM-DD"T
 export async function rangePage(db, { table, timeCol, idCast, where, vals, range, cursor, limit }) {
   vals = [...vals];
   const p = (v) => { vals.push(v); return `$${vals.length}`; };
-  if (range.from) where += ` and ${timeCol} >= ${p(range.from)}::timestamptz`;
-  where += ` and ${timeCol} < ${p(range.to)}::timestamptz`;
+  // 时间一律按文本传进去再在库里转（$n::text::timestamptz）：直接写 $n::timestamptz 时数据库驱动会把参数当时间、
+  // 先在程序里转成 Date 再发，微秒被截成毫秒（区间边界和游标都会错位）
+  const ts = (v) => `${p(v)}::text::timestamptz`;
+  if (range.from) where += ` and ${timeCol} >= ${ts(range.from)}`;
+  where += ` and ${timeCol} < ${ts(range.to)}`;
   if (cursor) {
-    // 游标那一条的时间直接从库里取（记录的创建时间不会变），不靠游标里的时间字符串来回转换；那一条查不到时才用游标里的时间
-    const c = decodeCursor(cursor);
+    // 游标那一条的时间直接从库里取（记录的创建时间不会变）；那一条查不到时才用游标里的时间
+    const c = decodeCursor(cursor, idCast);
     const id = p(c.id);
-    where += ` and (${timeCol}, id) > (coalesce((select ${timeCol} from ${table} where id = ${id}::${idCast} and merchant_id = $1), ${p(c.t)}::timestamptz), ${id}::${idCast})`;
+    where += ` and (${timeCol}, id) > (coalesce((select ${timeCol} from ${table} where id = ${id}::text::${idCast} and merchant_id = $1), ${ts(c.t)}), ${id}::text::${idCast})`;
   }
   const rows = await db.query(`select *, ${usText(timeCol)} as cursor_t from ${table} where ${where} order by ${timeCol}, id limit ${p(limit + 1)}`, vals);
   const more = rows.length > limit;

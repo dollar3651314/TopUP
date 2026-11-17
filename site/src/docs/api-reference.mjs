@@ -158,8 +158,8 @@ const RANGE = (what) => [
   ['to', 'time', false, ['End of the period, exclusive. Default: now. The period [from, to) is at most 31 days', '结束时间（不含）；不传时 = 现在。区间是 [from, to)，一次最多 31 天']],
 ];
 const RANGE_NOTE = (extra = ['', '']) => [
-  `With from or to: the period is [from, to) (from included, to excluded, so consecutive periods neither overlap nor leave gaps), at most 31 days, results oldest first (ties by ID), and records arriving while you page do not change pages already read. Missing time zone, invalid date, from later than to, or more than 31 days → 422 invalid_param (error.field = from or to). Without from and to the order stays as before: newest first.${extra[0]}`,
-  `带 from 或 to 时：区间是 [from, to)（含 from、不含 to，相邻两段首尾相接不重不漏），一次最多 31 天，从早到晚排（时间相同按编号），翻页途中新进的记录不改变已翻过的页。没带时区、日期不对、from 晚于 to、超过 31 天 → 422 invalid_param（error.field 是 from 或 to）。from、to 都不带时顺序和以前一样：从新到旧。${extra[1]}`,
+  `With from or to: the period is [from, to) (from included, to excluded), at most 31 days, results oldest first (ties by ID), and records arriving while you page do not change pages already read. A record's time is when it was created, but it only becomes visible when its transaction commits, so a record committed a moment late can carry a slightly earlier time than records you have already read. For reconciliation, query periods that ended at least 5 minutes ago: for those, consecutive periods [from, to) neither overlap nor leave gaps. Missing time zone, invalid date, from later than to, or more than 31 days → 422 invalid_param (error.field = from or to). Without from and to the order stays as before: newest first.${extra[0]}`,
+  `带 from 或 to 时：区间是 [from, to)（含 from、不含 to），一次最多 31 天，从早到晚排（时间相同按编号），翻页途中新进的记录不改变已翻过的页。记录的时间是它创建的时间，但要等所在的数据库事务提交后才查得到，所以晚一点提交的记录，时间可能比你已经查到的记录还早一点。对账时请查已经结束至少 5 分钟的时间段：这样的时间段 [from, to) 首尾相接时不重不漏。没带时区、日期不对、from 晚于 to、超过 31 天 → 422 invalid_param（error.field 是 from 或 to）。from、to 都不带时顺序和以前一样：从新到旧。${extra[1]}`,
 ];
 const PAGING = [
   ['cursor', 'string', false, ['next_cursor from the previous page', '上一页返回的 next_cursor']],
@@ -199,6 +199,7 @@ export const ENDPOINTS = [
       ...PAGING,
     ],
     returns: ['OrderListItem'], list: true,
+    note: ['Newest first.', '从新到旧。'],
   },
   {
     method: 'POST', path: 'orders/match/', title: ['Match a deposit to an order', '手动匹配'],
@@ -237,6 +238,7 @@ export const ENDPOINTS = [
     method: 'GET', path: 'customers/list/', title: ['List customers', '客户列表'],
     query: [['q', 'string', false, ['Search by customer ID, name or email (partial, case-insensitive), or by exact address', '按客户标识、名称或邮箱搜索（部分匹配，不区分大小写），或按地址精确搜索']], ...PAGING],
     returns: ['Customer'], list: true,
+    note: ['Newest first.', '从新到旧。'],
   },
   {
     method: 'GET', path: 'customers/stats/', title: ['Customer statistics', '客户统计'],

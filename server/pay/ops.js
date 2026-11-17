@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { encryptJson, decryptJson } from '../kyb/crypto.js';
 import * as core from './core.js';
 import { PayError, CUSTOMER_RE } from './core.js';
-import { parseAmount, iso, page, emailHash, rangePage } from './common.js';
+import { parseAmount, iso, page, emailHash, rangePage, numCursor } from './common.js';
 import { checkCallbackUrl } from './callbacks.js';
 import { addressFor } from '../wallet/addresses.js';
 import * as payout from './payout.js';
@@ -91,7 +91,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
     async listCustomers(m, { q = '', cursor = null, limit = 50 }) {
       const vals = [m.id];
       let where = 'merchant_id = $1';
-      if (cursor) { vals.push(new Date(Number(cursor))); where += ` and created_at < $${vals.length}`; }
+      if (cursor) { vals.push(new Date(numCursor(cursor))); where += ` and created_at < $${vals.length}`; }
       let rows;
       if (q) {
         // 按客户标识、名称、邮箱模糊搜索，或按地址精确搜索。邮箱是加密保存的：
@@ -156,7 +156,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
       let where = 'merchant_id = $1';
       if (status) { vals.push(status); where += ` and status = $${vals.length}`; }
       if (customerId) { vals.push(customerId); where += ` and customer_id = $${vals.length}`; }
-      if (cursor) { vals.push(new Date(Number(cursor))); where += ` and created_at < $${vals.length}`; }
+      if (cursor) { vals.push(new Date(numCursor(cursor))); where += ` and created_at < $${vals.length}`; }
       const rows = await db.query(`select * from orders where ${where} order by created_at desc limit $2`, vals);
       const p = page(rows.map((r) => ({ ...r, cursor: new Date(r.created_at).getTime() })), limit);
       return {
@@ -184,7 +184,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
       let p;
       if (range) p = await rangePage(db, { table: 'ledger', timeCol: 'created_at', idCast: 'bigint', where, vals, range, cursor, limit });
       else {
-        if (cursor) { vals.push(Number(cursor)); where += ` and id < $${vals.length}`; }
+        if (cursor) { vals.push(numCursor(cursor, 18)); where += ` and id < $${vals.length}`; }
         vals.push(limit + 1);
         const rows = await db.query(`select * from ledger where ${where} order by id desc limit $${vals.length}`, vals);
         p = page(rows.map((r) => ({ ...r, cursor: r.id })), limit);
@@ -203,7 +203,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
       let p;
       if (range) p = await rangePage(db, { table: 'deposits', timeCol: 'created_at', idCast: 'bigint', where, vals, range, cursor, limit });
       else {
-        if (cursor) { vals.push(Number(cursor)); where += ` and id < $${vals.length}`; }
+        if (cursor) { vals.push(numCursor(cursor, 18)); where += ` and id < $${vals.length}`; }
         vals.push(limit + 1);
         const rows = await db.query(`select * from deposits where ${where} order by id desc limit $${vals.length}`, vals);
         p = page(rows.map((r) => ({ ...r, cursor: r.id })), limit);
@@ -230,7 +230,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
     async listWithdrawals(m, { cursor = null, limit = 50 }) {
       const vals = [m.id, limit + 1];
       let where = 'merchant_id = $1';
-      if (cursor) { vals.push(new Date(Number(cursor))); where += ` and created_at < $${vals.length}`; }
+      if (cursor) { vals.push(new Date(numCursor(cursor))); where += ` and created_at < $${vals.length}`; }
       const rows = await db.query(`select id, created_at from withdrawals where ${where} order by created_at desc limit $2`, vals);
       const p = page(rows.map((r) => ({ ...r, cursor: new Date(r.created_at).getTime() })), limit);
       return { items: await Promise.all(p.items.map((w) => core.withdrawalView(db, w.id))), next_cursor: p.next_cursor };
@@ -308,7 +308,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
     async callbacks(m, { cursor = null, limit = 50 }) {
       const vals = [m.id, limit + 1];
       let where = 'merchant_id = $1';
-      if (cursor) { vals.push(new Date(Number(cursor))); where += ` and created_at < $${vals.length}`; }
+      if (cursor) { vals.push(new Date(numCursor(cursor))); where += ` and created_at < $${vals.length}`; }
       const rows = await db.query(`select id, event, status, attempts, last_code, next_at, created_at, payload from callbacks where ${where} order by created_at desc limit $2`, vals);
       const p = page(rows.map((r) => ({ ...r, cursor: new Date(r.created_at).getTime() })), limit);
       const ref = (x) => x.payload?.data?.order_no || x.payload?.data?.withdrawal_no || x.payload?.data?.customer_id || '';
