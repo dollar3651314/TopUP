@@ -174,8 +174,11 @@ rm -f "$TOPUP_DIR/state/watch"
 T watch; first=$(cat "$TOPUP_DIR/state/watch" 2> /dev/null)
 echo "    第一次检查发现：$(tr '\n' ';' <<< "$first")"
 check "第一次：发现问题（邮件、节点 Key 没配），尝试发邮件（没配邮件时只记日志）" "[ -n \"\$first\" ] && grep -rq 'mail_not_configured' '$TOPUP_DIR/logs'"
+# 两次 watch 常在同一秒里跑完：日志文件名必须每次不同，否则第二次（没变化，删自己的日志）会把第一次的日志清空并删掉，n2 比 n1 少一个
+w1=$(ls -1t "$TOPUP_DIR"/logs/watch-*.log | head -1)
 n1=$(ls "$TOPUP_DIR"/logs/watch-*.log | wc -l); T watch; n2=$(ls "$TOPUP_DIR"/logs/watch-*.log | wc -l)
 check "第二次：问题没变，不再发（不留日志）" "[ $n1 = $n2 ]"
+check "第一次的日志还在、没被清空（同一秒里跑两次也不互相覆盖）" "[ -s '$w1' ] && grep -q '状态变化' '$w1'"
 
 echo "== 场景 10：内存不够时不启动；stop / start"
 out=$(T stop 2>&1); echo "$out" | sed 's/^/    /'
