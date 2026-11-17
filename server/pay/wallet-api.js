@@ -26,18 +26,29 @@ const SIGN_CUTOFF_MS = 5 * 60 * 1000; // 交签名的截止：离原文过期不
 const VERIFY_TTL_MS = 5 * 60 * 1000; // 验证码通过后 5 分钟内必须提交签名
 const ENERGY_PER_SWEEP = 65_000; // 转 USDT 到已经有 USDT 的地址，大约需要的能量
 const USDT_FEE_LIMIT = 30 * TRX;
-const LEGACY_BUILD = new Set(['withdraw-plan', 'sweep-plan']); // 向老 TronGrid 建交易的动作
 
 /**
- * 节点出错给后台的口径（K-13）：老 TronGrid 客户端、合约钱包、以太坊 / BSC 的错一律经 nodeFailure 换成 node_busy / rpc_unreachable 503、node_error 502；
- * 老 TRON 建交易的动作（json = true）里节点回了 JSON 但没给结果（build_failed、balance_query_failed）也算 node_error 502。返回里只有错误码，不带节点地址、Key、接口路径
+ * 老 TronGrid 客户端（server/pay/trongrid.js）抛出的错打上 node = true：nodeFailure 只把带这个标记的 TypeError / SyntaxError / 超时等
+ * 换成节点错误码（K-13），别处来的同类错误（发邮件失败、数据坏了）照旧 500。方法同步返回的照旧同步返回
  */
-export function gridFailure(e, { json = false } = {}) {
-  if (json && ['build_failed', 'balance_query_failed'].includes(e?.message)) return new PayError('node_error', 502);
-  return nodeFailure(e);
+export function nodeClient(client) {
+  if (!client) return client;
+  const tag = (e) => { if (e && typeof e === 'object') { try { e.node = true; } catch { /* 冻结的对象不打标记 */ } } throw e; };
+  return new Proxy(client, {
+    get(t, k) {
+      const v = Reflect.get(t, k);
+      if (typeof v !== 'function') return v;
+      return (...args) => {
+        let r;
+        try { r = v.apply(t, args); } catch (e) { tag(e); }
+        return r && typeof r.then === 'function' ? r.catch(tag) : r;
+      };
+    },
+  });
 }
 
-export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null, payoutSvc = null }) {
+export function createWalletApi({ db, tron: rawTron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null, payoutSvc = null }) {
+  const tron = nodeClient(rawTron); // 老 TronGrid 客户端的错打上 node 标记（nodeFailure 只换节点的错）
   const payoutActions = payoutAdminActions({ db, tron, wallets, layer, payoutSvc, verifyAdminCode, now });
   const hot = wallets.hot, cold = wallets.cold;
   const need = (cond, code, status = 422, field) => { if (!cond) throw new PayError(code, status, field); };
@@ -498,7 +509,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     } catch (e) {
       if (e?.status === 401 && !/^trongrid /.test(String(e?.message || ''))) return json(401, { error: { code: 'unauthorized' } });
       // 节点出错换成 node_busy / rpc_unreachable / node_error（K-13）；老 TRON 的"核对并签名"、归集出交易：返回不是 JSON、节点没给结果也算节点的问题
-      return errorResponse(gridFailure(e, { json: LEGACY_BUILD.has(a) }));
+      return errorResponse(nodeFailure(e));
     }
   };
   handle.actions = Object.keys(actions); // 项目索引的测试用：检查每个动作都写进了《项目索引》
