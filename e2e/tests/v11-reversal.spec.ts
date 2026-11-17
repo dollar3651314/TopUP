@@ -25,7 +25,7 @@ import { totpCode, totpStep } from '../../server/kyb/totp.js';
 const B = 'http://127.0.0.1:8104';
 const U = 1_000_000;
 const ADMIN_PW = 'e2e-v11-admin-password';
-const M_EMAIL = 'finance@v11-e2e.example';
+const M_EMAIL = 'finance@v11-rev-e2e.example'; // 和 v11-daily-limit.spec.ts 用不同的邮箱：模拟邮件存在同一个文件里，按收件人找开通链接
 const M_PW = 'v11 e2e merchant password';
 const STATE = resolve(TMP, 'v11-rev-e2e.json');
 const ASTATE = resolve(TMP, 'v11-rev-e2e-admin.json'), MSTATE = resolve(TMP, 'v11-rev-e2e-merchant.json');
@@ -112,7 +112,7 @@ test.describe('TC-V11R 冲正和欠款（页面）', () => {
       return r.body.id as string;
     };
     st.ma = await open('V11 Alpha Ltd', M_EMAIL);
-    st.mb = await open('V11 Beta Ltd', 'ops@v11-beta.example');
+    st.mb = await open('V11 Beta Ltd', 'ops@v11-rev-beta.example');
     await expect.poll(() => mailsTo(M_EMAIL).length).toBeGreaterThan(0);
     const link = mailsTo(M_EMAIL)[0].match(/https?:\/\/[^\s]+\/merchant\/\?setup=[A-Za-z0-9_-]+/)![0].replace(/^https?:\/\/[^/]+/, B);
     await merchant.goto(link);
