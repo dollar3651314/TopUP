@@ -50,7 +50,7 @@ test('E07 改每天上限：改成"原值 + 0.000001"能读到新值，再原样
   await unchanged(before, '拒绝的修改');
 });
 
-test('E07 超每天上限：每天上限临时改成"今天已通过 + 0.000001"，第一笔通过、第二笔不通过（exceeds_daily_limit）', async (t) => {
+test('E07 超每天上限：每天上限临时改成"今天已通过 + 0.000001"，第一笔通过、第二笔不通过（exceeds_daily_limit；测试商户今天的已通过和全平台一样多时先碰到商户每天上限 exceeds_merchant_daily_limit）', async (t) => {
   const a = await newPayout(t, 'e07-a');
   if (!a) return;
   const b = await newPayout(t, 'e07-b');
@@ -58,13 +58,17 @@ test('E07 超每天上限：每天上限临时改成"今天已通过 + 0.000001"
   const o = await overview();
   const today = units(o.today_approved);
   assert.ok(Number.isFinite(today), '审核页给了今天已通过的合计（USDT 字符串）');
-  // 单笔 ≤ 每批 ≤ 每天：三项都设成同一个数
+  // v1.1：每个商户每天上限不能大于全平台每天，一起设；测试商户今天已通过（merchants_today）决定第二笔先碰到哪道上限
+  const mid = o.singles?.find((x) => x.id === b)?.merchant_id;
+  const mToday = units(o.merchants_today?.find((m) => m.merchant_id === mid)?.approved ?? '0');
+  const want = mToday + 2 * UNIT > today + UNIT ? 'exceeds_merchant_daily_limit' : 'exceeds_daily_limit';
+  // 单笔 ≤ 每批 ≤ 每天、商户每天 ≤ 全平台每天：四项都设成同一个数
   const cap = usdt(today + UNIT);
-  await withLimits({ perItem: cap, perBatch: cap, perDay: cap }, 'E07 超每天上限', async () => {
+  await withLimits({ perItem: cap, perBatch: cap, perDay: cap, perMerchantDay: cap }, 'E07 超每天上限', async () => {
     const r1 = ok(await admin('payout-approve', { body: { ids: [a] } }), 'payout-approve 第一笔');
     assert.ok(r1.approved?.includes(a), '第一笔通过（刚好到每天上限；这期间没有别人审核通过别的单）');
     const r2 = ok(await admin('payout-approve', { body: { ids: [b] } }), 'payout-approve 第二笔');
-    assert.ok(r2.refused?.find((x) => x.id === b)?.reason === 'exceeds_daily_limit', '第二笔超每天上限、不通过');
+    assert.ok(r2.refused?.find((x) => x.id === b)?.reason === want, `第二笔超每天上限、不通过（${want}）`);
     const o2 = await overview();
     assert.ok(o2.singles?.some((x) => x.id === b), '第二笔还在待审核里');
   });

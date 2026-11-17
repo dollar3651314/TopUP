@@ -30,7 +30,7 @@ const ids = (b) => b.items.map((i) => i.id);
 test('默认上限：单笔 5,000、每批 20,000、每天 30,000、热钱包上限 10,000、低于 2,000 提醒；一次最多 500 笔；每笔交易 ETH / BSC 100 笔、TRON 20 笔', async () => {
   const p = await load();
   assert.deepEqual(Object.fromEntries(Object.entries(p.PAYOUT_DEFAULTS).map(([k, v]) => [k, S(v)])),
-    { perItem: S(5000 * U), perBatch: S(20000 * U), perDay: S(30000 * U), hotMax: S(10000 * U), hotLow: S(2000 * U) });
+    { perItem: S(5000 * U), perBatch: S(20000 * U), perDay: S(30000 * U), perMerchantDay: S(30000 * U), hotMax: S(10000 * U), hotLow: S(2000 * U) }); // v1.1 加每个商户每天上限（默认 30,000）
   assert.equal(p.MAX_ITEMS_PER_REQUEST, 500);
   assert.deepEqual({ ...p.MAX_ITEMS_PER_TX }, { eth: 100, bsc: 100, tron: 20 });
 });
@@ -93,7 +93,8 @@ test('上限 管理员能在后台改：动态码、原因必填，审计记修�
   const db = await setupDb();
   const before = await p.getPayoutLimits(db);
   assert.equal(S(before.perBatch), S(20000 * U), '没改过时是默认值');
-  const values = { perItem: S(3000 * U), perBatch: S(8000 * U), perDay: S(25000 * U), hotMax: S(10000 * U), hotLow: S(2000 * U) };
+  // v1.1：每个商户每天上限不能大于全平台每天，全平台每天调到 25,000 时一起调
+  const values = { perItem: S(3000 * U), perBatch: S(8000 * U), perDay: S(25000 * U), perMerchantDay: S(25000 * U), hotMax: S(10000 * U), hotLow: S(2000 * U) };
   const ok = async (c) => c === '123456';
   await assert.rejects(p.updatePayoutLimits(db, { actor: 'admin', reason: '先收紧', values, code: '000000', verifyCode: ok }), (e) => e.code === 'bad_code');
   await assert.rejects(p.updatePayoutLimits(db, { actor: 'admin', reason: '  ', values, code: '123456', verifyCode: ok }), (e) => e.code === 'reason_required');
