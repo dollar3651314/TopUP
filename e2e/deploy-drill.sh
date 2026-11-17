@@ -122,6 +122,7 @@ echo "== 场景 5：自动更新到 v2（成功）"
 stage "$v2"; T update; rc=$?
 check "更新成功，健康检查提交号 = v2，上一个版本记为 v1" "[ $rc = 0 ] && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\"' > /dev/null && [ \"\$(cat '$TOPUP_DIR/state/previous')\" = '$v1' ]"
 check "更新前自动备份了一份（加密）" "ls '$TOPUP_DIR'/backup/topup-*-before-${v2:0:7}.tar.age > /dev/null 2>&1"
+check "新版本的 worker 报到了：健康检查 worker.commit = v2（不是旧 worker 留下的心跳）" "curl -s http://127.0.0.1:18080/api/health/ | jq -e '.worker.commit == \"${v2:0:7}\" and .worker.ok == true' > /dev/null"
 check "数据还在（更新前填的发起账户私钥）" "curl -s http://127.0.0.1:18080/api/health/ | jq -e '.wallet.operator == true' > /dev/null"
 
 echo "== 场景 6：自动更新到 v3（起不来 → 自动换回 v2、记下不再重试）"
@@ -187,7 +188,8 @@ docker stats --no-stream --format '    {{.Name}} {{.MemUsage}}' $(docker ps -q -
 
 echo "== 场景 11：新版本\"没活\"也要换回（web 初始化失败；新 worker 不扫链但旧 worker 的扫链时间还新鲜）"
 # vA：web 的数据库地址指向不存在的端口（db / storage / secret 照样是 true，健康检查里没有 wallet），worker 正常
-# vB：worker 容器在运行但不启动 worker（旧 worker 留下的扫链时间还在 5 分钟内）
+# vB：worker 容器在运行但不启动 worker（旧 worker 留下的扫链时间还在 5 分钟内，甚至就在开始等之前几秒）；
+#     健康检查的 worker.commit 一直是 v2（旧 worker 的心跳），和 vB 对不上 → 必须稳定判为没活
 vA=$(printf 'a%.0s' $(seq 40)); vB=$(printf 'b%.0s' $(seq 40))
 mk "$vA" 'CMD ["sh", "-c", "DATABASE_URL=postgres://topup:x@127.0.0.1:1/topup exec node server/web.js"]'
 mk "$vB" 'ENTRYPOINT ["sh", "-c", "case \"$*\" in *worker.js*) echo worker-disabled; exec sleep 3600;; esac; exec \"$@\"", "sh"]
