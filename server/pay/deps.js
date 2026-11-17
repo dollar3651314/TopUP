@@ -11,7 +11,7 @@ import { createMerchantApi } from './merchant-api.js';
 import { createPayApi } from './pay-api.js';
 import { createWalletApi, sweepProgress } from './wallet-api.js';
 import { createAdminGate } from './admin-gate.js';
-import { testAdminHash, createTestnetCheck, testMerchantIpBypass, TEST_MERCHANT_IP_BYPASS_ENV } from './test-admin.js';
+import { testAdminHash, createTestnetCheck, testMerchantIpBypass, TEST_MERCHANT_IP_BYPASS_ENV, checkTronMainnet } from './test-admin.js';
 import { runTick } from './tick.js';
 import { runDaily } from './daily.js';
 import { decryptJson } from '../kyb/crypto.js';
@@ -42,21 +42,35 @@ const WALLETS = JSON.parse(WALLETS_RAW);
 export const walletsFor = (appEnv) => WALLETS[appEnv === 'production' ? 'production' : appEnv === 'staging' ? 'staging' : 'local'];
 
 
-/** config：loadConfig() 的结果；kyb：{ redis, keys }（管理员登录）；send：发邮件；origin：站点地址（邮件里的链接） */
-export async function createPayDeps({ config, kyb, send, getIp, origin }) {
+/**
+ * config：loadConfig() 的结果；kyb：{ redis, keys }（管理员登录）；send：发邮件；origin：站点地址（邮件里的链接）；
+ * tronFetch：老 TronGrid 客户端和 TRON 合约钱包适配器用的 fetch（默认全局 fetch；测试注入替身节点，不连外网）
+ */
+export async function createPayDeps({ config, kyb, send, getIp, origin, tronFetch }) {
   const db = config.databaseUrl ? await createPgDb(config.databaseUrl) : await createLiteDb(config.localDbDir || undefined);
   await migrate(db);
-  const tron = config.fakeTron ? createFakeTron({ network: config.tronNetwork }) : createTronGrid({ network: config.tronNetwork, apiKey: config.tronApiKey, usdt: config.usdtContract || undefined });
+  // 老 TronGrid 客户端：每秒次数按 TRON_NODE_QPS（和 TRON 合约钱包的适配器各自一份额度）
+  const tron = config.fakeTron ? createFakeTron({ network: config.tronNetwork })
+    : createTronGrid({ network: config.tronNetwork, apiKey: config.tronApiKey, usdt: config.usdtContract || undefined, qps: config.tronNodeQps || undefined, ...(tronFetch ? { fetchImpl: tronFetch } : {}) });
   const keys = derivePayKeys(config.appSecret);
   await backfillEmailHash(db, { decrypt: (s) => decryptJson(keys.enc, s), hash: (e) => emailHash(keys, e) });
   const keyPrefix = config.appEnv === 'production' ? 'topup_live_' : 'topup_test_';
   const wallets = walletsFor(config.appEnv);
   // 钱包层（ETH、BSC、TRON 合约钱包；cobo、fireblocks 未开通）。TRON 一节空着时不开通 TRON 合约钱包
-  const layer = createWalletLayer({ db, config, evm: wallets.evm || {}, tron: wallets.tron || null });
+  const notifyEarly = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
+  const layer = createWalletLayer({ db, config, evm: wallets.evm || {}, tron: wallets.tron || null, tronFetch, notify: notifyEarly });
+  // 生产：TRON 节点（老 TronGrid 客户端、TRON 合约钱包的节点）按创世块核对必须是主网，不是就拒绝启动；连不上不拒绝（节点恢复后照常用）
+  if (config.appEnv === 'production' && !config.fakeTron) {
+    try {
+      const r = await checkTronMainnet({ trongrid: tron, tron_node: layer.adapters?.tron });
+      for (const [k, v] of Object.entries(r)) if (v === 'unreachable') console.warn(`[pay] TRON ${k}: genesis check skipped (node unreachable)`);
+    } catch (e) { await db.end?.().catch(() => {}); throw e; }
+  }
   const notify0 = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
   const ops = createOps({ db, keys, payBase: origin, keyPrefix, wallet: layer, notify: notify0 });
-  // 测试管理员只在测试环境、配了令牌哈希时开（server/pay/test-admin.js）；测试商户免 IP 白名单用同一套条件和同一个链 ID 核对
-  const testnetCheck = createTestnetCheck({ eth: layer.adapters?.eth, bsc: layer.adapters?.bsc });
+  // 测试管理员只在测试环境、配了令牌哈希时开（server/pay/test-admin.js）；测试商户免 IP 白名单用同一套条件和同一套核对：
+  // 以太坊 / BSC 节点的链 ID 是测试网，老 TronGrid 客户端和 TRON 合约钱包的节点的创世块是 Nile
+  const testnetCheck = createTestnetCheck({ eth: layer.adapters?.eth, bsc: layer.adapters?.bsc, grid: tron, tron: layer.adapters?.tron });
   const gate = createAdminGate({ redis: kyb.redis, kybKeys: kyb.keys, testAdminHash: testAdminHash(config), testnetCheck });
   const ipBypassId = testMerchantIpBypass(config);
   if (ipBypassId) console.warn(`[pay] ${TEST_MERCHANT_IP_BYPASS_ENV} on: one test merchant skips the open-API IP whitelist (staging + nile only; configured EVM nodes must be testnets)`);

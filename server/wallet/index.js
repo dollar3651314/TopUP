@@ -14,6 +14,7 @@ import { NETWORKS as TRONGRID } from '../pay/trongrid.js';
 import { createUnavailableProvider } from './provider.js';
 import { isEvmAddress } from './create2.js';
 import { verifyLayer } from './verify-onchain.js';
+import { TRON_GENESIS } from '../pay/test-admin.js';
 
 const DECIMALS = { eth: 6, bsc: 18 };
 
@@ -39,7 +40,11 @@ export function tronChainConfig(config, tron) {
   return { chain: 'tron', rpcUrl, usdt: tron.usdt || '', scheme, complete, confirmations: config.fakeTron ? 0 : config.tronConfirmations ?? 19, decimals: 6 };
 }
 
-export function createWalletLayer({ db, config, evm = {}, tron = null }) {
+/**
+ * tronFetch：TRON 适配器用的 fetch（默认全局 fetch；测试注入替身节点，不连外网）；
+ * notify：(主题, 正文) => Promise，生产的 TRON 节点不是主网时告警用（可以不给）
+ */
+export function createWalletLayer({ db, config, evm = {}, tron = null, tronFetch, notify = null }) {
   const cfg = chainConfig(config, evm);
   const tcfg = tronChainConfig(config, tron);
   if (tcfg) cfg.tron = tcfg;
@@ -60,7 +65,13 @@ export function createWalletLayer({ db, config, evm = {}, tron = null }) {
     try {
       adapters.tron = config.fakeTron
         ? createFakeTronAdapter({ usdt: tcfg.usdt })
-        : createTronAdapter({ base: tcfg.rpcUrl, apiKey: config.tronNodeUrl ? '' : config.tronApiKey || '', usdt: tcfg.usdt, confirmations: tcfg.confirmations });
+        : createTronAdapter({
+          base: tcfg.rpcUrl, apiKey: config.tronNodeUrl ? '' : config.tronApiKey || '', usdt: tcfg.usdt, confirmations: tcfg.confirmations,
+          qps: config.tronNodeQps || undefined, ...(tronFetch ? { fetchImpl: tronFetch } : {}),
+          // 生产：TRON_NODE_URL 可以随便填，启动时节点连不上就没核对过——第一次问到节点前先核对创世块是主网，
+          // 不是就锁住这个适配器（之后的请求一律不发）、停用 TRON 合约钱包（扫块、归集都停）并发邮件
+          ...(config.appEnv === 'production' ? { expectGenesis: TRON_GENESIS.mainnet, onGenesisMismatch: () => tronWrongNetwork() } : {}),
+        });
       chains.tron = { adapter: adapters.tron, scheme: tcfg.scheme, usdt: tcfg.usdt };
     } catch (e) { errors.tron = e.message; }
   }
@@ -90,6 +101,14 @@ export function createWalletLayer({ db, config, evm = {}, tron = null }) {
   for (const [chain, a] of Object.entries(adapters)) if (a.fake && chains[chain] && typeof a.bindSaltResolver === 'function') a.bindSaltResolver((salt) => contract.addressForSalt(chain, salt));
   const providers = { contract, cobo: createUnavailableProvider('cobo'), fireblocks: createUnavailableProvider('fireblocks') };
   const enabledChains = Object.keys(chains);
+  let tronLocked = false;
+  function tronWrongNetwork() {
+    if (tronLocked) return;
+    tronLocked = true;
+    layer.disableChain('tron', 'tron_node_not_mainnet');
+    console.error('[wallet] TRON node is not on mainnet: TRON contract wallet disabled (scan and sweep stopped)');
+    if (notify) Promise.resolve(notify('TRON 节点不是主网：已停用 TRON 合约钱包', 'TRON 合约钱包用的节点（.env 的 TRON_NODE_URL，没填时是 TronGrid）回的创世块不是 TRON 主网。\n为了不把测试网的到账记成真钱，TRON 合约钱包已停用：不再扫块、不再归集，对这个节点的请求一律不发。\n\n请检查 TRON_NODE_URL、TRON_NETWORK，改好后重启 web、worker。')).catch(() => {});
+  }
   const layer = {
     providers, config: cfg, adapters, enabledChains, errors, operatorConfigured: Boolean(config.sweepOperatorKey) || Boolean(config.fakeEvm),
     tronOperatorConfigured: Boolean(tronOperatorKey), tronEnergy,

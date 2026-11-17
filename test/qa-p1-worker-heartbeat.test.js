@@ -14,6 +14,10 @@
 //      - 要求 .commit == 目标版本前 7 位，并且 .worker.commit == 目标版本前 7 位、worker.ok == true，其余条件不变
 //      - 只是"worker 心跳新鲜"不够：旧版本 worker 的心跳再新鲜（age_s = 0）也不算新版本活着
 //      - update 判失败时照旧：记进 state/skip、换回原版本、不清理镜像（不 docker image rm / prune）、不改 state/previous
+//   五、worker 暂停（state/worker-hold，restore 之后 worker 是 --scale worker=0，健康检查里只有恢复出来的旧心跳或没有心跳）：
+//      - update 不换版本（不下载、不启动、不清理、不记 skip，退出码 0）——和现在一样，换了版本也证明不了新 worker 活着
+//      - 暂停期间 set / set-key 等重建 web 的命令照旧只看 web（不因为 worker 心跳旧 / 没有 commit 而失败）
+//      - sudo topup start-worker --confirm 启动 worker 后，同样要等到 worker.commit = 当前版本（心跳没有 commit 或是别的版本 → 失败，退出码非 0）
 //   四、e2e/deploy-drill.sh：场景 5（更新到 v2 成功）也要核对 worker.commit = v2；场景 11 的 vB（新 worker 不扫链）
 //      在新约定下不再依赖"旧 worker 心跳碰巧过期"，结果必须稳定是"换回 v2"
 //
@@ -203,7 +207,7 @@ esac
 
 // 健康检查：compose up 过以后返回当前版本（web 的 commit = 现在 image.env 里的版本）。
 // worker 那一项单独控制，模拟"旧 worker 的心跳还新鲜、新 worker 根本没起来"：
-//   $FAKE/worker-commit 有内容 → worker.commit 一直是它（不跟着换版本）；没有这个文件 → 跟着 image.env（新 worker 正常）
+//   $FAKE/worker-commit 有内容 → worker.commit 一直是它（不跟着换版本；内容是 null 时给 JSON null）；没有这个文件 → 跟着 image.env（新 worker 正常）
 //   $FAKE/worker-age 有内容 → worker.age_s 用它；默认 0（刚跑过）
 const FAKE_CURL = String.raw`#!/usr/bin/env bash
 echo "$*" >> "$FAKE/curl.log"
@@ -213,10 +217,10 @@ case "$*" in
     tag=$(sed -n 's/^IMAGE_TAG=//p' "$TOPUP_DIR/state/image.env" 2> /dev/null)
     env=$(sed -n 's/^TOPUP_ENV=//p' "$TOPUP_DIR/deploy.env" | tail -1)
     net=$(sed -n 's/^TRON_NETWORK=//p' "$TOPUP_DIR/.env" | tail -1)
-    wc=${"$"}{tag:0:7}; [ -s "$FAKE/worker-commit" ] && wc=$(cat "$FAKE/worker-commit")
+    wc="\"${"$"}{tag:0:7}\""; [ -s "$FAKE/worker-commit" ] && wc="\"$(cat "$FAKE/worker-commit")\""; [ "$(cat "$FAKE/worker-commit" 2> /dev/null)" = null ] && wc=null
     age=0; [ -s "$FAKE/worker-age" ] && age=$(cat "$FAKE/worker-age")
     wok=true; [ "$age" -le 300 ] || wok=false
-    printf '{"ok":true,"env":"%s","commit":"%s","db":true,"storage":true,"secret":true,"blob":true,"mail":false,"mailMode":"none","pay":{"tron":"%s"},"worker":{"age_s":%s,"ok":%s,"commit":"%s"},"wallet":{"chains":[]}}\n' "$env" "${"$"}{tag:0:7}" "$net" "$age" "$wok" "$wc"
+    printf '{"ok":true,"env":"%s","commit":"%s","db":true,"storage":true,"secret":true,"blob":true,"mail":false,"mailMode":"none","pay":{"tron":"%s"},"worker":{"age_s":%s,"ok":%s,"commit":%s},"wallet":{"chains":[]}}\n' "$env" "${"$"}{tag:0:7}" "$net" "$age" "$wok" "$wc"
     exit 0 ;;
 esac
 exit 7
@@ -339,5 +343,58 @@ test('手动 rollback：换回 v1 后 worker 心跳一直是 v2 的（v1 的 wor
     const r = s.run(['rollback'], STAGING);
     assert.notEqual(r.code, 0, `v1 的 worker 没报到，rollback 不能算成功：\n${r.out}`);
     assert.doesNotMatch(r.out, /已换回/, r.out);
+  } finally { s.done(); }
+});
+
+// ---------- 五、worker 暂停（restore 之后）----------
+
+/** 装好 v1，然后像 restore 之后一样：worker 暂停（state/worker-hold），worker 被缩到 0，健康检查里的心跳是恢复出来的（没有 commit） */
+function heldV1() {
+  const s = installedV1();
+  mkdirSync(join(s.dir, 'state'), { recursive: true });
+  writeFileSync(join(s.dir, 'state/worker-hold'), 'backup=topup-20261117-000000-daily.tar.age\nat=2026-11-17 00:00:00 UTC\nby=qa\n');
+  s.set('worker-commit', 'null');
+  s.set('worker-age', '400');
+  return s;
+}
+
+test('worker 暂停时：有新版本也不更新（不下载、不启动、不清理、不记 skip，退出码 0）', () => {
+  const s = heldV1();
+  try {
+    const ups = s.read('up');
+    const r = s.run(['update'], STAGING);
+    assert.equal(r.code, 0, r.out);
+    const dl = s.read('docker.log');
+    assert.equal(s.read('up'), ups, '没有启动任何版本');
+    assert.doesNotMatch(dl, /^pull |image rm |image prune/m, `没有下载、没有清理：\n${dl}`);
+    assert.equal(s.file('state/skip'), '', '不记 skip');
+  } finally { s.done(); }
+});
+
+test('worker 暂停时：set MAIL_TO 重建 web 照常成功（只看 web；worker 心跳旧、没有 commit 不算失败）', () => {
+  const s = heldV1();
+  try {
+    const r = s.run(['set', 'MAIL_TO', 'ops@example.com'], STAGING);
+    assert.equal(r.code, 0, r.out);
+  } finally { s.done(); }
+});
+
+test('start-worker --confirm：worker 启动后心跳一直没有 commit（新 worker 没报到）→ 退出码非 0，不能报"worker 已启动"', () => {
+  const s = heldV1();
+  try {
+    s.set('worker-age', '0'); // 心跳很新鲜，但不是当前版本的 worker 写的（没有 commit）
+    const r = s.run(['start-worker', '--confirm'], STAGING);
+    assert.notEqual(r.code, 0, `worker.commit 不是当前版本，不能算启动成功：\n${r.out}`);
+    assert.doesNotMatch(r.out, /worker 已启动/, r.out);
+  } finally { s.done(); }
+});
+
+test('对照：start-worker --confirm，worker.commit = 当前版本、心跳新鲜 → 成功', () => {
+  const s = heldV1();
+  try {
+    s.clear('worker-commit'); s.set('worker-age', '0');
+    const r = s.run(['start-worker', '--confirm'], STAGING);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /worker 已启动/);
   } finally { s.done(); }
 });

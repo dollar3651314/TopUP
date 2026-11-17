@@ -104,6 +104,7 @@ export const OBJECTS = {
     ['order_no', 'string', ['Matched order', '匹配到的订单'], true],
     ['matched_by', 'string', ['deposit, order or manual', 'deposit、order、manual 之一'], true],
     ['time', 'time', ['Block time of the payment', '链上付款时间']],
+    ['credited_at', 'time', ['When TopUP credited the deposit to your balance (from / to of deposits/ filter by this)', 'TopUP 入账时间（deposits/ 的 from、to 按它筛选）']],
   ],
   PayoutBatch: [
     ['batch_no', 'string', ['Batch number', '批次号']],
@@ -148,8 +149,17 @@ export const OBJECTS = {
 
 /** 列表接口的外层：{ items, next_cursor } */
 export const LIST = [
-  ['items', 'array', ['Items, newest first', '记录，按时间倒序']],
+  ['items', 'array', ['Items. Order: see each endpoint (without from / to: newest first; with from or to, and withdrawals/list/: oldest first)', '记录；顺序见各接口（不带 from、to：从新到旧；带 from 或 to，以及 withdrawals/list/：从早到晚）']],
   ['next_cursor', 'string', ['Pass as cursor to get the next page; null on the last page', '传给 cursor 取下一页；最后一页为 null'], true],
+];
+/** v1.1 对账查询的时间段参数 */
+const RANGE = (what) => [
+  ['from', 'time', false, [`Start of the period, inclusive: ISO 8601 with time zone, e.g. 2026-11-15T00:00:00+08:00 or 2026-11-14T16:00:00Z; filters by ${what[0]}. Default: to − 31 days`, `开始时间（含）：带时区的 ISO 8601，例如 2026-11-15T00:00:00+08:00 或 2026-11-14T16:00:00Z；按${what[1]}筛选。不传时 = to − 31 天`]],
+  ['to', 'time', false, ['End of the period, exclusive. Default: now. The period [from, to) is at most 31 days', '结束时间（不含）；不传时 = 现在。区间是 [from, to)，一次最多 31 天']],
+];
+const RANGE_NOTE = (extra = ['', '']) => [
+  `With from or to: the period is [from, to) (from included, to excluded), at most 31 days, results oldest first (ties by ID), and records arriving while you page do not change pages already read. A record's time is when it was created, but it only becomes visible when its transaction commits, so a record committed a moment late can carry a slightly earlier time than records you have already read. For reconciliation, query periods that ended at least 5 minutes ago: for those, consecutive periods [from, to) neither overlap nor leave gaps. Missing time zone, invalid date, from later than to, or more than 31 days → 422 invalid_param (error.field = from or to). Without from and to the order stays as before: newest first.${extra[0]}`,
+  `带 from 或 to 时：区间是 [from, to)（含 from、不含 to），一次最多 31 天，从早到晚排（时间相同按编号），翻页途中新进的记录不改变已翻过的页。记录的时间是它创建的时间，但要等所在的数据库事务提交后才查得到，所以晚一点提交的记录，时间可能比你已经查到的记录还早一点。对账时请查已经结束至少 5 分钟的时间段：这样的时间段 [from, to) 首尾相接时不重不漏。没带时区、日期不对、from 晚于 to、超过 31 天 → 422 invalid_param（error.field 是 from 或 to）。from、to 都不带时顺序和以前一样：从新到旧。${extra[1]}`,
 ];
 const PAGING = [
   ['cursor', 'string', false, ['next_cursor from the previous page', '上一页返回的 next_cursor']],
@@ -189,6 +199,7 @@ export const ENDPOINTS = [
       ...PAGING,
     ],
     returns: ['OrderListItem'], list: true,
+    note: ['Newest first.', '从新到旧。'],
   },
   {
     method: 'POST', path: 'orders/match/', title: ['Match a deposit to an order', '手动匹配'],
@@ -227,6 +238,7 @@ export const ENDPOINTS = [
     method: 'GET', path: 'customers/list/', title: ['List customers', '客户列表'],
     query: [['q', 'string', false, ['Search by customer ID, name or email (partial, case-insensitive), or by exact address', '按客户标识、名称或邮箱搜索（部分匹配，不区分大小写），或按地址精确搜索']], ...PAGING],
     returns: ['Customer'], list: true,
+    note: ['Newest first.', '从新到旧。'],
   },
   {
     method: 'GET', path: 'customers/stats/', title: ['Customer statistics', '客户统计'],
@@ -240,17 +252,21 @@ export const ENDPOINTS = [
   { method: 'GET', path: 'balance/', title: ['Balance', '余额'], returns: ['Balance'] },
   {
     method: 'GET', path: 'ledger/', title: ['Ledger', '账本明细'],
-    query: [['customer_id', 'string', false, ['Filter by customer', '按客户筛选']], ...PAGING],
-    returns: ['LedgerEntry'], list: true,
+    query: [['customer_id', 'string', false, ['Filter by customer', '按客户筛选']], ...RANGE(['created_at', '记账时间 created_at']), ...PAGING],
+    returns: ['LedgerEntry'], list: true, errors: ['invalid_param'],
+    note: RANGE_NOTE(),
   },
   {
     method: 'GET', path: 'deposits/', title: ['Deposits', '到账明细'],
     query: [
       ['customer_id', 'string', false, ['Filter by customer', '按客户筛选']],
       ['matched', 'string', false, ['"false" = credited and not matched to an order; "true" = matched', '"false" 表示已入账但没有匹配订单；"true" 表示已匹配']],
+      ['txid', 'string', false, ['Exact on-chain transaction ID; can be combined with the other filters', '链上交易哈希（精确匹配），可以和其他条件一起用']],
+      ...RANGE(['the time TopUP credited the deposit, not the block time', 'TopUP 入账时间（不是链上付款时间）']),
       ...PAGING,
     ],
-    returns: ['Deposit'], list: true,
+    returns: ['Deposit'], list: true, errors: ['invalid_param'],
+    note: RANGE_NOTE(),
   },
   {
     method: 'POST', path: 'withdrawals/', title: ['Request a withdrawal', '发起提币'],
@@ -272,6 +288,17 @@ export const ENDPOINTS = [
       ['merchant_ref', 'string', false, ['Your withdrawal reference (single or batch payout item; exact, case-sensitive match)', '你的提现单号（单笔提币或批量打款的一笔；精确匹配，区分大小写）']],
     ],
     returns: ['Withdrawal'], errors: ['not_found'],
+  },
+  {
+    method: 'GET', path: 'withdrawals/list/', title: ['List withdrawals (reconciliation)', '提币列表（对账）'],
+    query: [
+      ['status', 'string', false, ['Filter by status: pending, approved, broadcast, completed, rejected, cancelled or failed', '按状态筛选：pending、approved、broadcast、completed、rejected、cancelled、failed']],
+      ['chain', 'string', false, ['Filter by chain: eth, bsc or tron', '按链筛选：eth、bsc、tron']],
+      ...RANGE(['created_at', '创建时间 created_at']),
+      ...PAGING,
+    ],
+    returns: ['Withdrawal'], list: true, errors: ['invalid_param'],
+    note: RANGE_NOTE([' This endpoint always uses a period (default: the last 31 days) and is always oldest first.', '这个接口总按时间段查（默认最近 31 天），总是从早到晚。']),
   },
   {
     method: 'POST', path: 'withdrawals/cancel/', title: ['Cancel a withdrawal', '取消提币'],
