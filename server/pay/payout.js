@@ -6,9 +6,12 @@ import { PayError, audit, getMeta, setMeta, ensureCustomer, post, wdCallback, wi
 import { calcFee, fmtUsdt, parseUsdt } from './money.js';
 
 const U = 1_000_000;
-/** 默认上限（技术方案 06 页）：单笔 5,000、每批 20,000、每天 30,000；热钱包上限 10,000、低于 2,000 提醒。管理员能在后台改（Q-B1） */
-export const PAYOUT_DEFAULTS = Object.freeze({ perItem: 5_000 * U, perBatch: 20_000 * U, perDay: 30_000 * U, hotMax: 10_000 * U, hotLow: 2_000 * U });
-export const LIMIT_KEYS = ['perItem', 'perBatch', 'perDay', 'hotMax', 'hotLow'];
+/**
+ * 默认上限（技术方案 06 页）：单笔 5,000、每批 20,000、每天 30,000（全平台合计）；热钱包上限 10,000、低于 2,000 提醒。管理员能在后台改（Q-B1）。
+ * v1.1：每个商户每天上限 perMerchantDay 默认 30,000（对所有商户一起生效）；一笔要同时不超过这家商户今天的余量和全平台今天的余量。
+ */
+export const PAYOUT_DEFAULTS = Object.freeze({ perItem: 5_000 * U, perBatch: 20_000 * U, perDay: 30_000 * U, perMerchantDay: 30_000 * U, hotMax: 10_000 * U, hotLow: 2_000 * U });
+export const LIMIT_KEYS = ['perItem', 'perBatch', 'perDay', 'perMerchantDay', 'hotMax', 'hotLow'];
 /** 一张表 / 一次 API 最多 500 笔（Q-B6） */
 export const MAX_ITEMS_PER_REQUEST = 500;
 /** 一笔链上交易最多几笔：ETH / BSC 是 BatchPayout.MAX_ITEMS；TRON 每批 20 笔（Nile 实测后再调） */
@@ -24,10 +27,17 @@ export const newTxBatchId = (chain, now = Date.now()) => `PT-${chain.toUpperCase
 // ---------- 上限（后台可改：原因 + 动态码 + 审计） ----------
 export async function getPayoutLimits(q) {
   const saved = (await getMeta(q, META_LIMITS)) || {};
-  return Object.fromEntries(LIMIT_KEYS.map((k) => [k, Number.isSafeInteger(Number(saved[k])) && Number(saved[k]) > 0 ? Number(saved[k]) : PAYOUT_DEFAULTS[k]]));
+  const has = (k) => Number.isSafeInteger(Number(saved[k])) && Number(saved[k]) > 0;
+  const out = Object.fromEntries(LIMIT_KEYS.map((k) => [k, has(k) ? Number(saved[k]) : PAYOUT_DEFAULTS[k]]));
+  // 升级前已经把全平台每天改到 30,000 以下、还没存过商户每天的：商户每天按全平台每天算（不能大于全平台），否则下次改上限会被约束挡住
+  if (!has('perMerchantDay')) out.perMerchantDay = Math.min(out.perMerchantDay, out.perDay);
+  return out;
 }
-/** values：{ perItem, perBatch, perDay, hotMax, hotLow }（0.000001 单位，字符串或数字）；先核对动态码，再核对原因和数字 */
-export async function updatePayoutLimits(db, { actor, reason, values = {}, code, verifyCode }) {
+/**
+ * values：{ perItem, perBatch, perDay, perMerchantDay, hotMax, hotLow }（0.000001 单位，字符串或数字）；先核对动态码，再核对原因和数字。
+ * 返回新的上限 + warnings：全平台每天改到低于今天已通过的合计时照样保存，warnings 含 'per_day_below_today_approved'（今天剩下的单都会留在待审核）
+ */
+export async function updatePayoutLimits(db, { actor, reason, values = {}, code, verifyCode, now = Date.now() }) {
   if (!verifyCode || !(await verifyCode(String(code || '')))) throw new PayError('bad_code', 400);
   if (!String(reason || '').trim()) throw new PayError('reason_required', 422, 'reason');
   const before = await getPayoutLimits(db);
@@ -42,13 +52,16 @@ export async function updatePayoutLimits(db, { actor, reason, values = {}, code,
   const rule = (field, r) => Object.assign(new PayError('invalid_param', 422, field), { rows: [{ rule: r }] });
   if (next.perItem > next.perBatch) throw rule('perItem', 'per_item_le_per_batch');
   if (next.perBatch > next.perDay) throw rule('perBatch', 'per_batch_le_per_day');
+  if (next.perMerchantDay > next.perDay) throw rule('perMerchantDay', 'per_merchant_day_le_per_day');
   if (next.hotLow > next.hotMax) throw rule('hotLow', 'hot_low_le_hot_max');
   const toUsdt = (o) => Object.fromEntries(LIMIT_KEYS.map((k) => [k, usdt(o[k])]));
+  const warnings = [];
   await db.tx(async (t) => {
     await setMeta(t, META_LIMITS, next);
-    await audit(t, actor, 'payout.limits', '', { reason: String(reason).trim().slice(0, 500), before: toUsdt(before), after: toUsdt(next) });
+    if (next.perDay < await approvedToday(t, now)) warnings.push('per_day_below_today_approved');
+    await audit(t, actor, 'payout.limits', '', { reason: String(reason).trim().slice(0, 500), before: toUsdt(before), after: toUsdt(next), ...(warnings.length ? { warnings } : {}) });
   });
-  return next;
+  return { ...next, warnings };
 }
 
 // ---------- 凑批 ----------
@@ -97,35 +110,55 @@ export function serviceWindow(nowMs = Date.now()) {
 export const dayStart = (nowMs = Date.now()) => { const l = new Date(nowMs + TZ_MS); return Date.UTC(l.getUTCFullYear(), l.getUTCMonth(), l.getUTCDate()) - TZ_MS; };
 
 // ---------- 审核 ----------
-async function approvedToday(t, nowMs) {
-  const [r] = await t.query(`select coalesce(sum(amount), 0)::bigint v from withdrawals where approved_at >= $1 and status in ('approved', 'signing', 'broadcast', 'completed')`, [new Date(dayStart(nowMs))]);
+/** "今天已通过"的口径：approved_at ≥ 东八区今天 0 点，状态 approved / signing / broadcast / completed */
+const TODAY_WHERE = `approved_at >= $1 and status in ('approved', 'signing', 'broadcast', 'completed')`;
+/** 全平台今天已通过的合计 */
+export async function approvedToday(t, nowMs) {
+  const [r] = await t.query(`select coalesce(sum(amount), 0)::bigint v from withdrawals where ${TODAY_WHERE}`, [new Date(dayStart(nowMs))]);
   return Number(r.v);
 }
-/** 审核一笔（在事务里）：超单笔上限、超当天上限的留在 pending；返回 null 表示通过，否则是原因 */
+/** 每家商户今天已通过的合计：Map(merchant_id → 金额)；没有的商户不在里面（算 0） */
+export async function approvedTodayByMerchant(t, nowMs) {
+  const rows = await t.query(`select merchant_id, coalesce(sum(amount), 0)::bigint v from withdrawals where ${TODAY_WHERE} group by merchant_id`, [new Date(dayStart(nowMs))]);
+  return new Map(rows.map((r) => [r.merchant_id, Number(r.v)]));
+}
+/**
+ * 现在单独审这一笔会不会超限（页面"上限检查"和审核共用同一个顺序）：单笔 → 这家商户今天 → 全平台今天。
+ * today：{ v: 全平台今天已通过, m: Map(merchant_id → 这家今天已通过) }。返回 'ok' 或原因码
+ */
+export function limitCheck(w, limits, today) {
+  const amount = Number(w.amount);
+  if (amount > limits.perItem) return 'exceeds_per_item_limit';
+  if ((today.m.get(w.merchant_id) || 0) + amount > limits.perMerchantDay) return 'exceeds_merchant_daily_limit';
+  if (today.v + amount > limits.perDay) return 'exceeds_daily_limit';
+  return 'ok';
+}
+/** 审核一笔（在事务里）：超单笔上限、超这家商户每天上限、超全平台每天上限的留在 pending；返回 null 表示通过，否则是原因 */
 async function approveOne(t, id, { actor, now, limits, today }) {
   const [w] = await t.query(`select * from withdrawals where id = $1 for update`, [id]);
   if (!w) return 'not_found';
   if (w.status !== 'pending') return 'invalid_state';
-  if (w.amount > limits.perItem) return 'exceeds_per_item_limit';
-  if (today.v + w.amount > limits.perDay) return 'exceeds_daily_limit';
+  const why = limitCheck(w, limits, today);
+  if (why !== 'ok') return why;
   await t.query(`update withdrawals set status = 'approved', approved_at = $2, approved_by = $3, updated_at = now() where id = $1`, [id, new Date(now), actor]);
-  today.v += w.amount;
+  today.v += Number(w.amount);
+  today.m.set(w.merchant_id, (today.m.get(w.merchant_id) || 0) + Number(w.amount));
   await audit(t, actor, 'payout.approve', id, { amount: usdt(w.amount), chain: w.chain });
   await wdCallback(t, id);
   return null;
 }
-/** 审核要按"每天上限"算今天已通过的合计：两个审核同时进来会各算各的、合起来超上限，所以事务里先拿一把审核锁（事务结束自动释放） */
+/** 审核要按"每天上限"（这家商户、全平台）算今天已通过的合计：两个审核同时进来会各算各的、合起来超上限，所以事务里先拿一把审核锁（事务结束自动释放） */
 const APPROVE_LOCK = 7_310_331; // pg_advisory_xact_lock 的键，只给打款审核用
 async function lockApprovals(t) { await t.query('select pg_advisory_xact_lock($1)', [APPROVE_LOCK]); }
 
-/** Q-B3 单笔一单一审：pending → approved；超单笔上限 exceeds_per_item_limit、超每天上限 exceeds_daily_limit 的留在 pending */
+/** Q-B3 单笔一单一审：pending → approved；超单笔上限 exceeds_per_item_limit、超这家商户每天上限 exceeds_merchant_daily_limit、超全平台每天上限 exceeds_daily_limit 的留在 pending */
 export async function approvePayouts(db, { ids = [], actor, now = Date.now() }) {
   const list = [...new Set(ids.map(String))];
   if (!list.length || list.length > MAX_ITEMS_PER_REQUEST) throw new PayError('invalid_param', 422, 'ids');
   return db.tx(async (t) => {
     await lockApprovals(t);
     const limits = await getPayoutLimits(t);
-    const today = { v: await approvedToday(t, now) };
+    const today = { v: await approvedToday(t, now), m: await approvedTodayByMerchant(t, now) };
     const approved = [], refused = [];
     for (const id of list) {
       const why = await approveOne(t, id, { actor, now, limits, today });
@@ -214,7 +247,7 @@ export async function reviewPayoutBatch(db, { batchNo, approve = [], reason = ''
     const why = String(reason || '').trim();
     if (rejectIds.length && !why) throw new PayError('reason_required', 422, 'reason');
     const limits = await getPayoutLimits(t);
-    const today = { v: await approvedToday(t, now) };
+    const today = { v: await approvedToday(t, now), m: await approvedTodayByMerchant(t, now) };
     for (const p of pend) {
       if (!ok.has(p.id)) continue;
       const r = await approveOne(t, p.id, { actor, now, limits, today });
