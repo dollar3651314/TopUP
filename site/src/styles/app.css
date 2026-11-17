@@ -443,3 +443,13 @@ tr.row-over td .btn-primary { color: var(--accent-contrast); }
 @media (prefers-color-scheme: dark) {
   .btn[disabled], .btn:disabled { opacity: 1; background: #24364f; border-color: #35506f; color: #a3b3c6; cursor: not-allowed; }
 }
+
+/* v1.1 冲正：异常到账的子标签数字、冲正详情时间线、商户欠款 */
+.filters button .badge { margin-left: 6px; background: var(--danger); color: #fff; border-radius: 999px; font-size: 0.72rem; padding: 0 7px; font-weight: 700; }
+.rv-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.rv-timeline li { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 8px; align-items: start; }
+.rv-timeline .tl-dot { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 0.75rem; font-weight: 800; background: rgba(18,184,134,0.12); color: var(--accent); }
+.rv-timeline .tl-bad .tl-dot { background: rgba(201,42,42,0.1); color: var(--danger); }
+.rv-timeline .tl-warn .tl-dot { background: rgba(245,184,61,0.18); color: #b35c00; }
+.debt-alert { border-left-color: var(--danger); }
+.amt-struck { text-decoration: line-through; color: var(--text-muted); }

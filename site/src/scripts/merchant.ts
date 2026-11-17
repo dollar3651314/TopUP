@@ -129,10 +129,12 @@ render.overview = async (p) => {
   if (o.chains) enabledChains = o.chains;
   const on = me.order_mode.enabled;
   p.replaceChildren(
+    debtAlert(o.debt),
     toolbar(c.overview.title, on ? h('button', { type: 'button', class: 'btn btn-primary', onclick: createOrder }, c.overview.newOrder) : null),
     h('div', { class: 'stats' },
       stat(c.overview.available, usd(o.available), 'USDT'),
       stat(c.overview.frozen, usd(o.frozen), tpl(c.overview.frozenSub, { n: o.pending_withdrawals })),
+      debtStat(o.debt),
       stat(c.overview.today, usd(o.today), tpl(c.overview.todaySub, { n: o.today_count, fee: usd(o.today_fees) })),
       on ? stat(c.overview.openOrders, String(o.open_orders), c.overview.openOrdersSub) : null,
       on ? stat(c.overview.unmatched, usd(o.unmatched), tpl(c.overview.unmatchedSub, { n: o.unmatched_count })) : null),
@@ -142,7 +144,22 @@ render.overview = async (p) => {
     depositTable(o.recent),
   );
 };
+// v1.1 欠款：到账被冲正、余额不够扣时记的欠款（还清前不能提币，之后的到账先还）
+function debtStat(debt: Amount | undefined): HTMLElement {
+  const owe = units(debt || '0') > 0;
+  const s = stat(c.overview.debt, usd(debt || '0'), owe ? c.overview.debtSub : c.overview.debtNone);
+  s.setAttribute('data-debt', '');
+  if (owe) s.classList.add('stat-bad');
+  return s;
+}
+function debtAlert(debt: Amount | undefined): HTMLElement | null {
+  if (!(units(debt || '0') > 0)) return null;
+  return h('section', { class: 'hero-todo hero-bad', 'data-debt-alert': '' },
+    h('div', { class: 'stack-sm' }, h('h2', { class: 'm0' }, tpl(c.overview.debtTitle, { amount: usd(debt!) })), h('p', { class: 'muted m0' }, c.overview.debtText)),
+    h('button', { type: 'button', class: 'btn btn-primary', 'data-goto-reversed': '', onclick: () => { txTab = 'deposits'; onlyReversed = true; onlyUnmatched = false; go('transactions'); } }, c.overview.debtGo));
+}
 function depResult(d: Dep): HTMLElement {
+  if (d.result === 'reversed') { const s = status('needs_info', c.dep.result.reversed); s.setAttribute('data-reversed', ''); if (d.reversed_at) s.title = t(d.reversed_at); return s; }
   if (d.confirmations) return status('submitted', tpl(c.dep.result.confirming, { n: d.confirmations }));
   if (d.result === 'below_min') return status('expired', c.dep.result.below_min);
   return status('approved', c.dep.result.credited);
@@ -409,7 +426,7 @@ async function createOrder() {
 }
 
 // ---------- 交易 ----------
-let txTab: 'deposits' | 'ledger' = 'deposits', onlyUnmatched = false, txCust = '';
+let txTab: 'deposits' | 'ledger' = 'deposits', onlyUnmatched = false, onlyReversed = false, txCust = '';
 render.transactions = async (p) => {
   const ct = c.tx;
   const tabs = h('div', { class: 'filters', role: 'tablist' },
@@ -418,18 +435,25 @@ render.transactions = async (p) => {
   const cust = h('input', { type: 'search', class: 'input-sm', placeholder: c.orders.filterCustomer, value: txCust }) as HTMLInputElement;
   cust.addEventListener('change', () => { txCust = cust.value.trim(); render.transactions(p); });
   const um = h('input', { type: 'checkbox', checked: onlyUnmatched }) as HTMLInputElement;
-  um.addEventListener('change', () => { onlyUnmatched = um.checked; render.transactions(p); });
+  um.addEventListener('change', () => { onlyUnmatched = um.checked; if (um.checked) onlyReversed = false; render.transactions(p); });
+  const rv = h('input', { type: 'checkbox', id: 'tx-only-reversed', checked: onlyReversed }) as HTMLInputElement;
+  rv.addEventListener('change', () => { onlyReversed = rv.checked; if (rv.checked) onlyUnmatched = false; render.transactions(p); });
   const lc = ct.ledgerCols;
   let content: HTMLElement;
-  if (txTab === 'deposits') content = depositTable(await D.deposits(txCust, onlyUnmatched), true);
+  if (txTab === 'deposits') {
+    const all = await D.deposits(txCust, onlyUnmatched);
+    if (!onlyReversed) content = depositTable(all, true);
+    else { const rows = Object.assign(all.filter((d) => d.result === 'reversed'), { truncated: (all as List<Dep>).truncated }); content = rows.length ? depositTable(rows, true) : h('p', { class: 'muted' }, ct.noneReversed); }
+  }
   else {
     const rows = await D.ledger(txCust);
     content = h('div', { class: 'stack' }, h('p', { class: 'hint muted m0' }, ct.ledgerNote),
-      table([lc.time, lc.type, c.dep.cols.customer, lc.amount, lc.balance, lc.ref], rows.map((l) => [t(l.created_at), ct.ledgerTypes[l.type], l.customer_id ? mono(l.customer_id) : '—',
-        h('span', { class: units(l.amount) < 0 ? 'neg' : 'pos' }, (units(l.amount) > 0 ? '+' : '') + usd(l.amount)), usd(l.available_after), mono(l.ref)]), c.common.none, { page: pg(rows) }));
+      table([lc.time, lc.type, c.dep.cols.customer, lc.amount, lc.balance, ct.debtCol, lc.ref], rows.map((l) => [t(l.created_at), ct.ledgerTypes[l.type] || l.type, l.customer_id ? mono(l.customer_id) : '—',
+        h('span', { class: units(l.amount) < 0 ? 'neg' : 'pos' }, (units(l.amount) > 0 ? '+' : '') + usd(l.amount)), usd(l.available_after), units(l.debt_after || '0') > 0 ? h('b', { class: 'bad' }, usd(l.debt_after!)) : usd(l.debt_after || '0'), mono(l.ref)]), c.common.none, { page: pg(rows) }));
   }
   const exp = D.exportUrl(txTab);
   p.replaceChildren(toolbar(ct.title, cust, txTab === 'deposits' && me.order_mode.enabled ? h('label', { class: 'inline-label' }, um, c.dep.filterUnmatched) : null,
+    txTab === 'deposits' ? h('label', { class: 'inline-label' }, rv, ct.onlyReversed) : null,
     exp ? h('a', { class: 'btn btn-outline', href: exp, download: '' }, c.common.export) : h('button', { type: 'button', class: 'btn btn-outline', onclick: () => say(c.common.exported) }, c.common.export)), tabs, content);
 };
 
@@ -479,7 +503,8 @@ render.withdraw = async (p) => {
     payTo.placeholder = ch === 'tron' ? 'T…' : '0x…';
   };
   chainSel.addEventListener('change', onChange); kindCash.addEventListener('change', onChange); kindPayout.addEventListener('change', onChange);
-  const submit = h('button', { class: 'btn btn-primary', type: 'submit' }, cw.submit) as HTMLButtonElement;
+  const owe = units(ov.debt || '0') > 0;
+  const submit = h('button', { class: 'btn btn-primary', type: 'submit', 'data-mw-submit': '', disabled: owe }, cw.submit) as HTMLButtonElement;
   const form = h('form', { class: 'card form-card wd-form', novalidate: true },
     h('div', { class: 'f' }, h('span', { class: 'lbl' }, cw.kind), h('div', { class: 'choices' }, h('label', {}, kindCash, cw.kindCashout), h('label', {}, kindPayout, cw.kindPayout))),
     field('mw-chain', cw.chain, chainSel, tpl(cw.chainFee, { fee: `${describeFee(me.fee_out, lang)}` })), toField, noReg, payField, custField, field('mw-amt', cw.amount, amt), summary, field('mw-code', cw.code, code), submit);
@@ -495,7 +520,7 @@ render.withdraw = async (p) => {
     const f = a ? calcFee(a, me.fee_out) : 0;
     bad = fieldErr(amt, !a ? cw.errAmount : a + f > available ? cw.errInsufficient : null) || bad;
     bad = fieldErr(code, /^\d{6}$/.test(code.value.trim()) ? null : cw.errCode) || bad;
-    if (bad) return;
+    if (bad || owe) return;
     submit.disabled = true;
     try {
       const w = await D.withdraw({ kind: cash ? 'cashout' : 'payout', chain: ch, to: cash ? toSel.value : payTo.value.trim(), amount: amt.value.replace(/[,\s]/g, ''), customer_id: !cash && cid ? cid : undefined, code: code.value.trim() });
@@ -504,13 +529,14 @@ render.withdraw = async (p) => {
     } catch (err) {
       const k = (err as ApiErr).code;
       fieldErr(k === 'bad_code' ? code : k === 'invalid_address' || k === 'address_not_registered' ? (cash ? toSel : payTo) : amt, errText(err));
-    } finally { submit.disabled = false; }
+    } finally { submit.disabled = owe; }
   });
   onChange(); upd();
   const cc = cw.cols;
   p.replaceChildren(
     toolbar(cw.title),
     h('div', { class: 'note-box', 'data-sla': '' }, cw.note),
+    owe ? h('p', { class: 'alert m0', 'data-debt-block': '' }, tpl(cw.debtBlock, { amount: usd(ov.debt!) })) : null,
     h('div', { class: 'wd-grid' }, h('div', {}, h('h2', { class: 'h-sm' }, cw.new), form),
       h('div', { class: 'stats stats-col' }, stat(c.overview.available, usd(ov.available), cw.balanceNote), stat(c.overview.frozen, usd(ov.frozen), 'USDT'))),
     h('h2', { class: 'h-sm' }, cw.history),

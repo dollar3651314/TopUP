@@ -66,7 +66,7 @@ export async function evmUnswept(db, { chains = ['eth', 'bsc'], thresholds = {} 
   const out = {};
   for (const chain of chains) {
     const [r] = await db.query(`with a as (
-        select coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address)), 0)
+        select coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address) and d.result <> 'reversed'), 0)
           - coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept'), 0) v
         from customer_addresses ca where ca.chain = $1 and (ca.chain <> 'tron' or ca.provider = 'contract'))
       select count(*) filter (where v > 0)::int n, coalesce(sum(v) filter (where v > 0), 0)::bigint total,

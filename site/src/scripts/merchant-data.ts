@@ -9,12 +9,12 @@ export type Amount = number | string;
 export interface Mode { enabled: boolean; low: number; high: number; ttlMin: number; lookbackH: number }
 export interface Me { authed: boolean; email?: string; merchant?: { id: string; name: string; order_mode: Mode; fee_in: { ppm: number; fixed: number; min: number }; fee_out: { ppm: number; fixed: number; min: number }; cashout_wallets: (string | { chain: string; address: string })[] } }
 export interface ChainAddr { chain: 'eth' | 'bsc' | 'tron'; address: string }
-export interface Dep { id: string; customer_id: string; chain?: string; address: string; txid: string; amount: Amount; fee: Amount; credited: Amount; result: string; order_no: string | null; matched_by: string | null; time: string; confirmations?: number }
+export interface Dep { id: string; customer_id: string; chain?: string; address: string; txid: string; amount: Amount; fee: Amount; credited: Amount; result: string; order_no: string | null; matched_by: string | null; time: string; confirmations?: number; reversed_at?: string | null }
 export interface Cust { customer_id: string; name: string; email: string; remark: string; address: string | null; addresses?: ChainAddr[]; total: Amount; count: number; fees: Amount; unmatched: Amount; last_payment_at: string | null; created_at: string }
 export interface OrderItem { order_no: string; merchant_order_no: string; customer_id: string; amount: Amount; matched: Amount; status: M.OrderState; created_at: string; expires_at: string }
 export interface OrderFull extends OrderItem { address: string | null; network?: string; chain?: string | null; addresses?: ChainAddr[]; pay_url: string; deposits: { id: string; txid: string; amount: Amount; matched_by: string; time: string }[] }
 export interface Wd { withdrawal_no: string; kind: 'payout' | 'cashout'; chain?: string; batch_no?: string | null; customer_id: string | null; to: string; amount: Amount; fee: Amount; status: string; txid: string | null; reason: string | null; source: 'web' | 'api'; created_at: string }
-export interface Led { id: string; type: M.LedgerType; amount: Amount; available_after: Amount; ref: string; customer_id: string | null; created_at: string }
+export interface Led { id: string; type: M.LedgerType; amount: Amount; available_after: Amount; debt_after?: Amount; ref: string; customer_id: string | null; created_at: string }
 export interface Cb { id: string; event: string; ref: string; status: 'pending' | 'ok' | 'failed'; attempts: number; last_code: number | null; next_at: string | null; created_at: string }
 /** 列表最多取这么多条；更早的记录用导出查看 */
 export const MAX_ROWS = 1000;
@@ -37,7 +37,7 @@ export interface MerchantData {
   logout(): Promise<void>;
   setupBegin(token: string, password: string): Promise<{ qr: string; secret: string }>;
   setupConfirm(token: string, code: string): Promise<void>;
-  overview(): Promise<{ today_by_chain?: { chain: string; total: Amount; count: number }[]; chains?: string[]; available: Amount; frozen: Amount; today: Amount; today_count: number; today_fees: Amount; open_orders: number; unmatched: Amount; unmatched_count: number; pending_withdrawals: number; recent: Dep[] }>;
+  overview(): Promise<{ debt?: Amount; today_by_chain?: { chain: string; total: Amount; count: number }[]; chains?: string[]; available: Amount; frozen: Amount; today: Amount; today_count: number; today_fees: Amount; open_orders: number; unmatched: Amount; unmatched_count: number; pending_withdrawals: number; recent: Dep[] }>;
   customers(q: string, onePage?: boolean): Promise<Cust[]>;
   customer(id: string, days: number): Promise<{ customer: Cust; stats: { total: Amount; count: number; fees: Amount; unmatched: Amount }; orders: OrderItem[]; deposits: Dep[]; payouts: { withdrawal_no: string; amount: Amount; status: string; created_at: string }[] }>;
   saveCustomer(b: { customer_id: string; name?: string; email?: string; remark?: string }, create?: boolean): Promise<Cust>;

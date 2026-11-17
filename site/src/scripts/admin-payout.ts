@@ -37,6 +37,7 @@ const HOLD: Record<string, string> = { transfer_failed: '收款地址转不了�
 /** 单的内部状态 → 中文（批次详情里用） */
 const WST: Record<string, string> = { pending: '待审核', approved: '已审核，等凑批', signing: '已凑批，等签名', broadcast: '已广播，等链上确认', completed: '已完成', rejected: '已驳回', cancelled: '商户已取消', failed: '失败，已退回' };
 const PERR: Record<string, string> = {
+  debt_outstanding: '商户有欠款，还清前不能通过：之后的到账会先还欠款，还清后再审；也可以驳回。',
   exceeds_per_item_limit: '这笔超过单笔上限：只能驳回，或者先改上限。', exceeds_daily_limit: '今天（东八区）通过的合计会超过每天上限：明天再审，或者先改上限。', reason_required: '有不勾的笔，要填驳回原因。',
   wrong_signer: '签名人不是这条链的热钱包，服务器没广播。', broadcast_rejected: '节点拒绝了这笔交易：这一批已回到"已审核"，钱没动，可以重新凑批签名。', allowance_in_progress: '正在改授权额度，两笔签完之前这条链的打款暂停。',
   broadcast_unreachable: '节点暂时连不上，这一笔没算签完：稍后用同一个窗口再签一次同一笔（同一笔交易，不会重复）。', rpc_unreachable: '节点暂时连不上（以太坊 / BSC 节点），稍后再试。', estimate_reverted: '节点试算这一批会失败（合约回滚），没出交易：检查热钱包余额、授权额度和收款地址后再试。',
@@ -80,9 +81,10 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
         h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: (e: Event) => { e.stopPropagation(); open(x); } }, '逐行审')];
     }
     return [mono(x.id), x.merchant, `${x.kind === 'payout' ? '代付' : '提币'} · ${x.source === 'api' ? 'API' : '后台'}`, chainTag(x.chain), h('span', { class: 'cell-2' }, mono(shortAddr(x.to), x.to),
-      h('span', { class: 'hint muted' }, x.registered ? '✓ 登记的提币地址' : x.first_time ? '代付：第一次给这个地址付' : '代付：付过这个地址')), h('b', {}, usd(x.amount)), wait,
+      h('span', { class: 'hint muted' }, x.registered ? '✓ 登记的提币地址' : x.first_time ? '代付：第一次给这个地址付' : '代付：付过这个地址')),
+      x.limit_check === 'debt_outstanding' ? h('span', { class: 'cell-2' }, h('b', {}, usd(x.amount)), h('span', { class: 'bad' }, '商户有欠款')) : h('b', {}, usd(x.amount)), wait,
       h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: (e: Event) => { e.stopPropagation(); open(x); } }, '去审这笔')];
-  }), '现在没有等你审的打款。', { onRow: (i) => open(rows[i]), rowAttrs: (i) => (rows[i].group ? { 'data-payout-group': rows[i].batch_no, 'data-wait': waitAttr(minsOf(rows[i].created_at)) } : { 'data-payout-row': rows[i].id, 'data-wait': waitAttr(minsOf(rows[i].created_at)) }) });
+  }), '现在没有等你审的打款。', { onRow: (i) => open(rows[i]), rowAttrs: (i) => (rows[i].group ? { 'data-payout-group': rows[i].batch_no, 'data-wait': waitAttr(minsOf(rows[i].created_at)) } : { 'data-payout-row': rows[i].id, 'data-wait': waitAttr(minsOf(rows[i].created_at)), 'data-limit-check': rows[i].limit_check === 'debt_outstanding' ? 'debt' : 'ok', ...(rows[i].limit_check === 'debt_outstanding' ? { class: 'row-over' } : {}) }) });
 
   const batches = r.batches as any[];
   const cards = r.cards.map((c: any) => planCard(ui, c, legacyTron, batches.filter((b) => b.chain === c.chain && b.status === 'planned')));
@@ -266,12 +268,15 @@ function reviewOne(ui: WalletUi, x: any, r: any) {
   const rej = h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-payout-reject': '', onclick: () => { rejecting = true; reasonBox.hidden = false; rej.hidden = true; const b = okBtn(); if (b) { b.textContent = '驳回这笔'; b.className = 'btn btn-danger'; b.disabled = false; } reason.focus(); } }, '驳回这笔');
   const L = r.limits;
   const over = u(x.amount) > u(L.perItem);
+  const debt = x.limit_check === 'debt_outstanding';
   const body = h('div', { class: 'stack' },
     kv([['单号', mono(x.id)], ['商户', x.merchant], ['类型', `${x.kind === 'payout' ? '代付' : '提币（商户提现）'} · ${x.source === 'api' ? 'API' : '后台'}`], ['链', chainTag(x.chain)],
       ['收款地址', h('span', { class: 'stack-sm' }, mono(x.to), h('span', { class: x.registered ? 'ok' : 'hint' }, x.registered ? '✓ 登记地址：商户在这条链登记过的提币地址' : x.first_time ? '代付：第一次给这个地址付（代付没有白名单，靠你审核）' : '代付：以前付过这个地址'))],
       ['金额', h('b', {}, `${usd(x.amount)} USDT`)], ['手续费', `${usd(x.fee)} USDT（已和金额一起冻结）`],
       ['上限检查', h('span', { class: over ? 'bad' : '' }, `${over ? '✗' : '✓'} 单笔 ≤ ${usd(L.perItem)} · 今天已通过 ${usd(r.today_approved)} / ${usd(L.perDay)}`)]]),
     over ? h('p', { class: 'alert m0', 'data-over-limit': '' }, `这笔超过单笔上限（${usd(L.perItem)} USDT），不能通过：驳回，或者先改上限再审。`) : null,
+    // v1.1：商户有欠款（到账被冲正、余额不够扣）时不能通过，还清后再审；可以驳回
+    debt ? h('p', { class: 'alert m0', 'data-debt-hold': '' }, `商户有欠款，还清前不能通过（欠款 ${usd(x.merchant_debt)} USDT：之后的到账会先还欠款，还清后再审；也可以驳回）。`) : null,
     msg, rej, reasonBox);
   ui.dialog(`审核 ${x.id}`, body, '通过', async () => {
     if (rejecting) {
@@ -286,7 +291,7 @@ function reviewOne(ui: WalletUi, x: any, r: any) {
     ui.say(`已通过 ${x.id}，等按链凑批签名`); ui.rerender(); return true;
   });
   // 超过单笔上限：不能点"通过"（服务器也会拒），只能驳回
-  const ok = okBtn(); if (ok && over) ok.disabled = true;
+  const ok = okBtn(); if (ok && (over || debt)) ok.disabled = true;
 }
 
 function reviewGroup(ui: WalletUi, g: any, r: any) {
@@ -297,6 +302,7 @@ function reviewGroup(ui: WalletUi, g: any, r: any) {
   const boxes = g.items.map((i: any) => h('input', { type: 'checkbox', class: 'check', checked: !overOf(i), 'data-review-item': i.id, 'aria-label': `通过 ${i.id}` }) as HTMLInputElement);
   const body = h('div', { class: 'stack' },
     h('p', { class: 'm0' }, `${g.merchant} 的批量打款 ${g.batch_no}：${g.count} 笔，合计 ${usd(g.total)} USDT。勾上的通过，不勾的驳回（驳回的退冻结、逐笔发回调，其余照付）。`),
+    g.items.some((i: any) => i.limit_check === 'debt_outstanding') ? h('p', { class: 'alert m0', 'data-debt-hold': '' }, '商户有欠款，还清前不能通过：这次只能全部不勾（驳回），或者等之后的到账还清欠款再审。') : null,
     table(['通过', '单号', '链', '收款地址', '金额', '检查'], g.items.map((i: any, k: number) => [boxes[k], mono(i.id), chainTag(i.chain), mono(shortAddr(i.to), i.to), usd(i.amount),
       overOf(i) ? h('span', { class: 'bad' }, '超过单笔上限，只能驳回') : i.first_time ? h('span', { class: 'hint' }, '第一次给这个地址付') : '✓']), '—', { rowAttrs: (k) => (overOf(g.items[k]) ? { class: 'row-over', 'data-over-limit': g.items[k].id } : {}) }),
     field('pr-reason', '驳回原因（有不勾的要填，商户能看到）', reason), msg);

@@ -368,12 +368,81 @@ async function planSweep(p: HTMLElement) {
 
 // ============ 异常到账、对账 ============
 const ANOM: Record<string, [string, string]> = { token: ['不支持的币', '不入账。需要时由你手动处理（例如联系商户后原路退回）'], below_min: ['低于 1 USDT', '不入账、不通知，只记录（防止垃圾转账）'], process_error: ['处理失败', '这笔到账没有入账，请联系研发处理（扫链没有因此停下）'] };
+// 异常到账分两个子标签：冲正（v1.1：到账入账后在链上消失，系统已自动冲正）、不支持的币和低于 1 USDT（原来的列表）。
+// 默认：有没处理的冲正就先看冲正，否则看原来的列表
+let anomTab: 'reversal' | 'other' | null = null;
+const CB_ST: Record<string, [string, string]> = { ok: ['approved', '已送达'], pending: ['submitted', '没送达，按现有规则自动重试'], failed: ['needs_info', '重试用完，没送达'] };
+const cbBadge = (cb: any) => (cb ? status(...(CB_ST[cb.status] || ['submitted', cb.status]) as [string, string]) : h('span', { class: 'muted' }, '商户没设回调地址'));
 render.anomalies = async (p) => {
-  const { items } = await call('anomalies');
-  p.replaceChildren(toolbar('异常到账'), h('p', { class: 'hint muted' }, '不支持的币每天检查一次，最多晚 24 小时出现在这里。过期后才到的 USDT 不算异常：已入账，记为客户未匹配的到账。'),
-    table(['时间', '类型', '商户', '客户', '地址', '金额', '系统的处理', ''], items.map((a: any) => [t(a.created_at), status(a.type === 'token' ? 'needs_info' : 'submitted', ANOM[a.type]?.[0] || a.type), a.merchant || '—', a.customer_id ? mono(a.customer_id) : '—', mono(shortAddr(a.address), a.address), a.amount,
-      h('span', { class: 'hint' }, ANOM[a.type]?.[1] || ''), a.handled ? h('span', { class: 'muted' }, '已处理') : h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: async () => { await call('anomaly-handle', { id: a.id }); render.anomalies(p); counts(); } }, '标记已处理')]), '暂无异常到账'));
+  const [{ items }, rv] = await Promise.all([call('anomalies'), call('reversals')]);
+  const others = items.filter((a: any) => a.type !== 'reversal');
+  const openRv = rv.items.filter((x: any) => !x.handled);
+  if (!anomTab) anomTab = openRv.length ? 'reversal' : 'other';
+  const tab = (k: 'reversal' | 'other', label: string, n: number) => h('button', { type: 'button', 'data-anomaly-tab': k, 'aria-pressed': String(anomTab === k), onclick: () => { anomTab = k; render.anomalies(p); } },
+    label, n ? h('span', { class: 'badge', title: `没处理的：${n}` }, String(n)) : null);
+  const tabs = h('div', { class: 'filters', role: 'group', 'aria-label': '异常到账分类' },
+    tab('reversal', '冲正（到账被撤回）', openRv.length), tab('other', '不支持的币、低于 1 USDT', others.filter((a: any) => !a.handled).length));
+  if (anomTab === 'other') {
+    p.replaceChildren(toolbar('异常到账'), tabs, h('p', { class: 'hint muted' }, '不支持的币每天检查一次，最多晚 24 小时出现在这里。过期后才到的 USDT 不算异常：已入账，记为客户未匹配的到账。'),
+      table(['时间', '类型', '商户', '客户', '地址', '金额', '系统的处理', ''], others.map((a: any) => [t(a.created_at), status(a.type === 'token' ? 'needs_info' : 'submitted', ANOM[a.type]?.[0] || a.type), a.merchant || '—', a.customer_id ? mono(a.customer_id) : '—', mono(shortAddr(a.address), a.address), a.amount,
+        h('span', { class: 'hint' }, ANOM[a.type]?.[1] || ''), a.handled ? h('span', { class: 'muted' }, '已处理') : h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: async () => { await call('anomaly-handle', { id: a.id }); render.anomalies(p); counts(); } }, '标记已处理')]), '暂无异常到账'));
+    return;
+  }
+  // 冲正：有欠款的排最前
+  const list = [...rv.items].sort((a: any, b: any) => Number(a.handled) - Number(b.handled) || (b.handled ? 0 : u(b.debt_added) - u(a.debt_added)));
+  const first = openRv.sort((a: any, b: any) => u(b.debt_added) - u(a.debt_added))[0];
+  const top = !first
+    ? h('section', { class: 'hero-todo', 'data-hero': 'ok' }, h('div', { class: 'stack-sm' }, h('h2', { class: 'm0' }, '现在没事要做'),
+      h('p', { class: 'muted m0' }, '每笔到账入账后 24 小时内，系统至少再复核 2 次它还在不在链上。发现被撤回会自动冲正、回调商户、发邮件给你，记录出现在这里。')))
+    : h('section', { class: `hero-todo ${u(first.debt_added) ? 'hero-bad' : 'hero-warn'}`, 'data-hero': u(first.debt_added) ? 'bad' : 'warn' },
+      h('div', { class: 'stack-sm' }, h('h2', { class: 'm0' }, `有 ${openRv.length} 笔到账被链上撤回，系统已自动冲正，等你看一眼`),
+        h('p', { class: 'muted m0' }, u(first.debt_added) ? `${first.merchant}余额不够扣，记了欠款 ${usd(first.debt_added)} USDT：欠款还清前它不能提币，之后的到账先还欠款。` : '余额够扣，没有欠款。看完点"标记已处理"。')),
+      h('button', { type: 'button', class: 'btn btn-primary btn-lg', onclick: () => reversalDetail(p, first) }, u(first.debt_added) ? '去看有欠款的这笔' : '去看这笔冲正'));
+  const rows = list.map((x: any) => [t(x.reversed_at), x.merchant, mono(x.customer_id), chainName(x.chain), mono(x.txid.slice(0, 10) + '…', x.txid), usd(x.amount), usd(x.net),
+    u(x.debt_added) ? h('b', { class: 'bad' }, `欠款 ${usd(x.debt_added)}`) : '0.00', cbBadge(x.callback),
+    x.handled ? h('span', { class: 'muted' }, '已处理') : h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: (e: Event) => { e.stopPropagation(); reversalDetail(p, x); } }, '去看这笔')]);
+  const parts: (HTMLElement | null)[] = [toolbar('异常到账'), tabs, top,
+    h('p', { class: 'hint muted' }, '冲正 = 账本追加一行，扣回这笔入账金额、退回收的手续费，旧记录不改；只扣可用余额，冻结的不动，不够扣的记成欠款；同一笔不会冲正两次。复核时节点连不上不算消失。'),
+    table(['冲正时间', '商户', '客户', '链', '交易哈希', '到账金额', '扣回（已退手续费）', '记成欠款', '回调商户', ''], rows, '没有冲正记录。',
+      { onRow: (i) => reversalDetail(p, list[i]), rowAttrs: (i) => ({ class: 'clickable', 'data-reversal-row': list[i].txid }) })];
+  parts.push(h('div', { class: 'stack-sm', 'data-recheck-inconclusive': '' }, h('h2', { class: 'h-sm' }, '复核没下结论的（不会冲正）'),
+    h('p', { class: 'hint muted m0' }, '复核时节点连不上或比扫链进度落后，这次不算消失、不冲正；在复核时段内稍后自动再查，不用你做什么。'),
+    table(['入账时间', '商户', '链', '交易哈希', '到账金额', '最后一次复核', '系统的处理'], rv.inconclusive.map((x: any) => [t(x.credited_at), x.merchant, chainName(x.chain), mono(x.txid.slice(0, 10) + '…', x.txid), usd(x.amount), t(x.last_checked_at),
+      h('span', { class: 'hint' }, x.last_result === 'gone' ? '查到没了，等至少 10 分钟后用不落后的节点再确认' : x.next_at ? '节点连不上，稍后自动再查' : '节点一直连不上，复核时段已过，不会冲正')]), '没有。')));
+  p.replaceChildren(...parts.filter(Boolean) as HTMLElement[]);
 };
+const chainName = (c: string) => ({ tron: 'TRON', eth: '以太坊', bsc: 'BSC' } as Record<string, string>)[c] || c;
+/** 冲正详情：时间线（入账 → 复核 → 没了 → 确认 → 账本追加冲正 → 订单解除匹配 → 回调 → 邮件）、标记已处理 */
+function reversalDetail(p: HTMLElement, x: any) {
+  const dot = (kind: '' | 'bad' | 'warn', mark: string, text: string, when?: string | null) => h('li', { class: `tl-${kind || 'ok'}` }, h('span', { class: 'tl-dot', 'aria-hidden': 'true' }, mark), h('span', {}, text, when ? h('span', { class: 'hint muted' }, ` · ${t(when)}`) : null));
+  const checks = (x.rechecks || []).map((c: any, i: number) => dot(c.result === 'present' ? '' : c.result === 'gone' ? 'bad' : 'warn', c.result === 'present' ? '✓' : '!',
+    `第 ${i + 1} 次复核：${c.result === 'present' ? '还在链上' : c.result === 'gone' ? '链上找不到这笔转账了（例如链重组）' : '节点连不上或落后，不算消失'}`, c.at));
+  const cbOk = x.callback?.status === 'ok';
+  const steps = h('ol', { class: 'rv-timeline', 'data-reversal-timeline': '' },
+    dot('', '✓', `入账 ${usd(x.net)}（到账 ${usd(x.amount)}，收款手续费 ${usd(x.fee)}）`, x.credited_at), ...checks,
+    dot('', '✓', u(x.debt_added) ? `账本追加冲正：扣回入账 ${usd(x.net)}；可用余额只扣得到 ${usd(x.taken)}，差额 ${usd(x.debt_added)} 记成欠款（余额不会变负）` : `账本追加冲正：扣回 ${usd(x.amount)}、退回手续费 ${usd(x.fee)}，可用余额减 ${usd(x.net)}`, x.reversed_at),
+    dot('', '✓', x.order_no ? `订单 ${x.order_no} 解除匹配，已发 order.matched 回调` : '这笔没有匹配订单'),
+    !x.callback ? dot('warn', '!', '回调 deposit.reversed：商户没设回调地址，没发出') : dot(cbOk ? '' : 'warn', cbOk ? '✓' : '!', cbOk ? '回调 deposit.reversed 已送达商户' : x.callback.status === 'failed' ? '回调 deposit.reversed 重试用完，没送达' : '回调 deposit.reversed 还没送达，按现有规则自动重试'),
+    dot('', '✓', '邮件已发给你（配了收件人时）'));
+  const msg = h('div');
+  const done = h('button', { type: 'button', class: 'btn btn-primary', 'data-reversal-handle': '', disabled: x.handled || !x.id }, x.handled ? '已处理' : '标记已处理') as HTMLButtonElement;
+  done.addEventListener('click', async () => {
+    done.disabled = true; done.textContent = '正在标记…';
+    try { await call('anomaly-handle', { id: x.id }); }
+    catch (e) { done.disabled = false; done.textContent = '标记已处理'; msg.replaceChildren(h('p', { class: 'alert m0' }, `没标记上：${errText(e)}`)); return; }
+    say('已标记为已处理'); await render.anomalies(p); counts();
+  });
+  const body = h('section', { class: 'card stack', 'data-reversal-detail': x.txid },
+    h('div', { class: 'toolbar' }, h('h2', { class: 'h-sm m0' }, `冲正详情 · ${x.txid.slice(0, 10)}…`), h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => body.remove() }, '收起')),
+    h('dl', { class: 'kv' }, ...([['商户', x.merchant], ['客户', mono(x.customer_id)], ['链', chainName(x.chain)], ['交易哈希', mono(x.txid)], ['收款地址', mono(x.address)], ['冲正时间', t(x.reversed_at)]] as [string, any][]).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
+    u(x.merchant_debt) ? h('p', { class: 'alert m0' }, `${x.merchant}现在欠款 ${usd(x.merchant_debt)} USDT：欠款还清前不能提币（后台和 API 都挡，已提交的单也不能通过），之后的到账先还欠款，还清后自动恢复。`) : null,
+    steps, h('p', { class: 'hint muted m0' }, '"标记已处理"只是给你自己记一笔，不动钱。'), msg, h('div', {}, done));
+  // 详情放在冲正列表下面（不用弹窗：一边看列表一边看时间线）
+  p.querySelector('[data-reversal-detail]')?.remove();
+  const anchor = p.querySelector('[data-recheck-inconclusive]');
+  if (anchor) anchor.before(body); else p.append(body);
+  body.scrollIntoView({ block: 'nearest' });
+}
 render.recon = async (p) => {
   const r = await call('recon');
   // 立即对账：和每天的自动任务相同（对账、检查其他代币、提醒）。测试环境没有每天的自动任务，要用这个按钮

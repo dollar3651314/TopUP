@@ -120,6 +120,12 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
       return Response.json(ad.block(body.address, body.blocked !== false));
     }
     if (path === '/__fake/tick/') return Response.json(await d.tick());
+    // v1.1 冲正复核：gone 里的交易算没了，unreachable 时一律当节点连不上；now 不传为现在
+    if (path === '/__fake/recheck/') {
+      const gone = new Set(Array.isArray(body.gone) ? body.gone.map(String) : []);
+      const check = async (x) => { if (body.unreachable) throw Object.assign(new Error('unreachable'), { code: 'ECONNREFUSED' }); return !gone.has(x.txid); };
+      return Response.json(await d.recheck({ check, now: body.now ? Number(body.now) : Date.now() }));
+    }
     if (path === '/__fake/daily/') return Response.json(await d.daily());
     if (path === '/__fake/sql/' && process.env.FAKE_SQL === '1') return Response.json(await d.db.query(body.sql, body.params || []));
     return null;

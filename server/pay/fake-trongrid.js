@@ -19,6 +19,8 @@ export function createFakeTron({ network = 'nile', contract = 'TXYZopYRdj2D9XRtb
       events.push(e); events.sort((a, b) => a.time - b.time);
       return e;
     },
+    /** 冲正复核（server/pay/reversal.js）：替身链上有没有这笔转账 */
+    hasTransfer(txid, logIndex = 0) { return events.some((e) => e.txid === txid && e.logIndex === logIndex); },
     async transfers({ minTs, maxTs, fingerprint }) {
       const all = events.filter((e) => e.time >= minTs && e.time <= maxTs);
       const start = fingerprint ? Number(fingerprint) : 0;

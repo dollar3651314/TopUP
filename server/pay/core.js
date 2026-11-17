@@ -83,15 +83,40 @@ export async function enqueueCallback(q, merchantId, type, data) {
 export async function post(q, merchantId, type, dAvail, dFrozen, ref, customerId = null) {
   let b;
   try {
-    [b] = await q.query('update balances set available = available + $2, frozen = frozen + $3 where merchant_id = $1 returning available, frozen', [merchantId, dAvail, dFrozen]);
+    [b] = await q.query('update balances set available = available + $2, frozen = frozen + $3 where merchant_id = $1 returning available, frozen, debt', [merchantId, dAvail, dFrozen]);
   } catch (e) {
     if (/check constraint/i.test(e.message)) throw new PayError('insufficient_balance');
     throw e;
   }
   if (!b) throw new PayError('merchant_not_found', 404);
-  await q.query('insert into ledger (merchant_id, type, amount, available_after, frozen_after, ref, customer_id) values ($1, $2, $3, $4, $5, $6, $7)',
-    [merchantId, type, type === 'withdraw' || type === 'fee_out' ? dFrozen : dAvail, b.available, b.frozen, ref, customerId]);
+  await q.query('insert into ledger (merchant_id, type, amount, available_after, frozen_after, ref, customer_id, debt_after) values ($1, $2, $3, $4, $5, $6, $7, $8)',
+    [merchantId, type, type === 'withdraw' || type === 'fee_out' ? dFrozen : dAvail, b.available, b.frozen, ref, customerId, b.debt]);
   return b;
+}
+/**
+ * v1.1 冲正和欠款：改可用余额和欠款并追加账本（reversal、debt_repay）。debt_after 是变动后的欠款。
+ * 账本 amount 默认是可用余额的变化（dAvail）；冲正一行写入账净额（amount），明细（detail）写从可用余额扣多少、记成欠款多少。
+ * 可用余额不许为负、欠款不许为负（数据库约束）；调用方先算好不会越界的金额
+ */
+export async function postDebt(q, merchantId, type, dAvail, dDebt, ref, customerId = null, { amount = dAvail, detail = {} } = {}) {
+  const [b] = await q.query('update balances set available = available + $2, debt = debt + $3 where merchant_id = $1 returning available, frozen, debt', [merchantId, dAvail, dDebt]);
+  if (!b) throw new PayError('merchant_not_found', 404);
+  await q.query('insert into ledger (merchant_id, type, amount, available_after, frozen_after, ref, customer_id, debt_after, detail) values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)',
+    [merchantId, type, amount, b.available, b.frozen, ref, customerId, b.debt, JSON.stringify(detail)]);
+  return b;
+}
+/** 有欠款（到账被冲正、余额不够扣）时不能提币：开放 API、商户后台的提币和批量打款都挡（409 debt_outstanding），已有的待审核单也不能通过。lock：在事务里锁住余额行 */
+export async function assertNoDebt(q, merchantId, lock = false) {
+  const [b] = await q.query(`select debt from balances where merchant_id = $1${lock ? ' for update' : ''}`, [merchantId]);
+  if (b && Number(b.debt) > 0) throw new PayError('debt_outstanding', 409);
+}
+/** 到账入账后先还欠款：还 min(可用余额, 欠款)，账本追加一行 debt_repay（同一个事务里，到账、手续费两行之后） */
+export async function repayDebt(q, merchantId, ref, customerId = null) {
+  const [b] = await q.query('select available, debt from balances where merchant_id = $1 for update', [merchantId]);
+  const x = b ? Math.min(Number(b.available), Number(b.debt)) : 0;
+  if (x <= 0) return 0;
+  await postDebt(q, merchantId, 'debt_repay', -x, -x, ref, customerId);
+  return x;
 }
 
 // ---------- 商户 ----------
@@ -225,6 +250,23 @@ export async function setMatch(db, merchantId, orderId, depositId, match, actor)
 }
 
 /**
+ * v1.1 冲正：到账被冲正时解除它的订单匹配（订单 matched 减回、状态按现在重算），发 order.matched 回调。在调用方的事务里；返回订单号（没匹配为 null）
+ */
+export async function releaseDepositMatch(t, drow, now = Date.now()) {
+  if (!drow.order_id) return null;
+  await lockCustomer(t, drow.merchant_id, drow.customer_id);
+  const [row] = await t.query('select * from orders where id = $1 for update', [drow.order_id]);
+  if (!row) return null;
+  const o = toOrder(row), d = toDeposit(drow);
+  if (!ruleUnmatch(o, d, now)) return null;
+  await saveDepositMatch(t, d);
+  await saveOrder(t, o);
+  await refreshUnmatched(t, drow.merchant_id, drow.customer_id);
+  await orderCallback(t, drow.merchant_id, o.id);
+  return o.id;
+}
+
+/**
  * 到了过期时间、还没达到下限的订单：改为已过期或部分付款（已过期）。由每分钟的任务调用。
  * 过期后再等 EXPIRY_GRACE_MS 才处理：链上确认和扫描要 1～2 分钟，过期前付的钱可能过期后才扫到；
  * 扫到时按链上付款时间匹配（matchOnDeposit），订单这时还没关闭，就能匹配上
@@ -291,6 +333,7 @@ export async function recordDeposit(db, { chain = 'tron', txid, logIndex, block,
     const ref = txid.slice(0, 16);
     await post(t, c.merchant_id, 'deposit', amount, 0, ref, c.customer_id);
     if (fee) await post(t, c.merchant_id, 'fee_in', -fee, 0, ref, c.customer_id);
+    await repayDebt(t, c.merchant_id, ref, c.customer_id); // v1.1：有欠款时到账先还欠款
     await t.query('update customers set total = total + $3, count = count + 1, fees = fees + $4, last_at = greatest(coalesce(last_at, $5), $5) where merchant_id = $1 and customer_id = $2',
       [c.merchant_id, c.customer_id, amount, fee, new Date(time)]);
     let order = null;
@@ -312,6 +355,7 @@ export async function recordDeposit(db, { chain = 'tron', txid, logIndex, block,
 
 // ---------- 提币 ----------
 export async function requestWithdrawal(db, merchant, { kind, chain = 'tron', to, amount, customerId = null, source, merchantRef = null }) {
+  await assertNoDebt(db, merchant.id); // 有欠款先说欠款（参数再对也提不了）；事务里锁住余额行再查一次
   if (!['payout', 'cashout'].includes(kind)) throw new PayError('invalid_param', 422, 'kind');
   if (!PAYOUT_CHAINS.includes(chain)) throw new PayError('invalid_param', 422, 'chain');
   const addr = chainAddress(chain, to);
@@ -322,6 +366,7 @@ export async function requestWithdrawal(db, merchant, { kind, chain = 'tron', to
   if (customerId !== null && !CUSTOMER_RE.test(customerId)) throw new PayError('invalid_param', 422, 'customer_id');
   const fee = calcFee(amount, merchant.fee_out);
   return db.tx(async (t) => {
+    await assertNoDebt(t, merchant.id, true);
     if (customerId && kind === 'payout') await ensureCustomer(t, merchant.id, customerId);
     const id = newId.withdrawal();
     await post(t, merchant.id, 'freeze', -(amount + fee), amount + fee, id, customerId);

@@ -310,6 +310,36 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const rows = await db.query(`select a.*, m.name merchant from anomalies a left join merchants m on m.id = a.merchant_id order by a.created_at desc limit 200`);
       return { items: rows.map((a) => ({ id: String(a.id), type: a.type, merchant: a.merchant, customer_id: a.customer_id, address: a.address, amount: a.amount, ref: a.ref, handled: a.handled, created_at: iso(a.created_at) })) };
     },
+    /**
+     * v1.1 冲正：每笔冲正（异常到账 reversal 一行 + 到账的冲正明细 + 回调送达情况 + 复核记录）和"复核没下结论的"（还是 credited、最后一次复核出错或没确认完）
+     */
+    async reversals() {
+      const rows = await db.query(`select a.id anomaly_id, a.handled, d.id, d.chain, d.txid, d.log_index, d.address, d.merchant_id, m.name merchant, d.customer_id, d.amount, d.fee, d.time, d.created_at credited_at,
+          d.reversed_at, d.reversal, b.debt merchant_debt
+        from anomalies a join deposits d on a.ref = d.chain || ':' || d.txid || ':' || d.log_index join merchants m on m.id = d.merchant_id join balances b on b.merchant_id = d.merchant_id
+        where a.type = 'reversal' and d.result = 'reversed' order by d.reversed_at desc limit 200`);
+      const ids = rows.map((r) => Number(r.id));
+      const checks = ids.length ? await db.query(`select deposit_id, checked_at, result from deposit_rechecks where deposit_id = any($1::bigint[]) order by checked_at, id`, [ids]) : [];
+      const cbs = rows.length ? await db.query(`select status, attempts, last_code, payload->'data'->>'txid' txid, created_at from callbacks where event = 'deposit.reversed' and payload->'data'->>'txid' = any($1::text[]) order by created_at`, [rows.map((r) => r.txid)]) : [];
+      const items = rows.map((r) => {
+        const x = r.reversal || {};
+        const cb = cbs.filter((c) => c.txid === r.txid).at(-1);
+        return {
+          id: r.anomaly_id ? String(r.anomaly_id) : null, handled: r.handled, deposit_id: String(r.id), chain: r.chain, txid: r.txid, address: r.address, merchant_id: r.merchant_id, merchant: r.merchant, customer_id: r.customer_id,
+          amount: Number(r.amount), fee: Number(r.fee), net: Number(x.net ?? Number(r.amount) - Number(r.fee)), taken: Number(x.taken ?? 0), debt_added: Number(x.debt_added ?? 0), merchant_debt: Number(r.merchant_debt),
+          order_no: x.order_no || null, time: iso(r.time), credited_at: iso(r.credited_at), reversed_at: iso(r.reversed_at),
+          callback: cb ? { status: cb.status, attempts: cb.attempts, last_code: cb.last_code } : null,
+          rechecks: checks.filter((c) => Number(c.deposit_id) === Number(r.id)).map((c) => ({ at: iso(c.checked_at), result: c.result })),
+        };
+      });
+      // 复核没下结论的：还是已入账、最后一次复核出错（节点连不上 / 落后）或者查到没了还没确认；最近 7 天入账的
+      const unsure = await db.query(`select d.id, d.chain, d.txid, d.amount, d.merchant_id, m.name merchant, d.customer_id, d.created_at, r.checked_at, r.result, r.detail, d.recheck_next_at
+        from deposits d join merchants m on m.id = d.merchant_id
+        join lateral (select checked_at, result, detail from deposit_rechecks x where x.deposit_id = d.id order by checked_at desc, id desc limit 1) r on true
+        where d.result = 'credited' and d.created_at > now() - interval '7 days' and r.result in ('error', 'gone') order by r.checked_at desc limit 200`);
+      return { items, inconclusive: unsure.map((u) => ({ deposit_id: String(u.id), chain: u.chain, txid: u.txid, amount: Number(u.amount), merchant: u.merchant, customer_id: u.customer_id, credited_at: iso(u.created_at),
+        last_checked_at: iso(u.checked_at), last_result: u.result, reason: u.detail || null, next_at: iso(u.recheck_next_at) })) };
+    },
     async 'anomaly-handle'(b, actor) { await db.query('update anomalies set handled = true where id = $1', [Number(b.id)]); await audit(db, actor, 'anomaly.handled', String(b.id)); return { ok: true }; },
     /** 立即运行每日任务（对账、其他代币检查、提醒）：worker 没跑或需要补跑时手动运行 */
     async 'recon-run'(b, actor) {
@@ -321,7 +351,9 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     async recon() {
       const rows = await db.query('select * from recon order by day desc limit 30');
       // 商户收款合计按账本（ledger 的 deposit 记录）计算，客户合计按客户表：两边来自不同的记录，对不上才说明有问题
-      const per = await db.query(`select m.id, m.name, coalesce((select sum(amount) from ledger l where l.merchant_id = m.id and l.type = 'deposit'), 0)::bigint deposits,
+      // 冲正过的到账（v1.1）客户合计已经扣回，商户这边也减掉
+      const per = await db.query(`select m.id, m.name, coalesce((select sum(amount) from ledger l where l.merchant_id = m.id and l.type = 'deposit'), 0)::bigint
+        - coalesce((select sum(amount) from deposits d where d.merchant_id = m.id and d.result = 'reversed'), 0)::bigint deposits,
         coalesce((select sum(total) from customers c where c.merchant_id = m.id), 0)::bigint customers from merchants m order by m.created_at`);
       return { days: rows.map((r) => ({ day: iso(r.day).slice(0, 10), balances: r.balances, chain: r.chain, fees: r.fees, diff: r.diff, detail: r.detail })), merchants: per.map((p) => ({ id: p.id, name: p.name, deposits_total: p.deposits, customers_total: p.customers, ok: p.deposits === p.customers })) };
     },
@@ -336,8 +368,8 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const one = async (sql, p = []) => (await db.query(sql, p))[0];
       const DAY0 = `(date_trunc('day', now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai')`; // 东八区的今天 0 点
       const col = await one(`select coalesce(sum(amount), 0)::bigint v, count(*)::int n from deposits where result = 'credited'`);
-      const bal = await one('select coalesce(sum(available), 0)::bigint available, coalesce(sum(frozen), 0)::bigint frozen from balances');
-      const fin = await one(`select coalesce(-sum(amount), 0)::bigint v from ledger where type = 'fee_in'`);
+      const bal = await one('select coalesce(sum(available), 0)::bigint - coalesce(sum(debt), 0)::bigint available, coalesce(sum(frozen), 0)::bigint frozen from balances'); // 欠款（v1.1）从应付里减掉
+      const fin = await one(`select coalesce(-sum(amount), 0)::bigint - coalesce((select sum(fee) from deposits where result = 'reversed'), 0)::bigint v from ledger where type = 'fee_in'`);
       const fout = await one(`select coalesce(-sum(amount), 0)::bigint v from ledger where type = 'fee_out'`);
       const dust = await one(`select coalesce(sum(amount), 0)::bigint v from deposits where result = 'below_min'`);
       const uns = await one('select coalesce(sum(onchain), 0)::bigint v, count(*) filter (where onchain > 0)::int n from customers');
@@ -403,7 +435,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const tronParent = layer?.providers?.contract?.scheme?.('tron')?.parent;
       const coldChains = evmChains.filter((ch) => !(ch === 'tron' && tronParent && tronParent === cold));
       const evmCold = Object.fromEntries(await Promise.all(coldChains.map(async (ch) => [ch, await within((async () => Number(await layer.providers.contract.balance(ch, { vault: 'cold' })))())])));
-      const [bal] = await db.query('select coalesce(sum(available + frozen), 0)::bigint owed from balances');
+      const [bal] = await db.query('select coalesce(sum(available + frozen - debt), 0)::bigint owed from balances');
       const [uns] = await db.query('select coalesce(sum(onchain), 0)::bigint v from customers');
       const evmUns = await evmUnswept(db, { chains: ['eth', 'bsc', ...(evmChains.includes('tron') ? ['tron'] : [])] });
       const unsAll = Number(uns.v) + Object.values(evmUns).reduce((a, x) => a + Number(x.total), 0);

@@ -77,6 +77,8 @@ export function createFakeEvm({ chain, usdt, decimals, confirmations = 0, parent
       return { chain, txid: e.txid, block: e.block, to: e.to, amount: String(amount) };
     },
     async head() { return block + confirmations; },
+    /** 冲正复核（server/pay/reversal.js）：替身链上有没有这笔转账 */
+    hasTransfer(txid, logIndex = 0) { return transfersList.some((e) => e.txid === txid && e.logIndex === logIndex); },
     async transfers({ cursor, addresses = [] }) {
       const start = cursor === null || cursor === undefined || cursor === '' ? 0 : Number(cursor);
       const want = new Set(addresses.map(key));

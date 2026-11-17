@@ -86,12 +86,14 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
   return {
     /** 打款审核页：待审核的（单笔、商户批量分组）、各链凑批卡片、最近的签名批次、上限、处理时段 */
     async 'payout-overview'() {
-      const rows = await db.query(`select w.*, m.name merchant, m.cashout_wallets from withdrawals w join merchants m on m.id = w.merchant_id where w.status = 'pending' order by w.created_at, coalesce(w.batch_line, 0), w.id limit 1000`);
+      const rows = await db.query(`select w.*, m.name merchant, m.cashout_wallets, b.debt merchant_debt from withdrawals w join merchants m on m.id = w.merchant_id join balances b on b.merchant_id = w.merchant_id where w.status = 'pending' order by w.created_at, coalesce(w.batch_line, 0), w.id limit 1000`);
       // 代付的收款地址是不是第一次付（原型偏离第 2 条：没有白名单，审核时提示）
       const seen = new Set((await db.query(`select distinct merchant_id || '|' || chain || '|' || lower(to_address) k from withdrawals where status = 'completed'`)).map((r) => r.k));
       const item = (w) => ({
         id: w.id, merchant_id: w.merchant_id, merchant: w.merchant, kind: w.kind, chain: w.chain, to: w.to_address, amount: usdt(w.amount), fee: usdt(w.fee), source: w.source,
         customer_id: w.customer_id, merchant_ref: w.merchant_ref, batch_no: w.batch_ref || null, created_at: iso(w.created_at),
+        // v1.1：商户有欠款（到账被冲正）时不能通过，还清后再审（可以驳回）
+        merchant_debt: usdt(w.merchant_debt), limit_check: Number(w.merchant_debt) > 0 ? 'debt_outstanding' : 'ok',
         registered: w.kind === 'cashout', first_time: w.kind === 'payout' && !seen.has(`${w.merchant_id}|${w.chain}|${String(w.to_address).toLowerCase()}`),
       });
       const singles = rows.filter((w) => !w.batch_ref).map(item);

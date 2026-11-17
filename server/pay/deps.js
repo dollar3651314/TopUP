@@ -14,6 +14,7 @@ import { createAdminGate } from './admin-gate.js';
 import { testAdminHash, createTestnetCheck, testMerchantIpBypass, TEST_MERCHANT_IP_BYPASS_ENV } from './test-admin.js';
 import { runTick } from './tick.js';
 import { runDaily } from './daily.js';
+import { recheckDeposits, createChainCheck } from './reversal.js';
 import { decryptJson } from '../kyb/crypto.js';
 import { createWalletLayer } from '../wallet/index.js';
 import { scanEvm } from '../wallet/scan.js';
@@ -80,14 +81,17 @@ export async function createPayDeps({ config, kyb, send, getIp, origin }) {
   // 启动时核对 BatchPayout（热钱包是 payer、代码哈希、owner 是冷钱包 Safe）：不一致停用这条链的打款并告警；连不上的每轮再核对
   if (payoutSvc) await payoutSvc.verify().catch((e) => console.error(`[payout] onchain check: ${e.message}`));
   const pendingKyb = kyb.pendingKyb || (async () => 0);
+  // v1.1 冲正：worker 每轮复核到期的到账；本地替身用 POST /__fake/recheck/ 指定哪些没了
+  const chainCheck = createChainCheck({ db, tron, layer });
+  const recheck = (opts = {}) => recheckDeposits(db, { check: chainCheck, notify, ...opts });
   return {
-    db, tron, keys, ops, wallets, layer,
+    db, tron, keys, ops, wallets, layer, recheck,
     v1: createApiV1({ db, keys, ops, getIp, redis: kyb.redis, ipBypass: ipBypassId ? { merchantId: ipBypassId, testnetCheck } : null }), // 限流计数和开户共用同一个 Redis
     merchant: createMerchantApi({ db, keys, ops, send }),
     pay: createPayApi({ db, layer, redis: kyb.redis, getIp }), // 按 IP 限流，和开放 API 共用 Redis
     wallet: createWalletApi({ db, tron, keys, wallets, send, origin, notify, layer, listApproved, pendingKyb, runDaily: () => runDaily({ db, tron, wallets, layer, notify, diskPath, incompleteDays: config.reconIncompleteDays }), diskPath, payoutSvc, ...gate }),
     tick: () => runTick({
-      db, tron, getTarget, notify, adminUrl: `${origin}/admin/`,
+      db, tron, getTarget, notify, adminUrl: `${origin}/admin/`, recheck: () => recheck(),
       scanEvm: () => scanEvm(db, { layer, notify }),
       confirmPayouts: payoutSvc ? async () => {
         if (Object.keys(pchains).some((ch) => payoutSvc.onchain[ch]?.result !== 'ok' && payoutSvc.onchain[ch]?.result !== 'mismatch')) await payoutSvc.verify().catch(() => {});

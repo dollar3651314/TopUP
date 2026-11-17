@@ -101,12 +101,14 @@ export async function notifyWithdrawals(db, notify, adminUrl) {
   return rows.length;
 }
 
-export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetchImpl, resolve, confirmSweeps, scanEvm, confirmPayouts, operatorGas, now = () => Date.now() }) {
+export async function runTick({ db, tron, getTarget, notify, adminUrl = '', fetchImpl, resolve, confirmSweeps, scanEvm, confirmPayouts, operatorGas, recheck, now = () => Date.now() }) {
   const t0 = Date.now();
   const out = {};
   const step = async (name, fn) => { try { out[name] = await fn(); } catch (e) { out[name] = { error: e.message }; console.error(`[tick] ${name}: ${e.message}`); } };
   await step('scan', () => scan(db, tron, { onError: notify && ((ids) => notify('到账处理失败', `以下链上转账没有处理成功，已记到"异常到账"，请联系研发：\n${ids.join('\n')}`)) }));
   if (scanEvm) await step('scan_evm', () => scanEvm()); // ETH、BSC（server/wallet/scan.js，每条链各自出错各自告警）
+  // v1.1：入账后 24 小时内复核到账还在不在链上，没了就冲正（server/pay/reversal.js）
+  if (recheck) await step('recheck', () => recheck());
   await step('expired', () => expireOrders(db));
   await step('withdrawals', () => confirmWithdrawals(db, tron, { notify, now: now() }));
   if (confirmPayouts) await step('payouts', () => confirmPayouts()); // 以太坊、BSC 批量打款：按回执整批确认或整批回到已审核

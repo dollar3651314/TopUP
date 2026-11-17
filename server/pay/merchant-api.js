@@ -175,13 +175,13 @@ export function createMerchantApi({ db, keys, ops, send, now = () => Date.now() 
     const kind = q.get('type');
     const customerId = q.get('customer_id') || '';
     if (kind === 'deposits' || kind === 'customer') {
-      const rows = await db.query(`select * from deposits where merchant_id = $1 and result = 'credited' and ($2 = '' or customer_id = $2) order by id desc limit 20000`, [m.id, customerId]); // 低于 1 USDT 的不给商户看
+      const rows = await db.query(`select * from deposits where merchant_id = $1 and result in ('credited', 'reversed') and ($2 = '' or customer_id = $2) order by id desc limit 20000`, [m.id, customerId]); // 低于 1 USDT 的不给商户看；冲正过的照样导出
       return csv(rows, [['time', (r) => iso(r.time)], ['customer_id', (r) => r.customer_id], ['address', (r) => r.address], ['txid', (r) => r.txid], ['amount', (r) => amt(r.amount)], ['fee', (r) => amt(r.fee)],
-        ['credited', (r) => (r.result === 'credited' ? amt(r.amount - r.fee) : '0.00')], ['result', (r) => r.result], ['order_no', (r) => r.order_id || ''], ['matched_by', (r) => r.match_type || '']]);
+        ['credited', (r) => amt(r.amount - r.fee)], ['result', (r) => r.result], ['order_no', (r) => r.order_id || ''], ['matched_by', (r) => r.match_type || ''], ['reversed_at', (r) => iso(r.reversed_at) || '']]);
     }
     if (kind === 'ledger') {
       const rows = await db.query(`select * from ledger where merchant_id = $1 and ($2 = '' or customer_id = $2) order by id desc limit 20000`, [m.id, customerId]);
-      return csv(rows, [['time', (r) => iso(r.created_at)], ['type', (r) => r.type], ['amount', (r) => amt(r.amount)], ['available_after', (r) => amt(r.available_after)], ['frozen_after', (r) => amt(r.frozen_after)], ['ref', (r) => r.ref], ['customer_id', (r) => r.customer_id || '']]);
+      return csv(rows, [['time', (r) => iso(r.created_at)], ['type', (r) => r.type], ['amount', (r) => amt(r.amount)], ['available_after', (r) => amt(r.available_after)], ['frozen_after', (r) => amt(r.frozen_after)], ['debt_after', (r) => amt(r.debt_after)], ['ref', (r) => r.ref], ['customer_id', (r) => r.customer_id || '']]);
     }
     throw new PayError('invalid_param', 422, 'type');
   }
