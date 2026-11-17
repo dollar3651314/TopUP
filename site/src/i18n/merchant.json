@@ -433,6 +433,7 @@
       "bad_code": "The authenticator code is wrong or already used. Wait for the next code.",
       "insufficient_balance": "Insufficient balance: amount + fee exceeds your available balance.",
       "duplicate_merchant_order_no": "This order number already exists.",
+      "duplicate_merchant_ref": "This withdrawal reference was already used by another withdrawal (references are unique forever, including rejected and cancelled ones).",
       "order_mode_disabled": "Order mode is not enabled for your account.",
       "invalid_param": "Please check the highlighted field.",
       "invalid_setup_link": "This set-up link is invalid or has expired. Ask us to send a new one.",
@@ -521,6 +522,7 @@
         "decimals": "At most 6 decimals",
         "invalid_customer_id": "Customer ID may only use letters, digits and _ . @ -",
         "invalid_merchant_ref": "Reference is at most 64 characters",
+        "duplicate_merchant_ref": "Reference already used (by an earlier row or an existing withdrawal); references are unique forever",
         "duplicate_row": "Same as another row (chain, address and amount): pay twice?",
         "over_per_item_limit": "Over the platform per-payment limit of {limit} USDT: this payment will be rejected. Split it into several payments or contact the platform",
         "over_rows": "Rows {lines} are over the platform per-payment limit of {limit} USDT: they will be rejected. Split them into several payments or contact the platform"
@@ -997,6 +999,7 @@
       "bad_code": "动态码不正确或已经用过，请等下一个动态码。",
       "insufficient_balance": "余额不足：金额加手续费超过了可用余额。",
       "duplicate_merchant_order_no": "这个商户订单号已经存在。",
+      "duplicate_merchant_ref": "这个提现单号已经用过（单号永久唯一，驳回、取消的也算）。",
       "order_mode_disabled": "你的账户没有开启订单模式。",
       "invalid_param": "请检查标红的内容。",
       "invalid_setup_link": "设置链接无效或已过期，请联系我们重新发送。",
@@ -1085,6 +1088,7 @@
         "decimals": "小数最多 6 位",
         "invalid_customer_id": "客户标识只能用字母、数字和 _ . @ -",
         "invalid_merchant_ref": "单号最多 64 个字符",
+        "duplicate_merchant_ref": "单号已经用过（上面的行或已有的提现），单号永久唯一",
         "duplicate_row": "和别的行重复（链、地址、金额都相同）：确定要付两次吗？",
         "over_per_item_limit": "超过平台单笔上限 {limit} USDT：这一笔会被驳回，请拆成几笔或联系平台",
         "over_rows": "第 {lines} 行超过平台单笔上限 {limit} USDT：这几笔会被驳回，请拆成几笔或联系平台"

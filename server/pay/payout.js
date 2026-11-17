@@ -2,7 +2,7 @@
 // 按链凑批后的记账（ETH / BSC 一批一笔交易，失败整批回到已审核；TRON 逐笔记账，失败的回到已审核待签名）。
 // 金额一律是 0.000001 USDT 为单位的整数（这里用 Number；单笔、每批都远小于 2^53）。链上交易的出具、签名核对、广播在 server/wallet/payout.js。
 import { randomBytes } from 'node:crypto';
-import { PayError, audit, getMeta, setMeta, ensureCustomer, post, wdCallback, withdrawalView, chainAddress, PAYOUT_CHAINS, CUSTOMER_RE } from './core.js';
+import { PayError, audit, getMeta, setMeta, ensureCustomer, post, wdCallback, withdrawalView, chainAddress, PAYOUT_CHAINS, CUSTOMER_RE, MERCHANT_REF_MAX, withRefGuard } from './core.js';
 import { calcFee, fmtUsdt, parseUsdt } from './money.js';
 
 const U = 1_000_000;
@@ -240,7 +240,7 @@ export function checkPayoutRows(rows, merchant) {
     const cid = r?.customer_id ? String(r.customer_id).trim() : '';
     if (cid && !CUSTOMER_RE.test(cid)) errors.push('invalid_customer_id');
     const ref = r?.merchant_ref ? String(r.merchant_ref).trim() : '';
-    if (ref.length > 64) errors.push('invalid_merchant_ref');
+    if (ref.length > MERCHANT_REF_MAX) errors.push('invalid_merchant_ref');
     const fee = amount ? calcFee(amount, merchant.fee_out) : 0;
     return { index: i, line: r?.line ?? i + 1, chain: chain || String(r?.chain ?? ''), to: to || String(r?.to ?? ''), amount: amount || 0, fee, customer_id: cid || null, merchant_ref: ref || null, errors, warnings: [], ok: !errors.length };
   });
@@ -249,6 +249,21 @@ export function checkPayoutRows(rows, merchant) {
   for (const r of out) if (r.ok) { const k = `${r.chain}|${r.to.toLowerCase()}|${r.amount}`; seen.set(k, (seen.get(k) || 0) + 1); }
   for (const r of out) if (r.ok && seen.get(`${r.chain}|${r.to.toLowerCase()}|${r.amount}`) > 1) r.warnings.push('duplicate_row');
   return out;
+}
+/**
+ * 提现单号永久唯一（v1.1）：同一批里后出现的同号行、和这个商户已有提现（任何状态）同号的行，都加行错误 duplicate_merchant_ref。
+ * checked 是 checkPayoutRows 的结果（原地修改）；表格第 2 步和提交时共用。
+ */
+export async function markDuplicateRefs(q, merchantId, checked) {
+  const refs = [...new Set(checked.map((r) => r.merchant_ref).filter(Boolean))];
+  const used = new Set(refs.length ? (await q.query('select merchant_ref from withdrawals where merchant_id = $1 and merchant_ref = any($2::text[])', [merchantId, refs])).map((x) => x.merchant_ref) : []);
+  const seen = new Set();
+  for (const r of checked) {
+    if (!r.merchant_ref) continue;
+    if (used.has(r.merchant_ref) || seen.has(r.merchant_ref)) { r.errors.push('duplicate_merchant_ref'); r.ok = false; r.warnings = r.warnings.filter((w) => w !== 'duplicate_row'); }
+    seen.add(r.merchant_ref);
+  }
+  return checked;
 }
 /** 按链汇总：{ <链>: { count, amount, fee, total } }（金额是 USDT 字符串，网络费不另收） */
 export function totalsByChain(rows) {
@@ -268,14 +283,15 @@ export function totalsByChain(rows) {
 export async function submitPayoutBatch(db, merchant, { rows = [], source = 'web', onlyValid = false, now = Date.now(), notify = null, batchNo = null }) {
   if (!Array.isArray(rows) || !rows.length) throw new PayError('invalid_param', 422, 'rows');
   if (rows.length > MAX_ITEMS_PER_REQUEST) throw new PayError('too_many_items', 422, 'rows');
-  const checked = checkPayoutRows(rows, merchant);
+  const checked = await markDuplicateRefs(db, merchant.id, checkPayoutRows(rows, merchant));
   const bad = checked.filter((r) => !r.ok);
   if (bad.length && !onlyValid) throw Object.assign(new PayError('invalid_rows', 422, 'rows'), { rows: bad.map((r) => ({ index: r.index, line: r.line, code: r.errors[0], errors: r.errors })) });
   const good = checked.filter((r) => r.ok);
   if (!good.length) throw Object.assign(new PayError('invalid_rows', 422, 'rows'), { rows: bad.map((r) => ({ index: r.index, line: r.line, code: r.errors[0], errors: r.errors })) });
   const no = batchNo || newBatchNo(now);
   const sum = good.reduce((s, r) => s + r.amount + r.fee, 0);
-  const accepted = await db.tx(async (t) => {
+  // 两个请求同时用同一个单号：数据库唯一索引拒绝后到的，整批不收（409 duplicate_merchant_ref）
+  const accepted = await withRefGuard(db, merchant.id, good.map((r) => r.merchant_ref), () => db.tx(async (t) => {
     await t.query('insert into payout_batches (batch_no, merchant_id, source, item_count, total) values ($1, $2, $3, $4, $5)', [no, merchant.id, source, good.length, good.reduce((s, r) => s + r.amount, 0)]);
     // 一次冻结整批（余额不够时数据库约束拒绝，整批不收）；之后逐笔解冻 / 扣除
     await post(t, merchant.id, 'freeze', -sum, sum, no, null);
@@ -290,7 +306,7 @@ export async function submitPayoutBatch(db, merchant, { rows = [], source = 'web
     }
     await audit(t, `merchant:${merchant.id}`, 'payout.batch_submit', no, { count: good.length, source });
     return out;
-  });
+  }));
   const service = serviceWindow(now);
   if (notify) {
     const lines = Object.entries(totalsByChain(good)).map(([c, x]) => `- ${c.toUpperCase()}：${x.count} 笔，合计 ${x.amount} USDT`);
