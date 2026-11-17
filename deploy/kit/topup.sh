@@ -11,6 +11,7 @@
 #   sudo topup set 变量名 值      填一个不是密钥的设置（例如收件人邮箱），自动生效
 #   sudo topup gen-operator      测试环境：在服务器上生成两个归集发起账户（ETH/BSC 一个、TRON 一个），只显示地址
 #   sudo topup admin-token       显示一次运营后台的初始化口令（第一次进后台用，初始化后作废）
+#   sudo topup admin-reset --confirm   管理员密码 / 验证器丢了：删掉后台的管理员账号、换新的初始化口令（不显示），之后 admin-token 看新口令、重新初始化
 #   sudo topup gen-test-admin    测试环境：生成测试管理员的令牌（给 GitHub 上的自动验收用例用），服务器只存它的哈希，令牌只在屏幕上显示一次
 #   sudo topup test-admin-off    关掉测试管理员（删掉令牌的哈希，旧令牌立刻作废）
 #   sudo topup set TEST_MERCHANT_IP_BYPASS 商户编号   测试环境：这个测试商户调开放 API 提币、批量打款时不查 IP 白名单（给自动验收用例用）
@@ -18,6 +19,7 @@
 #   sudo topup test-mail         发一封测试邮件到 MAIL_TO
 #   sudo topup backup            立刻备份一次（每天的定时备份也是它）：本机加密保存，默认不传到别处
 #   sudo topup restore-drill     恢复演练：把本机最近一份备份解密、恢复进临时容器并核对，不碰正在运行的数据
+#   sudo topup restore [备份文件名] --confirm   把本机的备份恢复进正在运行的系统（先自动备份一次现在的；生产还要加 --production）
 #   sudo topup backup-key        （异地备份用，默认用不到）生成管理员的备份密钥对：公钥写进 deploy.env，私钥只在屏幕上显示一次
 #                                异地备份默认关闭；生产要开时 set BACKUP_OFFSITE r2 并填 R2_…，restore-drill --from-r2 从 R2 下载演练
 #   sudo topup rollback          换回上一个版本，并且不再自动更新到当前这个版本
@@ -47,6 +49,8 @@ OS_RELEASE=${TOPUP_OS_RELEASE:-/etc/os-release}
 # 容器之外 Docker 还要的（MB）：每个容器一个 containerd-shim、每个对外端口一个 docker-proxy（开发机实测 RSS 合计约 77 MB，见 README 第 3 节）
 # 启动前要求可用内存 ≥ 上限之和 + 这个数
 RESERVE_MB=100
+# 备份后清旧的；restore 先做的那次备份不清（要恢复的那一份可能正好是该清的）
+BACKUP_PRUNE=1
 HEALTH=http://127.0.0.1:18080/api/health/
 # 备份：本机保留 7 天、至少 3 份；本机备份合计超过 TOPUP_BACKUP_MAX_MB（按环境，deploy/profiles/；环境变量可以临时改）时从最旧的删起（至少留 3 份）
 # 本机备份的加密密钥（服务器自己生成，只在本机，600）
@@ -56,7 +60,7 @@ SECRET_KEYS="RESEND_API_KEY SMTP_PASS TRONGRID_API_KEY ETH_RPC_URL BSC_RPC_URL T
 # 可以用 set 填的普通设置（不是密钥，会显示）
 # TEST_MERCHANT_IP_BYPASS 只能在测试环境设（check_value 挡）；关掉用 test-merchant-ip-off
 # TOPUP_REAL_IP_HEADER、TOPUP_REAL_IP_FROM 只在平台网关模式用（真实 IP，写进 deploy.env）
-PLAIN_KEYS="MAIL_FROM MAIL_TO SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER ETH_CONFIRMATIONS BSC_CONFIRMATIONS TRON_CONFIRMATIONS TRONSAVE_MAX_PRICE_SUN TRON_RENT_MAX_ENERGY USDT_CONTRACT BACKUP_OFFSITE R2_ACCOUNT_ID R2_BUCKET TEST_MERCHANT_IP_BYPASS TOPUP_REAL_IP_HEADER TOPUP_REAL_IP_FROM"
+PLAIN_KEYS="MAIL_FROM MAIL_TO SMTP_HOST SMTP_PORT SMTP_SECURE SMTP_USER ETH_CONFIRMATIONS BSC_CONFIRMATIONS TRON_CONFIRMATIONS TRON_NODE_QPS TRONSAVE_MAX_PRICE_SUN TRON_RENT_MAX_ENERGY USDT_CONTRACT BACKUP_OFFSITE R2_ACCOUNT_ID R2_BUCKET TEST_MERCHANT_IP_BYPASS TOPUP_REAL_IP_HEADER TOPUP_REAL_IP_FROM"
 # 由部署决定的变量（compose.yml 的 environment 或镜像），不写进 .env
 MANAGED_KEYS="APP_ENV PUBLIC_URL HOST PORT TRUST_PROXY GIT_COMMIT DATABASE_URL REDIS_URL BLOB_DIR"
 DEPLOY_KEYS=" BACKUP_OFFSITE R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET BACKUP_AGE_RECIPIENT TOPUP_REAL_IP_HEADER TOPUP_REAL_IP_FROM "
@@ -74,9 +78,11 @@ die() {
   exit 1
 }
 start_log() {
+  local ts
   mkdir -p "$TOPUP_DIR/logs"
-  LOG="$TOPUP_DIR/logs/$1-$(date -u +%Y%m%d-%H%M%S).log"
-  : > "$LOG"
+  ts=$(date -u +%Y%m%d-%H%M%S)
+  # 文件名每次都不同（时间 + 随机后缀）：同一秒里跑两次也不会互相覆盖、互相删掉；mktemp 建的文件就是 600
+  LOG=$(mktemp "$TOPUP_DIR/logs/$1-$ts-XXXXXX.log") || { LOG=/dev/null; echo "✗ 建不了日志文件（$TOPUP_DIR/logs）"; exit 1; }
   chmod 600 "$LOG"
   # 日志只留 30 天
   find "$TOPUP_DIR/logs" -name '*.log' -mtime +30 -delete 2> /dev/null || true
@@ -756,8 +762,9 @@ backup_identity() {
 offsite_on() { [ "$(dval BACKUP_OFFSITE)" = r2 ]; }
 
 cmd_backup() {
-  local label=${1:-daily} ts dir out pub recip offsite=off
+  local label=${1:-daily} ts dir out pub recip offsite=off n=1
   start_log backup
+  case "$label" in '' | *[!A-Za-z0-9._-]*) die "备份标签只能用字母、数字、点、横线、下划线" "例如：sudo topup backup manual" ;; esac
   exec 8> "$TOPUP_DIR/state/backup.lock"
   flock -w 600 8 || die "上一次备份还没结束"
   pub=$(backup_identity) && [ -n "$pub" ] || die "备份：本机加密密钥不可用" "截图发运维"
@@ -773,7 +780,9 @@ cmd_backup() {
   echo "{\"at\":\"$ts\",\"label\":\"$label\",\"version\":\"$(cur_tag)\"}" > "$dir/meta.json"
   # 加密：收件人 = 本机密钥；管理员生成过备份公钥（backup-key）的话也加上，他的私钥也能解
   recip=(-r "$pub"); [ -z "$(dval BACKUP_AGE_RECIPIENT)" ] || recip+=(-r "$(dval BACKUP_AGE_RECIPIENT)")
+  # 文件名每次都不同：同一秒里已经有同名的（两次备份在同一秒里做完）就加序号；在备份锁里，不会有两个同时在挑名字
   out="$TOPUP_DIR/backup/topup-$ts-$label.tar.age"
+  while [ -e "$out" ] || [ -e "$out.part" ]; do n=$((n + 1)); out="$TOPUP_DIR/backup/topup-$ts-$n-$label.tar.age"; done
   # 明文不落盘成一个整包：直接打包进 age
   if ! ( umask 077; tar -C "$dir" -cf - . | age "${recip[@]}" -o "$out.part" ) 2>> "$LOG"; then
     rm -rf "$dir" "$out.part"; die "备份：加密失败" "截图发运维"
@@ -781,7 +790,7 @@ cmd_backup() {
   mv "$out.part" "$out"; chmod 600 "$out"
   rm -rf "$dir"
   ok "备份：本机已加密 $(basename "$out")（$(du -h "$out" | cut -f1)）"
-  backup_prune
+  [ "$BACKUP_PRUNE" = 0 ] || backup_prune
   # 异地（R2）：默认关闭；打开了但没配好只提示、不算失败
   if offsite_on; then
     if [ -z "$(dval BACKUP_AGE_RECIPIENT)" ] || [ -z "$(dval R2_ACCOUNT_ID)" ] || [ -z "$(dval R2_BUCKET)" ] || [ -z "$(dval R2_ACCESS_KEY_ID)" ] || [ -z "$(dval R2_SECRET_ACCESS_KEY)" ]; then
@@ -907,6 +916,155 @@ cmd_restore_drill() {
   echo "{\"at\":\"$(date -u +%FT%TZ)\",\"ok\":$([ $ok_all = 1 ] && echo true || echo false),\"source\":\"${src:-local}\"}" > "$TOPUP_DIR/state/last-drill.json"
   [ $ok_all = 1 ] || die "恢复演练没有全部通过" "截图发运维"
   ok "恢复演练通过（临时容器已删除，正在运行的数据没有动）"
+}
+
+# ---------- restore：把本机的一份加密备份恢复进正在运行的系统（数据库、Redis、开户文件）----------
+# 不写文件名用最新的一份；写了就用 backup/ 下的那一份。.env、deploy.env 不动（现在的口令、设置照旧），
+# 所以备份里的主密钥 APP_SECRET 和现在的不一样时拒绝（恢复出来的开户资料、加密字段会解不开）。
+# 顺序：解密核对（什么都不动）→ 先备份一次现在的（标签 pre-restore）→ 停 web、worker → pg_restore --clean（一个事务，失败就什么都没变）
+#       → Redis（停 Redis，备份里的数据作为 AOF 的基础文件放进 data/redis）→ 开户文件（data/blobs）→ 启动、等健康检查
+cmd_restore() {
+  local a name="" confirm="" prod="" enc tmp who rd_old bl_old
+  start_log restore
+  for a in "$@"; do
+    case "$a" in
+      --confirm) confirm=1 ;;
+      --production) prod=1 ;;
+      -*) die "不认识的参数：$a" "sudo topup restore [备份文件名] --confirm" ;;
+      *) [ -z "$name" ] || die "只能写一个备份文件名" "sudo topup restore [备份文件名] --confirm"; name=$a ;;
+    esac
+  done
+  [ -s "$TOPUP_DIR/state/image.env" ] || die "还没有部署过，没有可以恢复进去的系统" "先粘贴第一次部署的那条命令"
+  if [ -n "$name" ]; then
+    # 只认 backup/ 下的文件名（不认路径）
+    name=$(basename -- "$name")
+    case "$name" in topup-*.tar.age) ;; *) die "备份文件名应该是 topup-….tar.age（backup/ 下的文件名）；什么都没有改" "ls $TOPUP_DIR/backup 看有哪些" ;; esac
+    enc="$TOPUP_DIR/backup/$name"
+    [ -f "$enc" ] || die "本机没有这份备份：$name；什么都没有改" "ls $TOPUP_DIR/backup 看有哪些；不写文件名就用最新的一份"
+  else
+    enc=$(ls -1t "$TOPUP_DIR"/backup/topup-*.tar.age 2> /dev/null | head -1)
+    [ -n "$enc" ] || die "本机没有备份，没有可以恢复的；什么都没有改" "备份在别处（例如 R2）的，截图发运维"
+    name=$(basename "$enc")
+  fi
+  say "要恢复的备份：$name（$(date -r "$enc" '+%F %T %Z' 2> /dev/null)）"
+  if [ -z "$confirm" ]; then
+    say "✗ 还没有确认，什么都没有做。恢复会："
+    detail "1. 先把现在的数据备份一次（topup-<时间>-pre-restore.tar.age）"
+    detail "2. 停 web、worker（期间收银台和后台打不开，约 1～3 分钟）"
+    detail "3. 数据库、Redis（管理员账号、会话）、开户文件换成这份备份里的——备份之后新产生的数据都没有了"
+    detail "4. 重新启动、等健康检查通过。.env、deploy.env 不动"
+    detail "确认要做：sudo topup restore $name --confirm$([ "$(topup_env)" = production ] && echo ' --production')"
+    exit 1
+  fi
+  if [ "$(topup_env)" = production ] && [ -z "$prod" ]; then
+    die "这台是生产：恢复会丢掉备份之后的全部数据，还要再加 --production；什么都没有改" "确认要做：sudo topup restore $name --confirm --production"
+  fi
+  [ ! -f "$TOPUP_DIR/state/stopped" ] || die "TopUP 现在停着（sudo topup stop 停的）；什么都没有改" "先 sudo topup start，再运行同一条命令"
+  env_guard "什么都没有改（恢复后要重建 web、worker，带着这样的 .env 起不来）"
+  # 自动更新不要在恢复途中换版本
+  exec 9> "$TOPUP_DIR/state/update.lock"
+  flock -w 900 9 || die "自动更新一直没有结束；什么都没有改" "等几分钟再运行同一条命令"
+
+  # 1. 解密到临时目录（里面有明文，退出时删掉）并核对；这一步什么都不动
+  tmp=$(mktemp -d "$TOPUP_DIR/backup/.restore-XXXXXX"); chmod 700 "$tmp"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
+  age -d -i "$TOPUP_DIR/$BACKUP_IDENTITY_REL" -o "$tmp/b.tar" "$enc" 2>> "$LOG" || die "解密失败（本机加密密钥不对或文件坏了）；什么都没有改" "截图发运维"
+  { tar -C "$tmp" -xf "$tmp/b.tar" 2>> "$LOG" && rm -f "$tmp/b.tar"; } || die "备份文件解不开；什么都没有改" "截图发运维"
+  for a in postgres.dump redis.rdb blobs.tar app.env deploy.env; do
+    [ -f "$tmp/$a" ] || die "备份里缺 $a，不完整；什么都没有改" "换一份备份（不写文件名用最新的）或截图发运维"
+  done
+  [ "$(envval TOPUP_ENV "$tmp/deploy.env")" = "$(topup_env)" ] \
+    || die "这份备份是 $(envval TOPUP_ENV "$tmp/deploy.env") 的，这台是 $(topup_env)；什么都没有改" "测试环境和生产的备份不能混用"
+  # 只比较、不显示主密钥的值
+  if [ -z "$(envval APP_SECRET "$tmp/app.env")" ] || [ "$(envval APP_SECRET "$tmp/app.env")" != "$(envval APP_SECRET)" ]; then
+    die "备份里的主密钥 APP_SECRET 和现在 .env 里的不一样（恢复出来的开户资料、加密字段会解不开）；什么都没有改" "截图发运维（不要自己改 APP_SECRET）"
+  fi
+  ok "第 1 步：已解密核对（环境、主密钥 APP_SECRET 和现在的一致；不显示值）"
+
+  # 2. 先备份一次现在的数据（万一恢复错了还能换回来）
+  ( BACKUP_PRUNE=0; cmd_backup pre-restore ) >> "$LOG" 2>&1 || die "第 2 步：恢复前的备份失败；什么都没有改" "sudo topup status 截图发运维"
+  ok "第 2 步：已先备份现在的数据：$(basename "$(ls -1t "$TOPUP_DIR"/backup/topup-*-pre-restore.tar.age 2> /dev/null | head -1)")"
+
+  # 3. 停 web、worker，导入数据库（--clean：先删掉备份里有的对象再建；一个事务，失败就什么都没变）
+  say "  … 第 3 步：停 web、worker，导入数据库"
+  compose stop web worker >> "$LOG" 2>&1 || { compose up -d >> "$LOG" 2>&1; die "第 3 步：停 web、worker 失败；数据没有动，已重新启动" "截图发运维"; }
+  if ! compose exec -T postgres pg_restore -U topup -d topup --clean --if-exists --no-owner --single-transaction < "$tmp/postgres.dump" >> "$LOG" 2>&1; then
+    compose up -d >> "$LOG" 2>&1 || true
+    die "第 3 步：导入数据库失败（一个事务，数据库没有变），已重新启动" "截图发运维（日志 $LOG）"
+  fi
+  ok "第 3 步：数据库已恢复"
+
+  # 4. Redis：停下，原来的数据目录挪开，备份里的数据作为 AOF 的基础文件放进去（Redis 开着 AOF，只放 dump.rdb 不会被读）
+  compose stop redis >> "$LOG" 2>&1 || die "第 4 步：停 Redis 失败（数据库已经恢复，web、worker 停着）" "截图发运维（恢复前的备份在 backup/ 下，标签 pre-restore）"
+  rd_old="$TOPUP_DIR/data/redis.pre-restore"; rm -rf "$rd_old"
+  mv "$TOPUP_DIR/data/redis" "$rd_old" 2> /dev/null || true
+  mkdir -p "$TOPUP_DIR/data/redis/appendonlydir"
+  cp "$tmp/redis.rdb" "$TOPUP_DIR/data/redis/appendonlydir/appendonly.aof.1.base.rdb"
+  : > "$TOPUP_DIR/data/redis/appendonlydir/appendonly.aof.1.incr.aof"
+  printf 'file appendonly.aof.1.base.rdb seq 1 type b\nfile appendonly.aof.1.incr.aof seq 1 type i\n' > "$TOPUP_DIR/data/redis/appendonlydir/appendonly.aof.manifest"
+  [ ! -d "$rd_old" ] || chown -R --reference="$rd_old" "$TOPUP_DIR/data/redis" 2> /dev/null || true
+  ok "第 4 步：Redis 的数据已换成备份里的"
+
+  # 5. 开户文件：原来的目录挪开，解开备份里的
+  bl_old="$TOPUP_DIR/data/blobs.pre-restore"; rm -rf "$bl_old"
+  mv "$TOPUP_DIR/data/blobs" "$bl_old" 2> /dev/null || true
+  tar -C "$TOPUP_DIR/data" -xf "$tmp/blobs.tar" 2>> "$LOG" || die "第 5 步：解开开户文件失败（原来的在 data/blobs.pre-restore）" "截图发运维"
+  [ "$(id -u)" != 0 ] || chown -R 1000:1000 "$TOPUP_DIR/data/blobs"
+  ok "第 5 步：开户文件已恢复（$(find "$TOPUP_DIR/data/blobs" -type f | wc -l) 个）"
+  rm -rf "$tmp"
+
+  # 6. 启动（.env 没有变，上面已经过了环境检查）
+  ! gateway || write_realip
+  compose up -d >> "$LOG" 2>&1 || die "第 6 步：启动失败" "sudo topup status 截图发运维"
+  wait_alive "$(cur_tag)" || die "第 6 步：3 分钟内健康检查没有通过" "sudo topup status 截图发运维（恢复前的备份在 backup/ 下，标签 pre-restore）"
+  rm -rf "$rd_old" "$bl_old"
+  who=${SUDO_USER:-$(id -un 2> /dev/null || echo root)}
+  note "恢复完成：$name，操作人 $who"
+  ok "已从 $name 恢复并重新启动（版本 $(cur_tag | cut -c1-7)）；恢复前的数据另存了一份加密备份（标签 pre-restore）"
+  send_mail "TopUP 已从备份恢复" "服务器上运行了 sudo topup restore：$(date -u '+%F %T UTC')，操作人 $who，用的备份 $name。
+备份之后产生的数据已经不在系统里；恢复前的数据另存了一份加密备份（标签 pre-restore）。不是你们安排的操作，马上联系运维。" || true
+}
+
+# ---------- admin-reset：管理员密码 / 验证器丢了时重置运营后台的管理员账号 ----------
+# 换一个新的初始化口令（写进 .env，旧口令作废）→ 重建 web（新口令生效）→ 删掉 Redis 里的管理员凭据（topup:admin、
+# 半途的初始化、登录锁定、失败计数、动态码记录）。先换口令再删账号：账号删掉的那一刻起，只有新口令能重新初始化。
+# 新旧口令都不显示、不进日志（看新口令：sudo topup admin-token）；日志记下是谁、什么时候做的，并尝试发一封提醒邮件。
+cmd_admin_reset() {
+  local a confirm="" who
+  start_log admin-reset
+  for a in "$@"; do
+    case "$a" in --confirm) confirm=1 ;; *) die "不认识的参数：$a" "sudo topup admin-reset --confirm" ;; esac
+  done
+  [ -s "$TOPUP_DIR/state/image.env" ] && [ -n "$(envval ADMIN_SETUP_TOKEN)" ] || die "还没有部署过" "先粘贴第一次部署的那条命令"
+  if [ -z "$confirm" ]; then
+    say "✗ 还没有确认，什么都没有做。重置会："
+    detail "1. 删掉运营后台现在的管理员账号（密码、验证器、登录锁定）"
+    detail "2. 换一个新的初始化口令（旧的作废），重建 web（约 1 分钟）"
+    detail "3. 之后用 sudo topup admin-token 看新口令，打开后台按页面提示重新设置密码和验证器"
+    detail "确认要做：sudo topup admin-reset --confirm"
+    exit 1
+  fi
+  [ ! -f "$TOPUP_DIR/state/stopped" ] || die "TopUP 现在停着（sudo topup stop 停的）；什么都没有改" "先 sudo topup start，再运行同一条命令"
+  env_guard "什么都没有改（重置要重建 web，带着这样的 .env 起不来）"
+  exec 9> "$TOPUP_DIR/state/update.lock"
+  flock -w 900 9 || die "自动更新一直没有结束；什么都没有改" "等几分钟再运行同一条命令"
+  who=${SUDO_USER:-$(id -un 2> /dev/null || echo root)}
+  note "管理员重置开始：操作人 $who"
+
+  VAL="$(rand 24)" env_write ADMIN_SETUP_TOKEN "$TOPUP_DIR/.env"
+  ok "第 1 步：已换新的初始化口令（旧的作废；不显示）"
+  compose up -d web >> "$LOG" 2>&1 || die "第 2 步：重建 web 失败（管理员账号还没删，原来的还能登录）" "截图发运维"
+  wait_alive "$(cur_tag)" || die "第 2 步：重建 web 后 3 分钟内健康检查没有通过（管理员账号还没删）" "sudo topup status 截图发运维"
+  ok "第 2 步：web 已重建，新口令生效"
+  # shellcheck disable=SC2016
+  compose exec -T redis sh -c 'redis-cli -a "$REDIS_PASSWORD" --no-auth-warning del topup:admin topup:admin:pending topup:admin:lock topup:admin:fails topup:admin:totp-last > /dev/null' >> "$LOG" 2>&1 \
+    || die "第 3 步：删除 Redis 里的管理员账号失败（原来的账号还在）" "截图发运维"
+  ok "第 3 步：已删掉原来的管理员账号（密码、验证器、登录锁定）"
+  note "管理员重置完成：操作人 $who（口令不记日志）"
+  detail "下一步：sudo topup admin-token 看新口令，打开 https://$(dval DOMAIN)/admin/ 按页面提示重新设置密码和验证器"
+  send_mail "TopUP 运营后台的管理员账号已重置" "服务器上运行了 sudo topup admin-reset：$(date -u '+%F %T UTC')，操作人 $who。
+原来的管理员密码和验证器已作废，要用新的初始化口令（sudo topup admin-token）重新设置。不是你们安排的操作，马上联系运维。" || true
 }
 
 # ---------- watch：每 5 分钟检查一次，状态变化时发邮件（问题不变不重复发）----------
@@ -1054,6 +1212,8 @@ check_value() {
       printf '%s' "$val" | grep -Eq '^https://' || die "$key 应该是 https:// 开头的节点地址；什么都没有改" ;;
     MAIL_FROM | MAIL_TO)
       printf '%s' "$val" | grep -Eq '^[^@]+@[^@]+\.[^@]+$' || die "$key 应该是一个邮箱地址；什么都没有改" ;;
+    TRON_NODE_QPS)
+      printf '%s' "$val" | grep -Eq '^[1-9][0-9]{0,3}$' || die "TRON_NODE_QPS 应该是正整数（每秒最多发给 TRON 节点的请求数，例如 10）；什么都没有改" ;;
     BACKUP_OFFSITE)
       case "$val" in off | r2) ;; *) die "BACKUP_OFFSITE 只能是 off（默认，只在本机）或 r2；什么都没有改" ;; esac ;;
     TOPUP_REAL_IP_HEADER)
@@ -1292,6 +1452,7 @@ case "$cmd" in
   backup) cmd_backup "$@" ;;
   backup-key) cmd_backup_key ;;
   restore-drill) cmd_restore_drill "$@" ;;
+  restore) cmd_restore "$@" ;;
   watch) cmd_watch ;;
   status) cmd_status ;;
   keys) cmd_keys ;;
@@ -1300,6 +1461,7 @@ case "$cmd" in
   test-mail) cmd_test_mail ;;
   gen-operator) cmd_gen_operator ;;
   admin-token) cmd_admin_token ;;
+  admin-reset) cmd_admin_reset "$@" ;;
   gen-test-admin) cmd_gen_test_admin ;;
   test-admin-off) cmd_test_admin_off ;;
   test-merchant-ip-off) cmd_test_merchant_ip_off ;;

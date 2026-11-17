@@ -204,6 +204,38 @@ T retry > /dev/null 2>&1; fresh; stage "$vA"; TOPUP_WAIT_S=90 T update > "$WORK/
 check "vA（web 收付款初始化失败）：判为没活，换回 v2，记进 state/skip" "[ $rc != 0 ] && h | jq -e '.commit == \"${v2:0:7}\"' > /dev/null && [ \"\$(cat '$TOPUP_DIR/state/skip')\" = '$vA' ]"
 T retry > /dev/null 2>&1; stage "$v2"
 
+echo "== 场景 12：restore（备份恢复进正在运行的系统）；admin-reset（重置运营后台的管理员）"
+R() { docker exec topup-redis-1 sh -c "redis-cli -a \"\$REDIS_PASSWORD\" --no-auth-warning $*"; }
+P() { docker exec topup-postgres-1 psql -U topup -d topup -Atc "$1"; }
+# 场景 11 没通过时可能停在起不来的版本上（v2 的演练镜像也可能被清旧镜像删掉）：先回到 v2 并确认健康，不受前面场景的影响
+docker image inspect "$IMG:kit-$v2" > /dev/null 2>&1 || { mk "$v2"; kitimg "$v2"; }
+stage "$v2"; rm -f "$TOPUP_DIR/state/skip"; T update > /dev/null 2>&1
+check "前提：v2 在运行、健康检查通过" "curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\" and .worker.ok == true' > /dev/null"
+P "create table if not exists drill_mark (v text); delete from drill_mark; insert into drill_mark values ('before')" > /dev/null
+R set drill:restore before > /dev/null; echo before > "$TOPUP_DIR/data/blobs/restore.txt"
+T backup drill > /dev/null 2>&1; rb=$(basename "$(ls -1t "$TOPUP_DIR"/backup/topup-*-drill.tar.age | head -1)")
+P "update drill_mark set v = 'after'" > /dev/null; R set drill:restore after > /dev/null
+rm -f "$TOPUP_DIR/data/blobs/restore.txt"; echo later > "$TOPUP_DIR/data/blobs/later.txt"
+envsum=$(cat "$TOPUP_DIR/.env" "$TOPUP_DIR/deploy.env" | sha256sum)
+out=$(T restore "$rb" 2>&1); check "restore 不带 --confirm：什么都不做（数据还是恢复前的）" "grep -q -- '--confirm' <<< \"\$out\" && [ \"\$(P 'select v from drill_mark')\" = after ]"
+out=$(T restore "$rb" --confirm 2>&1); rc=$?; echo "$out" | sed 's/^/    /'
+check "restore --confirm：数据库、Redis、开户文件都回到备份时；先备份了一份 pre-restore；健康检查通过" "[ $rc = 0 ] && [ \"\$(P 'select v from drill_mark')\" = before ] && [ \"\$(R get drill:restore)\" = before ] && [ -f '$TOPUP_DIR/data/blobs/restore.txt' ] && [ ! -e '$TOPUP_DIR/data/blobs/later.txt' ] && ls '$TOPUP_DIR'/backup/topup-*-pre-restore.tar.age > /dev/null && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\" and .db == true and .worker.ok == true' > /dev/null"
+check "restore：.env、deploy.env 没变；屏幕和日志里没有主密钥；明文临时目录、挪开的旧数据已删" "[ \"\$(cat '$TOPUP_DIR/.env' '$TOPUP_DIR/deploy.env' | sha256sum)\" = '$envsum' ] && ! grep -rqF \"\$(sed -n 's/^APP_SECRET=//p' '$TOPUP_DIR/.env')\" '$TOPUP_DIR/logs' <<< \"\$out\" && ! grep -qF \"\$(sed -n 's/^APP_SECRET=//p' '$TOPUP_DIR/.env')\" <<< \"\$out\" && [ -z \"\$(find '$TOPUP_DIR/backup' -name '.restore-*')\" ] && [ ! -e '$TOPUP_DIR/data/redis.pre-restore' ] && [ ! -e '$TOPUP_DIR/data/blobs.pre-restore' ]"
+docker restart topup-redis-1 > /dev/null; for _ in $(seq 1 30); do [ "$(R ping 2> /dev/null)" = PONG ] && break; sleep 1; done
+check "恢复出的 Redis 数据写进了 AOF：Redis 重启后还在" "[ \"\$(R get drill:restore)\" = before ]"
+P "drop table drill_mark" > /dev/null
+
+A=http://127.0.0.1:18080/api/kyb/?g=admin
+setup() { curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' --data "{\"setupToken\":\"$1\",\"password\":\"drill-password-123\"}" "$A&a=setup-begin"; }
+R set topup:admin "'{\"pw\":\"x\",\"version\":1}'" > /dev/null; R set topup:admin:lock 1 > /dev/null
+old=$(T admin-token 2> /dev/null)
+out=$(T admin-reset 2>&1); check "admin-reset 不带 --confirm：什么都不做" "grep -q -- '--confirm' <<< \"\$out\" && [ \"\$(R exists topup:admin)\" = 1 ] && [ \"\$(T admin-token 2> /dev/null)\" = \"\$old\" ]"
+out=$(SUDO_USER=drill-ops T admin-reset --confirm 2>&1); rc=$?; echo "$out" | sed 's/^/    /'
+new=$(T admin-token 2> /dev/null)
+check "admin-reset --confirm：管理员账号和锁定删掉、口令换新；屏幕和日志里没有新旧口令；日志记下操作人" "[ $rc = 0 ] && [ \"\$(R exists topup:admin topup:admin:lock)\" = 0 ] && [ -n \"\$new\" ] && [ \"\$new\" != \"\$old\" ] && ! grep -qF -e \"\$old\" -e \"\$new\" <<< \"\$out\" && ! grep -rqF -e \"\$old\" -e \"\$new\" '$TOPUP_DIR/logs' && grep -q drill-ops \"\$(ls -1t '$TOPUP_DIR'/logs/admin-reset-*.log | head -1)\""
+check "新口令生效：后台显示没有初始化；旧口令 403、新口令能开始初始化" "curl -s '$A&a=me' | jq -e '.initialized == false' > /dev/null && [ \"\$(setup \"\$old\")\" = 403 ] && [ \"\$(setup \"\$new\")\" = 200 ]"
+R del topup:admin:pending > /dev/null; unset old new
+
 echo
 echo "演练结果：通过 $pass，失败 $fail"
 [ "$fail" = 0 ]

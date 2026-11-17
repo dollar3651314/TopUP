@@ -48,9 +48,10 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 | `sudo topup status` | 版本、容器、健康检查、还没填的变量、备份、证书、内存、磁盘、检查发现的问题 |
 | `sudo topup keys` | 哪些密钥已填（只显示名字）、普通设置的值 |
 | `sudo topup set-key 变量名` | 填密钥：屏幕上不显示；只接受清单里的名字；拒绝空格、引号、`$` 等；私钥、节点地址、邮箱先检查格式；写完自动重建 web、worker，报告健康检查里对应的一项 |
-| `sudo topup set 变量名 值` | 填普通设置（收件人、确认数等） |
+| `sudo topup set 变量名 值` | 填普通设置（收件人、确认数等）；`set TRON_NODE_QPS 数字` 改每秒最多发给 TRON 节点的请求数（正整数，不填默认 10；按节点套餐的限额填），写完自动重建 web、worker |
 | `sudo topup gen-operator` | 只用于测试环境：在服务器上随机生成两个归集发起账户（ETH/BSC 一把、TRON 一把，已有的不重新生成），私钥只写进 `.env`，屏幕上只显示地址（拿去领测试币、登记进合约） |
 | `sudo topup admin-token` | 在终端上显示一次运营后台的初始化口令（不进日志）；初始化完成后后台拒绝再次初始化，口令就没用了 |
+| `sudo topup admin-reset --confirm` | 管理员密码或验证器丢了时重置运营后台的管理员账号。不带 `--confirm` 只说明会做什么、什么都不改。带 `--confirm`：先过和别的重建路径一样的环境检查 → 换一个新的初始化口令写进 `.env`（旧的作废）→ 重建 web、等健康检查（新口令生效）→ 用 `redis-cli` 删掉 Redis 里的 `topup:admin`、`topup:admin:pending`、`:lock`、`:fails`、`:totp-last`（先换口令再删账号：账号删掉之后只有新口令能重新初始化）。新旧口令都不显示、不进日志；日志 `logs/admin-reset-*.log` 记下操作人（`SUDO_USER`）和时间，并尝试发一封提醒邮件给 `MAIL_TO`。之后 `sudo topup admin-token` 看新口令，打开后台重新设置密码和验证器 |
 | `sudo topup gen-test-admin` | 只用于测试环境：生成测试管理员的令牌（给 GitHub 上的自动验收用例 `staging-e2e` 用，第 9 节）。服务器的 `.env` 只写它的 SHA-256（`TEST_ADMIN_TOKEN_SHA256`），令牌原文只在终端上显示一次、不进日志；再运行一次就换新令牌，旧的立刻作废 |
 | `sudo topup test-admin-off` | 关掉测试管理员：删掉 `TEST_ADMIN_TOKEN_SHA256`，令牌立刻作废 |
 | `sudo topup set TEST_MERCHANT_IP_BYPASS 商户编号` | 只用于测试环境：打开"测试商户免 IP 白名单"（第 9 节末尾），这个商户调开放 API 提币、批量打款时不查 IP 白名单；不是测试环境的服务器上直接拒绝 |
@@ -58,6 +59,7 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 | `sudo topup test-mail` | 发一封测试邮件到 `MAIL_TO` |
 | `sudo topup backup` | 立刻备份一次（本机加密保存，默认不传到别处） |
 | `sudo topup restore-drill` | 恢复演练：本机最近一份备份解密后恢复进临时容器，核对表、行数、Redis、开户文件、主密钥；不碰正在运行的数据，解密出的临时文件用完删除 |
+| `sudo topup restore [备份文件名] --confirm` | 把本机的一份加密备份恢复进正在运行的系统（第 5 节）。不写文件名用最新的一份，写了就用 `backup/` 下的那一份（找不到就拒绝）；不带 `--confirm` 只说明会做什么；**生产还要再加 `--production`**。本机没有备份、备份和这台不是同一个环境、备份里的主密钥 `APP_SECRET` 和现在的不一样（开户资料会解不开）都直接拒绝，什么都不动。`.env`、`deploy.env` 不被覆盖；输出和日志里没有任何密钥的值 |
 | `sudo topup backup-key`、`restore-drill --from-r2` | 异地备份用（默认关闭，见第 5 节）：生成管理员的备份密钥对（公钥写进 `deploy.env`，私钥只在屏幕上显示一次）；从 R2 下载最新一份、粘贴私钥解密后演练 |
 | `sudo topup rollback` | 换回上一个版本，并且不再自动更新到当前版本 |
 | `sudo topup retry` | 清掉"不再重试"的记录（`state/skip`），下一分钟重新尝试最新版本 |
@@ -110,6 +112,8 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 - 异地备份上传到 R2 的 `topup-<环境>/` 目录（`topup-staging/`、`topup-production/`），`restore-drill --from-r2` 也从同一个目录下载。
 - 异地（Cloudflare R2）：**默认关闭**（`BACKUP_OFFSITE=off`），没配置不报错。以后要开：`sudo topup backup-key`（管理员私钥存进密码管理器）→ `set BACKUP_OFFSITE r2` → 填 `R2_…` → 装 `rclone`；上传的是同一份密文（配置只经环境变量交给 `rclone`）。打开了但没配好：本机照样备份，只提示、记 `r2=not_configured`；上传失败才报错。
 - 恢复演练：`sudo topup restore-drill`（本机那份，用本机密钥解密到临时目录，用完删除）；打开异地后可以 `--from-r2`（下载 R2 上最新一份，管理员粘贴私钥解密，私钥只在内存盘里用完即删）。
+- 真的恢复：`sudo topup restore [备份文件名] --confirm`（生产另加 `--production`）。顺序：解密到临时目录、核对环境和主密钥（这一步什么都不动）→ 先把现在的数据备份一次（`topup-<时间>-pre-restore.tar.age`，这次不清旧备份）→ 停 web、worker → `pg_restore --clean --if-exists --single-transaction` 导入正在运行的 Postgres（一个事务，失败就什么都没变，重新启动后报错）→ 停 Redis，原来的数据目录挪开，备份里的快照作为 AOF 的基础文件放进 `data/redis`（Redis 开着 AOF，只放 `dump.rdb` 不会被读）→ 开户文件目录换成备份里的 → 启动、等健康检查 → 删掉挪开的旧数据和解密出的临时文件，尝试发一封提醒邮件。备份之后产生的数据都会没有（只在 pre-restore 那份里）；备份之后才建的表 `--clean` 不会删。`.env`、`deploy.env` 一直用现在的，不从备份里恢复。
+- 文件名每次都不同：日志 `logs/<命令>-<时间>-<随机后缀>.log`（同一秒里跑两次 watch、update、backup 也不会互相覆盖或删掉对方的日志）；备份同一秒里已经有同名的就加序号（`topup-<时间>-2-<标签>.tar.age`）。备份标签只能用字母、数字、点、横线、下划线。
 
 ## 6. 检查和告警
 - 自动更新只看"应用活着"：提交号对得上、数据库、Redis、主密钥、web 的收付款初始化成功（健康检查里有 `wallet` 一项）、换版本之后新的 worker 跑过一轮（扫链时间晚于开始等待的时间，旧 worker 留下的不算）。邮件、节点 Key 没填不算失败（换回旧版本也解决不了）。
@@ -136,7 +140,7 @@ Nginx 用 `$remote_addr` 覆盖 `X-Real-IP` 和 `X-Forwarded-For`；web 设 `TRU
 docker build --build-arg APP_ENV=staging -t topup-drill-base .
 sudo bash e2e/deploy-drill.sh topup-drill-base
 ```
-在临时目录里跑 11 个场景（外加发起账户生成、初始化口令）：第一次部署（另一个项目占着 80、443）、重复运行、经 Nginx 访问和真实 IP、填密钥（名字和值写错）、自动更新成功、新版本起不来自动换回、手动回滚和重试、备份和恢复演练、每 5 分钟检查、内存不够和 stop / start、新版本"没活"（web 初始化失败；新 worker 不扫链而旧 worker 的扫链时间还新鲜）也要换回。演练模式不装软件、不碰 systemd、证书自签名，所以这三样要在第一次真实部署时逐步确认。
+在临时目录里跑 12 个场景（外加发起账户生成、初始化口令）：第一次部署（另一个项目占着 80、443）、重复运行、经 Nginx 访问和真实 IP、填密钥（名字和值写错）、自动更新成功、新版本起不来自动换回、手动回滚和重试、备份和恢复演练、每 5 分钟检查、内存不够和 stop / start、新版本"没活"（web 初始化失败；新 worker 不扫链而旧 worker 的扫链时间还新鲜）也要换回、`restore` 恢复进正在运行的系统（数据库、Redis、开户文件回到备份时，Redis 重启后还在）和 `admin-reset`（旧口令 403、新口令能重新初始化）。演练模式不装软件、不碰 systemd、证书自签名，所以这三样要在第一次真实部署时逐步确认。
 
 ## 9. 测试管理员（只在测试环境）
 给测试经理在测试环境上跑大量运营后台操作（打款审核、驳回、改上限、凑批到"待签名"、归集确认、对账），不用管理员每次输动态码。代码在 `server/pay/test-admin.js`，用例在 `e2e/staging-e2e/`，流程是 `.github/workflows/staging-e2e.yml`。
