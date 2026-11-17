@@ -1,4 +1,5 @@
 # 每个 PR 的自动检查：不通过的 PR 不能合并到 staging（测试环境）和 main（生产）。
+# 合并到 staging：image → staging-smoke（测试环境）；合并到 main：image-production → promote-production（管理员批准）→ production-smoke（生产）。
 # 不需要任何密钥：数据库和 Redis 用 GitHub 提供的容器，链上用 TronGrid 替身和本地 anvil，邮件用本地模拟 SMTP。
 # 分支保护只把汇总 job "ci-ok" 设为"必须通过"。
 # 系统固定 ubuntu-24.04：ubuntu-latest 已是 26.04，锁定的 Playwright 1.56 不支持在 26.04 上安装浏览器；
@@ -227,7 +228,7 @@ jobs:
           docker push -q "$image:staging"
           echo "已推送 $image:$GITHUB_SHA（staging 标签已移动）" >> "$GITHUB_STEP_SUMMARY"
 
-  # 镜像推送后：等测试服务器换成这个提交（健康检查返回的 commit），再跑测试环境冒烟检查（e2e/smoke-staging.sh）。
+  # 镜像推送后：等测试服务器换成这个提交（健康检查返回的 commit），再跑测试环境冒烟检查（e2e/smoke.sh … staging）。
   # 地址在仓库密钥 STAGING_URL（不写在仓库里、日志里自动遮盖）；没有配置时跳过。手动重跑用 staging-check.yml。
   staging-smoke:
     needs: [image]
@@ -242,4 +243,72 @@ jobs:
       - name: 测试环境检查
         run: |
           if [ -z "$STAGING_URL" ]; then echo "::warning::仓库密钥 STAGING_URL 还没有配置，跳过"; exit 0; fi
-          bash e2e/smoke-staging.sh "$STAGING_URL" "${GITHUB_SHA::7}"
+          bash e2e/smoke.sh "$STAGING_URL" "${GITHUB_SHA::7}" staging
+
+  # ---------- 生产（合并到 main 后）：构建 → 管理员批准 → 移动 :production → 冒烟 ----------
+  # 生产镜像：合并到 main 且上面的检查全部通过后构建 APP_ENV=production 的镜像，只推 :prod-<提交号>。
+  # 这一步不影响生产：生产服务器只跟 :production 标签（deploy/kit/topup.sh update），这里不碰它，也不碰测试环境的标签。
+  image-production:
+    needs: [ci-ok]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - name: 构建并推送生产镜像（APP_ENV=production，标签 prod-<提交号>）
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/topup"
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --build-arg APP_ENV=production --build-arg GIT_COMMIT="$GITHUB_SHA" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$image:prod-$GITHUB_SHA" .
+          docker push -q "$image:prod-$GITHUB_SHA"
+          echo "已推送 $image:prod-$GITHUB_SHA（还没有上生产：等 promote-production 批准）" >> "$GITHUB_STEP_SUMMARY"
+
+  # 上生产：GitHub 环境 production（Required reviewers = 管理员）批准后才运行。不重新构建：把 :production 指到刚才那个 :prod-<提交号>
+  # （镜像仓库里直接改标签，内容和上一步推的一模一样）。生产服务器每分钟自己来拉 :production，起不来自动换回上一个版本。
+  promote-production:
+    needs: [image-production]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: 把 :production 指到 :prod-<提交号>（不重新构建）
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/topup"
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create -t "$image:production" "$image:prod-$GITHUB_SHA"
+          docker buildx imagetools inspect "$image:production"
+          echo "生产标签已指到 $image:prod-$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  # 移动 :production 之后：等生产服务器换成这个提交，再跑生产冒烟检查（e2e/smoke.sh … production）。
+  # 地址在仓库密钥 PRODUCTION_URL（不写在仓库里、日志里自动遮盖）；没有配置时跳过。
+  production-smoke:
+    needs: [promote-production]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - name: 生产检查
+        run: |
+          if [ -z "$PRODUCTION_URL" ]; then echo "::warning::仓库密钥 PRODUCTION_URL 还没有配置，跳过"; exit 0; fi
+          bash e2e/smoke.sh "$PRODUCTION_URL" "${GITHUB_SHA::7}" production
+
