@@ -14,7 +14,7 @@ const topicOf = (addr) => '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(
 const addrOfTopic = (t) => toChecksumAddress('0x' + t.slice(-40));
 
 export class RpcError extends Error {
-  constructor(message, { code = 'rpc_error', rpcCode, data } = {}) { super(message); this.code = code; this.rpcCode = rpcCode; if (data !== undefined) this.data = data; }
+  constructor(message, { code = 'rpc_error', rpcCode, data, httpStatus } = {}) { super(message); this.code = code; this.rpcCode = rpcCode; if (data !== undefined) this.data = data; if (httpStatus !== undefined) this.httpStatus = httpStatus; }
 }
 
 /** 最小的 JSON-RPC 客户端：单个或批量请求，超时，HTTP / JSON-RPC 错误都抛出 RpcError（错误信息不含节点地址，节点地址里可能有 API Key） */
@@ -27,7 +27,8 @@ export function createRpc({ rpcUrl, fetchImpl = fetch, timeoutMs = 10_000, label
     } catch (e) {
       throw new RpcError(`${label}: node unreachable (${e?.cause?.code || e?.name || 'network'})`, { code: 'rpc_unreachable' });
     }
-    if (!res.ok) throw new RpcError(`${label}: HTTP ${res.status}`, { code: 'rpc_http' });
+    // httpStatus：429 / 503（限流、节点繁忙）后台给 node_busy，其他 HTTP 错误给 rpc_unreachable（admin-actions.js 的 nodeFailure）
+    if (!res.ok) throw new RpcError(`${label}: HTTP ${res.status}`, { code: 'rpc_http', httpStatus: res.status });
     try { return await res.json(); } catch { throw new RpcError(`${label}: invalid JSON`, { code: 'rpc_http' }); }
   }
   const unwrap = (r, method) => {
