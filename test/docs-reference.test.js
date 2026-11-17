@@ -52,6 +52,8 @@ test('开发者文档：每个接口都写进了文档，文档里的接口都�
  * 主用例只核对 CHECKED_SEPARATELY 以外的接口；这里列的接口由下面各自的用例核对。
  */
 const CHECKED_SEPARATELY = new Set(['GET withdrawals/list/']);
+/** 由单独用例核对的回调事件（v1.1 冲正：deposit.reversed） */
+const EVENTS_SEPARATELY = new Set(['deposit.reversed']);
 async function liveWorld() {
   const db = await createTestDb(); await migrate(db);
   await core.setMeta(db, 'xpub', XPUB);
@@ -165,6 +167,7 @@ test('开发者文档：每个接口实际返回的字段、类型和文档一�
     resolve: async () => [{ address: '93.184.216.34', family: 4 }],
   });
   for (const ev of EVENTS) {
+    if (EVENTS_SEPARATELY.has(ev.type)) continue;
     const list = sent.filter((p) => p.type === ev.type);
     assert.ok(list.length, `没有发出 ${ev.type} 回调，检查不到字段`);
     for (const p of list) {
@@ -206,5 +209,35 @@ test('开发者文档（对账查询）：withdrawals/list/ 和带时间段的 d
   w.check('GET', 'withdrawals/list/', await w.call('GET', 'withdrawals/list/'));
   w.check('GET', 'deposits/', await w.call('GET', `deposits/?from=${from}`));
   w.check('GET', 'ledger/', await w.call('GET', `ledger/?from=${from}`));
+  await w.db.end();
+});
+
+// v1.1 冲正（单独一个用例）：冲正后的到账、账本、余额返回的字段和文档一致；deposit.reversed 回调的外层和 data 也一致
+test('开发者文档（冲正）：冲正后 deposits/、ledger/、balance/ 的字段和 deposit.reversed 回调的内容和文档一致', async () => {
+  const w = await liveWorld();
+  await core.recordDeposit(w.db, { txid: 'c'.repeat(64), logIndex: 0, block: 3, to: w.address, amount: 20 * U, time: new Date() });
+  const [rd] = await w.db.query(`select id from deposits where txid = $1`, ['c'.repeat(64)]);
+  const { reverseDeposit } = await import('../server/pay/reversal.js');
+  assert.equal((await reverseDeposit(w.db, rd.id, { now: Date.now(), notify: null })).status, 'reversed');
+  const deps = w.check('GET', 'deposits/', await w.call('GET', 'deposits/?customer_id=c1'));
+  assert.ok(deps.items.some((d) => d.result === 'reversed' && d.reversed_at), '冲正过的到账要能看到，reversed_at 有值');
+  w.check('GET', 'ledger/', await w.call('GET', 'ledger/'));
+  w.check('GET', 'balance/', await w.call('GET', 'balance/'));
+  const sent = [];
+  await deliverDue(w.db, {
+    getTarget: async () => ({ url: 'https://merchant.example/cb', secret: 's' }),
+    fetchImpl: async (url, init) => { sent.push(JSON.parse(init.body)); return new Response('', { status: 200 }); },
+    resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+  });
+  for (const type of EVENTS_SEPARATELY) {
+    const ev = EVENTS.find((e) => e.type === type);
+    assert.ok(ev, `文档的回调事件要有 ${type}`);
+    const list = sent.filter((p) => p.type === type);
+    assert.ok(list.length, `没有发出 ${type} 回调，检查不到字段`);
+    for (const p of list) {
+      checkObject(`回调 ${type}`, EVENT_ENVELOPE, p);
+      checkObject(`回调 ${type} data`, [...ev.data.flatMap((n) => OBJECTS[n]), ...(ev.extra || [])], p.data);
+    }
+  }
   await w.db.end();
 });
