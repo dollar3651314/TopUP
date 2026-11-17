@@ -19,6 +19,7 @@ import { createPgDb } from '../server/pay/db.js';
 import { createMerchant } from '../server/pay/core.js';
 import { createFakeTron } from '../server/pay/fake-trongrid.js';
 import { hexToAddress } from '../server/pay/tron.js';
+import { TRON_GENESIS_NILE } from './tron-helpers.js';
 
 const PG = process.env.TEST_DATABASE_URL || '';
 const RD = process.env.TEST_REDIS_URL || '';
@@ -48,9 +49,12 @@ function fakeTronGrid(realFetch) {
   const HOT_USDT = 100_000_000; // 热钱包 100 测试 USDT
   return async (input, init = {}) => {
     const url = String(input?.url || input);
-    if (!/^https:\/\/[a-z.]*trongrid\.io\//.test(url)) return realFetch(input, init);
+    // TRON_NODE_URL 指的本机关着的端口（127.0.0.1:9）也由替身回答：K-4 起测试管理员要核对 TRON 节点的创世块是 Nile
+    if (!/^https:\/\/[a-z.]*trongrid\.io\//.test(url) && !url.startsWith('http://127.0.0.1:9/')) return realFetch(input, init);
     const path = new URL(url).pathname;
     const body = init.body ? JSON.parse(init.body) : {};
+    if (path === '/wallet/getblockbynum' && Number(body.num) === 0) return Response.json({ blockID: TRON_GENESIS_NILE, block_header: { raw_data: { number: 0 } } });
+    if (url.startsWith('http://127.0.0.1:9/')) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }); // 其余照旧连不上
     if (path.startsWith('/v1/accounts/')) return Response.json({ data: [{ balance: 1_000_000_000, trc20: [] }] });
     if (path === '/wallet/triggerconstantcontract') return Response.json({ result: { result: true }, constant_result: [HOT_USDT.toString(16).padStart(64, '0')] });
     if (path === '/wallet/triggersmartcontract') {

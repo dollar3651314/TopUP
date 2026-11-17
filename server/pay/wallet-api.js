@@ -82,11 +82,17 @@ export function createWalletApi({ db, tron: rawTron, keys, wallets, requireAdmin
     need(statuses.includes(b.status), 'invalid_state', 409);
     return b;
   }
-  /** 广播一组已签名的步骤；返回失败的原因（没有失败返回 null） */
+  /**
+   * 广播一组已签名的步骤；返回失败的原因（没有失败返回 null）。
+   * 节点回 DUP_TRANSACTION_ERROR（同一份已签名交易节点已经有了，例如 503 重试前其实已经收到）：按已广播处理，记下本地算的交易号（和打款一样）
+   */
   async function broadcastSteps(steps) {
     for (const s of steps) {
       try { s.txid = await tron.broadcastHex(encodeSigned(s.rawHex, s.signature)); s.status = 'broadcast'; }
-      catch (e) { s.status = 'failed'; s.error = e.message; return e.message; }
+      catch (e) {
+        if (e?.code === 'DUP_TRANSACTION_ERROR' || /DUP_TRANSACTION/i.test(String(e?.message))) { s.txid = s.txID; s.status = 'broadcast'; delete s.error; continue; }
+        s.status = 'failed'; s.error = e.message; return e.message;
+      }
     }
     return null;
   }
