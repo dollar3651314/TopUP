@@ -34,8 +34,13 @@ import { createMemRedis } from '../server/kyb/memredis.js';
 import { deriveKeys } from '../server/kyb/crypto.js';
 import * as core from '../server/pay/core.js';
 import { signRequest, canonicalPath } from '../server/pay/api-v1.js';
+import { fakeTronGridNet } from './tron-helpers.js';
 
 const ENV = 'TEST_MERCHANT_IP_BYPASS';
+// TRON 节点用本机替身（tron-helpers.js 的 fakeTronGridNet）：走 createPayDeps 时不连外网的 nile.trongrid.io（K-4 起测试环境要核对节点真是 Nile）
+let restoreNet;
+test.before(() => { restoreNet = fakeTronGridNet(); });
+test.after(() => restoreNet?.());
 const U = 1_000_000;
 const SECRET = 'test-app-secret-test-app-secret-0123456789';
 const TO = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
