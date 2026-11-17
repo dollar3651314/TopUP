@@ -216,10 +216,14 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
 
     // ---------- 提币 ----------
     async withdraw(m, b, source) {
-      return core.requestWithdrawal(db, m, { kind: String(b.kind || ''), chain: b.chain === undefined || b.chain === null || b.chain === '' ? 'tron' : String(b.chain), to: String(b.to || '').trim(), amount: parseAmount(b.amount), customerId: b.customer_id ? String(b.customer_id) : null, source, merchantRef: b.merchant_ref ? cleanText(b.merchant_ref, 64) : null });
+      return core.requestWithdrawal(db, m, { kind: String(b.kind || ''), chain: b.chain === undefined || b.chain === null || b.chain === '' ? 'tron' : String(b.chain), to: String(b.to || '').trim(), amount: parseAmount(b.amount), customerId: b.customer_id ? String(b.customer_id) : null, source, merchantRef: b.merchant_ref });
     },
-    async getWithdrawal(m, id) {
-      const [w] = await db.query('select id from withdrawals where id = $1 and merchant_id = $2', [String(id || ''), m.id]);
+    /** 按提现号或提现单号（merchant_ref，二选一）查一笔；别的商户的 404 */
+    async getWithdrawal(m, id, merchantRef = null) {
+      const ref = !id && merchantRef ? String(merchantRef).trim() : '';
+      const [w] = ref
+        ? await db.query(`select id from withdrawals where merchant_id = $1 and merchant_ref = $2 and merchant_ref <> ''`, [m.id, ref])
+        : await db.query('select id from withdrawals where id = $1 and merchant_id = $2', [String(id || ''), m.id]);
       if (!w) throw new PayError('not_found', 404);
       return core.withdrawalView(db, w.id);
     },
@@ -256,7 +260,7 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
     /** 逐行检查（不冻结）：rows 是 parsePayoutSheet 的结果；enough = 没问题的行合计 ≤ 可用余额（余额一个数） */
     async payoutCheck(m, rows, at = now()) {
       if (rows.length > payout.MAX_ITEMS_PER_REQUEST) throw new PayError('too_many_items', 422, 'csv');
-      const checked = payout.checkPayoutRows(rows, m);
+      const checked = await payout.markDuplicateRefs(db, m.id, payout.checkPayoutRows(rows, m));
       // 超过单笔上限的行：照样能提交，但审核时只能驳回（或等管理员改上限），先提醒商户
       const { perItem } = await payout.getPayoutLimits(db);
       for (const r of checked) if (r.ok && r.amount > perItem) r.warnings.push('over_per_item_limit');

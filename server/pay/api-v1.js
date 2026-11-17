@@ -123,7 +123,7 @@ export function createApiV1({ db, keys, ops, getIp = () => '', now = () => Date.
     'GET ledger': (m, q) => ops.ledger(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '', range: timeRange(q, now()) }),
     'GET deposits': (m, q) => ops.deposits(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '', matched: q.get('matched') || '', txid: q.get('txid') || '', range: timeRange(q, now()) }),
     'POST withdrawals': async (m, q, b, request) => { await needIp(m, request); return ops.withdraw(m, b, 'api'); },
-    'GET withdrawals': (m, q) => ops.getWithdrawal(m, q.get('withdrawal_no')),
+    'GET withdrawals': (m, q) => ops.getWithdrawal(m, q.get('withdrawal_no'), q.get('merchant_ref')),
     // 总按时间段查：to 不传 = 现在，from 不传 = to − 31 天；从早到晚
     'GET withdrawals/list': (m, q) => ops.withdrawalList(m, { status: q.get('status') || '', chain: q.get('chain') || '', range: timeRange(q, now(), { always: true }), cursor: q.get('cursor'), limit: limitOf(q) }),
     'POST withdrawals/cancel': (m, q, b) => ops.cancelWithdrawal(m, b.withdrawal_no),
