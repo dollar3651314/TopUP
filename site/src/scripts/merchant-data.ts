@@ -9,7 +9,11 @@ export type Amount = number | string;
 export interface Mode { enabled: boolean; low: number; high: number; ttlMin: number; lookbackH: number }
 export interface Me { authed: boolean; email?: string; merchant?: { id: string; name: string; order_mode: Mode; fee_in: { ppm: number; fixed: number; min: number }; fee_out: { ppm: number; fixed: number; min: number }; cashout_wallets: (string | { chain: string; address: string })[] } }
 export interface ChainAddr { chain: 'eth' | 'bsc' | 'tron'; address: string }
-export interface Dep { id: string; customer_id: string; chain?: string; address: string; txid: string; amount: Amount; fee: Amount; credited: Amount; result: string; order_no: string | null; matched_by: string | null; time: string; confirmations?: number; reversed_at?: string | null }
+export interface Dep { id: string; customer_id: string; chain?: string; address: string; txid: string; amount: Amount; fee: Amount; credited: Amount; result: string; order_no: string | null; matched_by: string | null; time: string; confirmations?: number; reversed_at?: string | null;
+  /** v1.1 冲正过的：扣回多少、从可用余额扣的、记成欠款的、冲正前匹配的订单（商户后台接口才有） */
+  reversal?: { reversed_at: string | null; net: Amount; taken: Amount; debt_added: Amount; order_no: string | null } | null;
+  /** 这笔入账先还掉的欠款 */
+  repaid_debt?: Amount }
 export interface Cust { customer_id: string; name: string; email: string; remark: string; address: string | null; addresses?: ChainAddr[]; total: Amount; count: number; fees: Amount; unmatched: Amount; last_payment_at: string | null; created_at: string }
 export interface OrderItem { order_no: string; merchant_order_no: string; customer_id: string; amount: Amount; matched: Amount; status: M.OrderState; created_at: string; expires_at: string }
 export interface OrderFull extends OrderItem { address: string | null; network?: string; chain?: string | null; addresses?: ChainAddr[]; pay_url: string; deposits: { id: string; txid: string; amount: Amount; matched_by: string; time: string }[] }
@@ -37,7 +41,7 @@ export interface MerchantData {
   logout(): Promise<void>;
   setupBegin(token: string, password: string): Promise<{ qr: string; secret: string }>;
   setupConfirm(token: string, code: string): Promise<void>;
-  overview(): Promise<{ debt?: Amount; today_by_chain?: { chain: string; total: Amount; count: number }[]; chains?: string[]; available: Amount; frozen: Amount; today: Amount; today_count: number; today_fees: Amount; open_orders: number; unmatched: Amount; unmatched_count: number; pending_withdrawals: number; recent: Dep[] }>;
+  overview(): Promise<{ debt?: Amount; recent_reversals?: number; today_by_chain?: { chain: string; total: Amount; count: number }[]; chains?: string[]; available: Amount; frozen: Amount; today: Amount; today_count: number; today_fees: Amount; open_orders: number; unmatched: Amount; unmatched_count: number; pending_withdrawals: number; recent: Dep[] }>;
   customers(q: string, onePage?: boolean): Promise<Cust[]>;
   customer(id: string, days: number): Promise<{ customer: Cust; stats: { total: Amount; count: number; fees: Amount; unmatched: Amount }; orders: OrderItem[]; deposits: Dep[]; payouts: { withdrawal_no: string; amount: Amount; status: string; created_at: string }[] }>;
   saveCustomer(b: { customer_id: string; name?: string; email?: string; remark?: string }, create?: boolean): Promise<Cust>;

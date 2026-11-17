@@ -87,7 +87,9 @@
       "debtSub": "Withdrawals are blocked until it is repaid",
       "debtTitle": "You owe {amount} USDT. Withdrawals are blocked until it is repaid",
       "debtText": "A credited deposit later disappeared from the chain (e.g. a reorg) and was reversed. Your available balance could not cover it, so the rest was recorded as debt. Later deposits repay it automatically first; withdrawals resume once it is repaid, nothing to apply for.",
-      "debtGo": "See which deposit was reversed"
+      "debtGo": "See which deposit was reversed",
+      "recentReversals": "No debt. {n} deposit(s) were taken back by the chain (reversed) in the last 7 days.",
+      "recentGo": "See reversals"
     },
     "dep": {
       "cols": {
@@ -111,10 +113,29 @@
         "confirming": "Confirming {n}/19",
         "credited": "Credited",
         "below_min": "Below 1 USDT (not credited)",
-        "reversed": "Reversed"
+        "reversed": "Reversed",
+        "repaid": "Credited, repaid debt first"
       },
       "unmatched": "Unmatched",
-      "filterUnmatched": "Unmatched only"
+      "filterUnmatched": "Unmatched only",
+      "repaidNote": "Repaid {amount} of debt first",
+      "orderReleased": "Unmatched",
+      "rev": {
+        "title": "Deposit taken back (reversed)",
+        "lead": "When we re-checked this deposit after crediting it, it was no longer on the chain (e.g. a reorg), so it was reversed automatically: a reversal entry was appended to the ledger; earlier entries are unchanged.",
+        "time": "Reversed at",
+        "tx": "Transaction",
+        "amount": "Amount received",
+        "net": "Credited amount taken back (fee refunded)",
+        "taken": "From available balance",
+        "debt": "Recorded as debt",
+        "noDebt": "0.00 (balance covered it, no debt)",
+        "order": "Order",
+        "orderReleased": "{order} unmatched (order.matched callback sent)",
+        "noOrder": "This deposit was not matched to an order",
+        "callback": "We sent the deposit.reversed callback (please ignore unknown events and return 200).",
+        "debtNote": "Withdrawals are blocked while you have debt; later deposits repay it first and withdrawals resume automatically once it is cleared."
+      }
     },
     "orders": {
       "title": "Orders",
@@ -667,7 +688,9 @@
       "debtSub": "还清前不能提币",
       "debtTitle": "你有欠款 {amount} USDT，还清前不能提币",
       "debtText": "有一笔到账被链上撤回（冲正），扣回时你的余额不够，差额记成欠款。之后的到账会先自动还欠款，还清后提币自动恢复，不用申请。",
-      "debtGo": "看是哪笔到账被撤回"
+      "debtGo": "看是哪笔到账被撤回",
+      "recentReversals": "没有欠款。最近 7 天有 {n} 笔到账被链上撤回（已冲正）。",
+      "recentGo": "看冲正记录"
     },
     "dep": {
       "cols": {
@@ -691,10 +714,29 @@
         "confirming": "确认中 {n}/19",
         "credited": "已入账",
         "below_min": "低于 1 USDT（不入账）",
-        "reversed": "已冲正"
+        "reversed": "已冲正",
+        "repaid": "已入账，先还欠款"
       },
       "unmatched": "未匹配",
-      "filterUnmatched": "只看未匹配"
+      "filterUnmatched": "只看未匹配",
+      "repaidNote": "这笔入账先还了欠款 {amount}",
+      "orderReleased": "已解除匹配",
+      "rev": {
+        "title": "到账被撤回（已冲正）",
+        "lead": "这笔到账入账后复核时链上已经找不到了（例如链重组），系统已自动冲正：账本追加一行冲正，旧记录不改。",
+        "time": "冲正时间",
+        "tx": "交易哈希",
+        "amount": "到账金额",
+        "net": "扣回入账（已退手续费）",
+        "taken": "从可用余额扣",
+        "debt": "记成欠款",
+        "noDebt": "0.00（余额够扣，没有欠款）",
+        "order": "订单",
+        "orderReleased": "{order} 已解除匹配（已回调 order.matched）",
+        "noOrder": "这笔没有匹配订单",
+        "callback": "我们已发回调 deposit.reversed（不认识的事件请忽略并返回 200）。",
+        "debtNote": "有欠款时不能提币；之后的到账会先还欠款，还清后自动恢复。"
+      }
     },
     "orders": {
       "title": "订单",

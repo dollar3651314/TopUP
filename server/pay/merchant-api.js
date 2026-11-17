@@ -103,6 +103,29 @@ export function createMerchantApi({ db, keys, ops, send, now = () => Date.now() 
   };
 
   // 需要登录的动作：m 是当前商户
+  /**
+   * v1.1 冲正：商户后台的到账列表多带两样（开放 API 不变）：
+   * reversal（冲正过的）：{ reversed_at, net, taken, debt_added, order_no }——扣回多少、从可用余额扣的、记成欠款的、冲正前匹配的订单；
+   * repaid_debt（入账时先还了欠款的）：这笔入账还掉的欠款（账本 debt_repay，和到账同一个 ref）
+   */
+  async function withReversal(m, items) {
+    if (!items.length) return items;
+    const ids = items.map((d) => Number(d.id));
+    const revs = await db.query(`select id, reversed_at, reversal from deposits where merchant_id = $1 and id = any($2::bigint[]) and result = 'reversed'`, [m.id, ids]);
+    const refs = [...new Set(items.map((d) => String(d.txid).slice(0, 16)))];
+    const repaid = await db.query(`select ref, -sum(amount)::bigint n from ledger where merchant_id = $1 and type = 'debt_repay' and ref = any($2::text[]) group by ref`, [m.id, refs]);
+    return items.map((d) => {
+      const r = revs.find((x) => String(x.id) === String(d.id));
+      const x = r?.reversal || null;
+      const rp = repaid.find((y) => y.ref === String(d.txid).slice(0, 16));
+      return {
+        ...d,
+        reversal: x ? { reversed_at: iso(r.reversed_at), net: Number(x.net ?? 0), taken: Number(x.taken ?? 0), debt_added: Number(x.debt_added ?? 0), order_no: x.order_no || null } : null,
+        repaid_debt: rp && d.result === 'credited' ? Number(rp.n) : 0,
+      };
+    });
+  }
+  const depPage = async (m, p) => ({ ...p, items: await withReversal(m, p.items) });
   const authed = {
     async logout(m, b, s) { await db.query('update merchant_users set session_version = session_version + 1 where id = $1', [s.user.id]); return { ok: true, __cookie: cookie('', 0) }; },
     async overview(m) {
@@ -112,11 +135,13 @@ export function createMerchantApi({ db, keys, ops, send, now = () => Date.now() 
       const [o] = await db.query(`select count(*)::int n from orders where merchant_id = $1 and status in ('pending', 'partial')`, [m.id]);
       const [u] = await db.query(`select coalesce(sum(amount), 0)::bigint total, count(*)::int n from deposits where merchant_id = $1 and result = 'credited' and order_id is null`, [m.id]);
       const [w] = await db.query(`select count(*)::int n from withdrawals where merchant_id = $1 and status = 'pending'`, [m.id]);
+      // 最近 7 天被冲正的到账（没有欠款时概览也提一句）
+      const [rv] = await db.query(`select count(*)::int n from deposits where merchant_id = $1 and result = 'reversed' and reversed_at > now() - interval '7 days'`, [m.id]);
       // 按链的今日收款（余额仍是一个数，提币时再选链）
       const byChain = await db.query(`select chain, coalesce(sum(amount), 0)::bigint total, count(*)::int n from deposits
         where merchant_id = $1 and result = 'credited' and time >= (date_trunc('day', now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai') group by chain`, [m.id]);
       const today_by_chain = ['eth', 'bsc', 'tron'].map((c) => { const r = byChain.find((x) => x.chain === c); return { chain: c, total: r ? r.total : 0, count: r ? r.n : 0 }; });
-      return { ...bal, today: t.total, today_count: t.n, today_fees: t.fees, today_by_chain, chains: ops.chains(), open_orders: o.n, unmatched: u.total, unmatched_count: u.n, pending_withdrawals: w.n, recent: (await ops.deposits(m, { limit: 6 })).items };
+      return { ...bal, today: t.total, today_count: t.n, today_fees: t.fees, today_by_chain, chains: ops.chains(), open_orders: o.n, unmatched: u.total, unmatched_count: u.n, pending_withdrawals: w.n, recent: await withReversal(m, (await ops.deposits(m, { limit: 6 })).items), recent_reversals: rv.n };
     },
     customers: (m, b, s, q) => ops.listCustomers(m, { q: q.get('q') || '', cursor: q.get('cursor'), limit: 50 }),
     async customer(m, b, s, q) {
@@ -124,7 +149,7 @@ export function createMerchantApi({ db, keys, ops, send, now = () => Date.now() 
       const days = Number(q.get('days') || 30);
       const from = days > 0 ? new Date(now() - days * 864e5).toISOString() : null;
       return { customer: await ops.getCustomer(m, id), stats: await ops.customerStats(m, id, { from }),
-        orders: (await ops.listOrders(m, { customerId: id, limit: 50 })).items, deposits: (await ops.deposits(m, { customerId: id, limit: 50 })).items,
+        orders: (await ops.listOrders(m, { customerId: id, limit: 50 })).items, deposits: await withReversal(m, (await ops.deposits(m, { customerId: id, limit: 50 })).items),
         payouts: (await db.query(`select id, amount, status, created_at from withdrawals where merchant_id = $1 and customer_id = $2 order by created_at desc limit 50`, [m.id, id])).map((w) => ({ withdrawal_no: w.id, amount: w.amount, status: w.status, created_at: iso(w.created_at) })) };
     },
     'customer-save': (m, b) => ops.upsertCustomer(m, b),
@@ -138,7 +163,7 @@ export function createMerchantApi({ db, keys, ops, send, now = () => Date.now() 
     'order-create': (m, b) => ops.createOrder(m, b),
     match: (m, b, s) => ops.match(m, b, `merchant:${s.user.email}`, true),
     unmatch: (m, b, s) => ops.match(m, b, `merchant:${s.user.email}`, false),
-    deposits: (m, b, s, q) => ops.deposits(m, { cursor: q.get('cursor'), limit: 100, customerId: q.get('customer_id') || '', matched: q.get('matched') || '' }),
+    deposits: async (m, b, s, q) => depPage(m, await ops.deposits(m, { cursor: q.get('cursor'), limit: 100, customerId: q.get('customer_id') || '', matched: q.get('matched') || '' })),
     ledger: (m, b, s, q) => ops.ledger(m, { cursor: q.get('cursor'), limit: 100, customerId: q.get('customer_id') || '' }),
     async withdraw(m, b, s) {
       if (!(await checkCode(s.user, b.code))) throw new PayError('bad_code', 400);

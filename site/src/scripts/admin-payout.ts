@@ -4,7 +4,7 @@
 import wallets from '../../../config/wallets.json';
 import { checkPayoutTx, checkApproveTx, decodeUnsignedLegacyTx, decodePayCall, signUnsigned, addressOfKeyBytes } from '../../../server/wallet/evm-payout-codec.js';
 import { fmtUsdt, parseUsdt, shortAddr } from '../lib/money';
-import { copyBtn, field, fieldErr, fmtTime, h, mono, secretInput, status, table } from './ui';
+import { copyBtn, field, fieldErr, fmtTime, h, mono, put, secretInput, status, table } from './ui';
 import { CHAIN_NAME, STD, chainTag, gasText, hero, type WalletUi } from './admin-wallet';
 
 const root = document.getElementById('admin-root')!;
@@ -89,6 +89,7 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
   // 上限检查：单笔看自己的 limit_check，商户批量看里面最先超的一笔
   const checkOf = (x: any): string => (x.group ? (x.items.find((i: any) => i.limit_check && i.limit_check !== 'ok')?.limit_check || 'ok') : x.limit_check || 'ok');
   const overN = [...r.singles, ...r.groups.flatMap((g: any) => g.items)].filter((i: any) => OVER_LIMIT.includes(i.limit_check)).length;
+  const debtN = [...r.singles, ...r.groups.flatMap((g: any) => g.items)].filter((i: any) => i.limit_check === 'debt_outstanding').length;
   const pend = table(['单号', '商户', '类型 · 来源', '链', '收款地址', '金额 USDT', '上限检查', '等了多久', ''], rows.map((x: any) => {
     const m = minsOf(x.created_at);
     const wait = h('span', { class: m > 60 ? 'wait-late' : m > 30 ? 'wait-warn' : '' }, `等了 ${waitText(m)}`);
@@ -125,12 +126,13 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
       ['每个商户每天', `≤ ${usd(L.perMerchantDay)} USDT（东八区自然日，对所有商户一起生效）；一笔要同时不超过这个商户和全平台今天的余量`], ['热钱包', `每条链 ≤ ${usd(L.hotMax)} USDT，低于 ${usd(L.hotLow)} 提醒补款；授权额度不超过热钱包上限`]]),
     h('p', { class: 'hint muted m0' }, '每批实际付多少取"每批上限、热钱包余额、授权额度"三者最小，超了系统自动拆成几批。'),
     h('div', {}, h('button', { type: 'button', class: 'btn btn-outline', 'data-edit-limits': '', onclick: () => editLimits(ui, L, r.today_approved) }, '改上限')));
-  p.replaceChildren(
+  put(p,
     h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, '打款审核'), h('span', { class: 'muted' }, '提币、代付、批量打款都在这里逐笔审，审完按链凑批签名')),
     top,
     todayCard(ui, r),
     h('h2', { class: 'h-sm' }, `等你审（${r.pending_count} 笔）`),
     overN ? h('p', { class: 'warn-box m0', 'data-over-count': String(overN) }, `其中 ${overN} 笔超了今天的上限（单独审也过不了）：明天 0 点（东八区）重置后再审、驳回，或者先改上限。`) : null,
+    debtN ? h('p', { class: 'alert m0', 'data-debt-count': String(debtN) }, `其中 ${debtN} 笔商户有欠款（到账被冲正、余额不够扣），还清前不能通过：可以驳回，或者等商户之后的到账还清欠款再审。`) : null,
     h('p', { class: 'hint muted m0' }, '按等了多久排，最早的在最上面；超 30 分钟标橙、超 1 小时标红。'), pend,
     h('h2', { class: 'h-sm' }, '已审核待签名（按链凑批）'), h('div', { class: 'plan-grid' }, ...cards),
     h('p', { class: 'hint muted' }, '签名在你的浏览器里做：页面先把要签的交易解码，逐笔和审核通过的收款人、金额对一遍，对不上就不签；热钱包私钥只在页面内存里用一次，不上服务器。'),
@@ -334,6 +336,8 @@ function reviewOne(ui: WalletUi, x: any, r: any) {
       ['金额', h('b', {}, `${usd(x.amount)} USDT`)], ['手续费', `${usd(x.fee)} USDT（已和金额一起冻结）`],
       ['上限检查', checks]]),
     over ? h('p', { class: 'alert m0', 'data-over-limit': '' }, `这笔超过单笔上限（${usd(L.perItem)} USDT），不能通过：驳回，或者先改上限再审。`) : null,
+    // v1.1：商户有欠款（到账被冲正、余额不够扣）时不能通过，红框说明（和超上限同一个样子）
+    debt ? h('p', { class: 'alert m0', 'data-debt-hold': '' }, `${x.merchant} 有欠款 ${usd(x.merchant_debt)} USDT，还清前不能通过：之后的到账会先还欠款，还清后再审；也可以驳回。`) : null,
     daily ? h('div', { class: 'alert stack-sm m0', 'data-over-limit': mOver ? 'merchant' : 'platform' },
       h('span', {}, mOver
         ? `这个商户今天已通过 ${fmtUsdt(mUsed)} USDT，再过这笔就超过每个商户每天上限（${usd(L.perMerchantDay)}）`

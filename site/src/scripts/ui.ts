@@ -16,6 +16,11 @@ export function h(tag: string, attrs: Record<string, any> = {}, ...kids: Child[]
   return e;
 }
 
+/** 换掉 el 的全部内容：null、undefined、false 跳过（原生 replaceChildren 会把 null 写成文字 "null"） */
+export function put(el: Element, ...kids: Child[]): void {
+  el.replaceChildren(...kids.filter((k): k is Node | string | number => k !== null && k !== undefined && k !== false).map((k) => (typeof k === 'number' ? String(k) : k)));
+}
+
 /** 用 {name} 占位符替换文案里的变量 */
 export const tpl = (s: string, v: Record<string, string | number>) => s.replace(/\{(\w+)\}/g, (_, k) => String(v[k] ?? ''));
 

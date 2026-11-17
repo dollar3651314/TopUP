@@ -80,7 +80,11 @@ async function counts() {
   const jobs: [string, string, () => Promise<number>][] = [
     ['merchants', '已开通的商户', async () => (await call('merchants')).merchants.filter((x: any) => x.status === 'active').length],
     ['withdrawals', '待审核的打款', async () => (await call('withdrawals')).items.length],
-    ['anomalies', '未处理的异常到账', async () => (await call('anomalies')).items.filter((x: any) => !x.handled).length],
+    ['anomalies', '未处理的异常到账', async () => {
+      const open = (await call('anomalies')).items.filter((x: any) => !x.handled);
+      root.querySelector('[data-pcount="anomalies"]')?.classList.toggle('badge-bad', open.some((x: any) => x.type === 'reversal'));
+      return open.length;
+    }],
   ];
   await Promise.all([...jobs.map(async ([k, meaning, f]) => {
     try { set(k, await f(), meaning); } catch (e) { set(k, null, meaning); console.warn(`[admin] 导航数字 ${k} 读取失败：${(e as WErr).code || e}`); }
@@ -399,16 +403,17 @@ render.anomalies = async (p) => {
   }
   // 冲正：有欠款的排最前
   const list = [...rv.items].sort((a: any, b: any) => Number(a.handled) - Number(b.handled) || (b.handled ? 0 : u(b.debt_added) - u(a.debt_added)));
-  const first = openRv.sort((a: any, b: any) => u(b.debt_added) - u(a.debt_added))[0];
+  const first = openRv.sort((a: any, b: any) => owes(b) - owes(a) || u(b.debt_added) - u(a.debt_added))[0];
   const top = !first
     ? h('section', { class: 'hero-todo', 'data-hero': 'ok' }, h('div', { class: 'stack-sm' }, h('h2', { class: 'm0' }, '现在没事要做'),
       h('p', { class: 'muted m0' }, '每笔到账入账后 24 小时内，系统至少再复核 2 次它还在不在链上。发现被撤回会自动冲正、回调商户、发邮件给你，记录出现在这里。')))
-    : h('section', { class: `hero-todo ${u(first.debt_added) ? 'hero-bad' : 'hero-warn'}`, 'data-hero': u(first.debt_added) ? 'bad' : 'warn' },
+    : h('section', { class: `hero-todo ${owes(first) ? 'hero-bad' : 'hero-warn'}`, 'data-hero': owes(first) ? 'bad' : 'warn' },
       h('div', { class: 'stack-sm' }, h('h2', { class: 'm0' }, `有 ${openRv.length} 笔到账被链上撤回，系统已自动冲正，等你看一眼`),
-        h('p', { class: 'muted m0' }, u(first.debt_added) ? `${first.merchant}余额不够扣，记了欠款 ${usd(first.debt_added)} USDT：欠款还清前它不能提币，之后的到账先还欠款。` : '余额够扣，没有欠款。看完点"标记已处理"。')),
-      h('button', { type: 'button', class: 'btn btn-primary btn-lg', onclick: () => reversalDetail(p, first) }, u(first.debt_added) ? '去看有欠款的这笔' : '去看这笔冲正'));
+        h('p', { class: 'muted m0' }, owes(first) ? `${first.merchant} 余额不够扣，记了欠款 ${usd(first.debt_added)} USDT：欠款还清前它不能提币，之后的到账先还欠款。`
+          : u(first.debt_added) ? `${first.merchant} 当时余额不够扣，记的欠款 ${usd(first.debt_added)} USDT 已经还清。看完点"标记已处理"。` : '余额够扣，没有欠款。看完点"标记已处理"。')),
+      h('button', { type: 'button', class: 'btn btn-primary btn-lg', onclick: () => reversalDetail(p, first) }, owes(first) ? '去看有欠款的这笔' : '去看这笔冲正'));
   const rows = list.map((x: any) => [t(x.reversed_at), x.merchant, mono(x.customer_id), chainName(x.chain), mono(x.txid.slice(0, 10) + '…', x.txid), usd(x.amount), usd(x.net),
-    u(x.debt_added) ? h('b', { class: 'bad' }, `欠款 ${usd(x.debt_added)}`) : '0.00', cbBadge(x.callback),
+    debtCell(x), cbBadge(x.callback),
     x.handled ? h('span', { class: 'muted' }, '已处理') : h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: (e: Event) => { e.stopPropagation(); reversalDetail(p, x); } }, '去看这笔')]);
   const parts: (HTMLElement | null)[] = [toolbar('异常到账'), tabs, top,
     h('p', { class: 'hint muted' }, '冲正 = 账本追加一行，扣回这笔入账金额、退回收的手续费，旧记录不改；只扣可用余额，冻结的不动，不够扣的记成欠款；同一笔不会冲正两次。复核时节点连不上不算消失。'),
@@ -422,6 +427,11 @@ render.anomalies = async (p) => {
 };
 const chainName = (c: string) => ({ tron: 'TRON', eth: '以太坊', bsc: 'BSC' } as Record<string, string>)[c] || c;
 /** 冲正详情：时间线（入账 → 复核 → 没了 → 确认 → 账本追加冲正 → 订单解除匹配 → 回调 → 邮件）、标记已处理 */
+/** 这笔冲正记的欠款还没还清（商户现在还有欠款） */
+const owes = (x: any) => (u(x.debt_added) && u(x.merchant_debt) ? 1 : 0);
+/** "记成欠款"一格：还欠着标红；已还清的灰色并写"（已还清）" */
+const debtCell = (x: any) => (!u(x.debt_added) ? '0.00' : owes(x) ? h('b', { class: 'bad' }, `欠款 ${usd(x.debt_added)}`)
+  : h('span', { class: 'muted', 'data-debt-repaid': '' }, `欠款 ${usd(x.debt_added)}（已还清）`));
 function reversalDetail(p: HTMLElement, x: any) {
   const dot = (kind: '' | 'bad' | 'warn', mark: string, text: string, when?: string | null) => h('li', { class: `tl-${kind || 'ok'}` }, h('span', { class: 'tl-dot', 'aria-hidden': 'true' }, mark), h('span', {}, text, when ? h('span', { class: 'hint muted' }, ` · ${t(when)}`) : null));
   const checks = (x.rechecks || []).map((c: any, i: number) => dot(c.result === 'present' ? '' : c.result === 'gone' ? 'bad' : 'warn', c.result === 'present' ? '✓' : '!',
@@ -444,7 +454,8 @@ function reversalDetail(p: HTMLElement, x: any) {
   const body = h('section', { class: 'card stack', 'data-reversal-detail': x.txid },
     h('div', { class: 'toolbar' }, h('h2', { class: 'h-sm m0' }, `冲正详情 · ${x.txid.slice(0, 10)}…`), h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => body.remove() }, '收起')),
     h('dl', { class: 'kv' }, ...([['商户', x.merchant], ['客户', mono(x.customer_id)], ['链', chainName(x.chain)], ['交易哈希', mono(x.txid)], ['收款地址', mono(x.address)], ['冲正时间', t(x.reversed_at)]] as [string, any][]).flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
-    u(x.merchant_debt) ? h('p', { class: 'alert m0' }, `${x.merchant}现在欠款 ${usd(x.merchant_debt)} USDT：欠款还清前不能提币（后台和 API 都挡，已提交的单也不能通过），之后的到账先还欠款，还清后自动恢复。`) : null,
+    u(x.debt_added) && !u(x.merchant_debt) ? h('p', { class: 'hint muted m0', 'data-debt-repaid': '' }, `这笔记的欠款 ${usd(x.debt_added)} USDT 已经还清（之后的到账先还了欠款）。`) : null,
+    u(x.merchant_debt) ? h('p', { class: 'alert m0' }, `${x.merchant} 现在欠款 ${usd(x.merchant_debt)} USDT：欠款还清前不能提币（后台和 API 都挡，已提交的单也不能通过），之后的到账先还欠款，还清后自动恢复。`) : null,
     steps, h('p', { class: 'hint muted m0' }, '"标记已处理"只是给你自己记一笔，不动钱。'), msg, h('div', {}, done));
   // 详情放在冲正列表下面（不用弹窗：一边看列表一边看时间线）
   p.querySelector('[data-reversal-detail]')?.remove();
