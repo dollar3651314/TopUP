@@ -80,13 +80,16 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
     const mailMode = c.resendApiKey ? 'resend' : c.smtp.host ? 'smtp' : 'none';
     const payInfo = { tron: c.tronNetwork, trongridKey: Boolean(c.tronApiKey) };
     // worker 最近一次扫链距今的秒数（超过 5 分钟说明 worker 没在运行）；只用来告警，不影响 ok
+    // commit：worker 心跳里它自己的提交号（不是 web 的）；还没有心跳、或旧版本 worker 写的心跳里没有 → null。
+    // 收付款没初始化成功（查不了心跳）时不给 commit 这一项（这时 ok = false、没有 wallet，部署工具照样判没活）
     let worker = { age_s: null, ok: false };
     let ready = false;
     try {
       const d = await pay(); ready = true;
       const [r] = await d.db.query(`select value from pay_meta where key = 'tick_last'`);
       const age = r ? Math.round((Date.now() - Date.parse(r.value.at)) / 1000) : null;
-      worker = { age_s: age, ok: age !== null && age <= 300 };
+      const wc = r && typeof r.value.commit === 'string' && r.value.commit ? r.value.commit : null;
+      worker = { age_s: age, ok: age !== null && age <= 300, commit: wc };
     } catch (err) { if (ready) worker.error = 'query_failed'; else if (reason(err)) payInfo.reason = reason(err); }
     // 钱包（ETH、BSC 每条链的扫块、合约地址配没配齐，只给是否）：单独显示，不进整体 ok
     let wallet = null;
