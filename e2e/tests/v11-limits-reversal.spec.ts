@@ -14,9 +14,11 @@ import { totpCode, totpStep } from '../../server/kyb/totp.js';
 //     gone 里的交易 check 返回 false，unreachable 为 true 时 check 一律抛错（节点连不上），其余返回 true；now 不传为现在。返回 recheckDeposits 的结果。
 // 页面钩子（研发照着加）：
 //   运营后台 · 打款审核（data-tab="p-withdrawals"）：今天已通过卡 [data-today-card]（全平台：已通过 / 上限），每家商户一行 [data-today-merchant="<商户编号>"]
-//     （已通过 / 上限、还能过）；待审核行 [data-payout-row="<单号>"] 加 data-limit-check="ok | merchant | platform | per_item"，
+//     （已通过 / 上限、还能过）；待审核行 [data-payout-row="<单号>"] 加 data-limit-check="ok | merchant | platform | per_item | debt"，
 //     "上限检查"一格写"超商户每天上限" / "超全平台每天上限"；有超限时顶部写"其中 N 笔超了今天的上限"；
 //     审核弹窗三行检查（单笔每批、这个商户、全平台），超限时 [data-pdialog-ok] 灰掉并写"这个商户今天…" / "全平台今天…"，给 [data-goto-limits]（去改上限）。
+//     商户有欠款时（产品 11/17 补充说明第 6 条）：这家商户的待审核行 data-limit-check="debt"，审核弹窗"上限检查"三行下面多一行"商户有欠款，还清前不能通过"，
+//     [data-pdialog-ok] 灰掉（样式同超限），可以驳回。
 //   改上限弹窗（[data-edit-limits]）：多一项 #pl-perMerchantDay（"每个商户每天上限"，注明对所有商户一起生效）；商户每天 > 全平台每天时输入框下红字（含"不能大于全平台"）、不保存；
 //     全平台每天低于今天已通过时 [data-limit-warn] 黄字"今天剩下的单都会留在待审核"，照样能保存。
 //   运营后台 · 异常到账（data-tab="p-anomalies"）：子标签 [data-anomaly-tab="reversal"]（冲正，未处理的有红色数字）；每笔冲正一行 [data-reversal-row="<交易哈希>"]
@@ -254,6 +256,16 @@ test.describe('TC-V11 每天上限按商户算、冲正和欠款（页面）', (
     const r = await mcall('withdraw', { kind: 'cashout', chain: 'eth', to: rndEvm(), amount: '1', code: await code(st.merchantSecret) });
     expect(r.status).toBe(409);
     expect(r.body.error.code).toBe('debt_outstanding');
+    // 已在待审核的单也不能通过（TC-V11-01 留下的 A 那笔 200）
+    const pend = (await sql(`select id from withdrawals where merchant_id = $1 and status = 'pending' order by created_at limit 1`, [st.ma]))[0].id;
+    await adminTab('p-withdrawals');
+    const panel = admin.locator('[data-panel="p-withdrawals"]');
+    await expect(panel.locator(`[data-payout-row="${pend}"]`)).toHaveAttribute('data-limit-check', 'debt');
+    await panel.locator(`[data-payout-row="${pend}"]`).click();
+    await expect(dlg()).toContainText('商户有欠款，还清前不能通过');
+    await expect(admin.locator('[data-pdialog-ok]')).toBeDisabled();
+    await admin.keyboard.press('Escape');
+    expect((await wcall('payout-approve', { ids: [pend] })).body.refused[0].reason).toBe('debt_outstanding');
   });
 
   test('TC-V11-04（M1-2 还清后、L5）下一笔到账先还欠款：账本多"还欠款"、欠款到 0、提币恢复；概览欠款一格写 0.00 和"没有欠款"', async () => {

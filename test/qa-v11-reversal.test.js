@@ -5,22 +5,29 @@
 // 给研发的接口约定（需求没写死的地方由测试定，照着做）：
 //   - 新文件 server/pay/reversal.js：
 //       recheckDeposits(db, { now, check, notify, limit }) → { checked, reversed, inconclusive }：worker 每轮调用（tick 里加一步）。
-//         只看入账（deposits.created_at）后 24 小时内、result = 'credited' 的到账；每笔在这 24 小时内至少复核 2 次（时点研发定，
-//         只要 worker 每 10 分钟以内调一次就能做到）。check({ id, chain, txid, logIndex, block, address, amount }) 由链适配器提供：
-//         resolve true = 还在链上，false = 没了；抛错 = 节点连不上 / 出错，不下结论（不冲正，下一轮再查）。
+//         例行复核：入账（deposits.created_at）后 24 小时内、result = 'credited' 的到账，每笔在这 24 小时内至少复核 2 次（时点研发定，
+//         只要 worker 每 10 分钟以内调一次就能做到）。check({ id, chain, txid, logIndex, block, address, amount }, { confirm }) 由链适配器提供：
+//         resolve true = 还在链上，false = 没了；抛错 = 节点连不上 / 出错 / 节点落后，不下结论（不冲正，下一轮再查）。
 //         每次复核记一行 deposit_rechecks（deposit_id、checked_at = now、result：'present' | 'gone' | 'error'）。
-//         check 返回 false 后可以先记嫌疑、下一轮再确认（两轮），但要在入账后 24 小时内完成冲正。
+//         确认（产品 11/17 补充说明第 5 条）：某次查到"没了"不立刻冲正；至少 10 分钟后再查一次（第二个参数 { confirm: true }，适配器要用
+//         不落后的节点，落后就抛错），仍是"没了"才冲正；第二次查到还在 = 不冲正（记一行 present），之后照常例行复核。
+//         由"没了"触发的确认复核可以落在入账后 24 小时之后，最晚入账后 25 小时。
 //       reverseDeposit(db, depositId, { now, notify }) → { status: 'reversed' | 'already_reversed' }：执行一次冲正；同一笔第二次调用什么都不改。
 //   - 冲正：一个事务里——
-//       ① 账本追加一条 type 'reversal'（ref 同到账那两条：交易哈希前 16 位；customer_id 同到账），amount = −实际从可用余额扣掉的金额；
-//          要扣的是"入账金额"（到账金额 − 收款手续费，即手续费退回）；可用余额不够时扣到 0，差额加进 balances.debt（新列，bigint，≥ 0，默认 0）；
-//          balances.available ≥ 0 的约束保留。账本加一列 debt_after（变动后欠款），旧记录为 0。
+//       ① 账本追加**一条** type 'reversal'（ref 同到账那两条：交易哈希前 16 位；customer_id 同到账），amount = −(到账金额 − 收款手续费)，
+//          即入账净额（补充说明第 9 条：余额不够时也是这个数）；只扣**可用余额**，冻结的不动，可用余额不够时扣到 0，差额加进 balances.debt
+//          （新列，bigint，≥ 0，默认 0）；balances.available ≥ 0 的约束保留。账本加一列 debt_after（变动后欠款，旧记录 0）
+//          和一列 detail（jsonb，冲正这一行写 { gross: 到账金额, fee: 收款手续费, from_available: 从可用余额扣的, to_debt: 记成欠款的 }，
+//          单位 0.000001 USDT 的整数；其他行可以是空对象）。
+//          客户统计（补充说明第 8 条）：customers.total、count、fees 扣回这笔；customers.onchain 扣回到账金额（TRON 老地址）；last_at 不回退。
 //       ② deposits.result = 'reversed'、deposits.reversed_at = now；匹配过的订单解除匹配（订单 matched 减去、状态重算）并发 order.matched 回调。
 //       ③ 回调 deposit.reversed，data 至少有 customer_id、chain、address、txid、amount、fee、credited、order_no（冲正前匹配的订单，没有为 null）、reversed_at。
 //       ④ notify(标题, 正文)：标题含"冲正"，正文含交易哈希；记了欠款时正文含"欠款"和欠款金额。
 //       ⑤ 运营后台异常到账：anomalies 加一行 type 'reversal'（merchant_id、customer_id、address、amount、ref 含交易哈希），沿用 anomaly-handle 标记已处理。
 //   - 欠款：balances.debt > 0 时提币（开放 API POST withdrawals/、POST payouts/batch/，商户后台提币、批量打款）一律 409 'debt_outstanding'，不冻结；
-//     取消提币不受影响（取消退回的冻结回到可用余额，不自动还欠款）。之后每笔到账：照旧记 deposit、fee_in，再追加一条 type 'debt_repay'（amount = −还掉的金额 = min(到账后的可用余额, 欠款)，debt_after 变小），先还欠款。
+//     这个商户已在待审核的提现也不能通过（补充说明第 6 条）：approvePayouts 留在待审核、refused 原因 'debt_outstanding'；
+//     reviewPayoutBatch 409 debt_outstanding；payout-overview 每笔 limit_check = 'debt_outstanding'（页面写"商户有欠款，还清前不能通过"，通过灰掉）；
+//     可以驳回。取消、驳回提币不受影响（退回的冻结回到可用余额，不自动还欠款，补充说明第 7 条）。之后每笔到账：照旧记 deposit、fee_in，再追加一条 type 'debt_repay'（amount = −还掉的金额 = min(到账后的可用余额, 欠款)，debt_after 变小），先还欠款。
 //   - 对外：GET balance/ 加 debt；GET deposits/ 里冲正过的到账 result = 'reversed'，加字段 reversed_at（没冲正为 null）；
 //     GET ledger/ 的类型多 reversal、debt_repay，每条加 debt_after；商户后台 overview 加 debt。金额字段一律是字符串。
 //   - 开发者文档：回调事件加 deposit.reversed，写明"不认识的事件请忽略并返回 200"；错误码表加 409 debt_outstanding；上面新字段都写进对象。
@@ -78,6 +85,7 @@ test('TG-11 ① 冲正（余额够）：账本只追加一条 reversal（扣回�
   assert.equal(last.customer_id, 'c1');
   assert.equal(Number(last.available_after), 0);
   assert.equal(Number(last.debt_after), 0);
+  assert.deepEqual(last.detail, { gross: 100 * U, fee: U, from_available: 99 * U, to_debt: 0 }, '明细记到账金额、收款手续费、扣可用余额多少、记欠款多少');
   const b = await t.balance('ma');
   assert.equal(Number(b.available), 0);
   assert.equal(Number(b.debt), 0);
@@ -179,15 +187,21 @@ test('TG-11 ③④ 邮件通知管理员；同一笔不会冲正两次（直接�
   await t.db.end();
 });
 
-test('TG-11 复核发现链上没了：24 小时内自动冲正（recheckDeposits 调 check 得到 false）；运营后台异常到账列出、可标记已处理', async () => {
+test('TG-11 复核发现链上没了：至少 10 分钟后确认复核（confirm）仍没了才冲正，入账后 25 小时内完成；运营后台异常到账列出、可标记已处理', async () => {
   const t = await setup({ fund: 10 });
   const d = await t.deposit(100);
   const keep = await t.deposit(20);
   const gone = new Set([d.txid]);
   const start = Date.now();
-  const hit = await runRechecks(t, { check: async (x) => !gone.has(x.txid), stopWhen: async () => (await t.dep(d.id)).result === 'reversed' });
+  const confirms = [];
+  const hit = await runRechecks(t, { check: async (x, opt) => { if (opt?.confirm) confirms.push(x.txid); return !gone.has(x.txid); }, stopWhen: async () => (await t.dep(d.id)).result === 'reversed' });
   assert.ok(hit !== null, '链上没了的到账要被冲正');
-  assert.ok(hit - start <= 24 * HOUR, `要在入账后 24 小时内冲正，实际 ${(hit - start) / HOUR} 小时`);
+  assert.ok(hit - start <= 25 * HOUR, `要在入账后 25 小时内冲正，实际 ${(hit - start) / HOUR} 小时`);
+  assert.ok(confirms.includes(d.txid), '冲正前要有一次 confirm 复核');
+  const goneRows = await t.db.query(`select checked_at from deposit_rechecks where deposit_id = $1 and result = 'gone' order by checked_at`, [Number(d.id)]);
+  assert.ok(goneRows.length >= 2, `冲正前至少两次查到没了，实际 ${goneRows.length}`);
+  const first = new Date(goneRows[0].checked_at).getTime(), last = new Date(goneRows.at(-1).checked_at).getTime();
+  assert.ok(last - first >= 10 * MIN, `两次"没了"至少隔 10 分钟，实际 ${(last - first) / MIN} 分钟`);
   assert.equal((await t.dep(keep.id)).result, 'credited', '还在链上的不动');
   const [an] = await t.db.query(`select * from anomalies where type = 'reversal'`);
   assert.ok(an, '异常到账要有冲正记录');
@@ -204,6 +218,69 @@ test('TG-11 复核发现链上没了：24 小时内自动冲正（recheckDeposit
   assert.equal((await call('anomaly-handle', { id: item.id })).status, 200);
   assert.equal((await call('anomalies')).body.items.find((x) => x.type === 'reversal').handled, true);
   assert.equal(Number((await t.balance('ma')).available), 10 * U + 20 * U - 0.2 * U, '标记已处理不动钱');
+  await t.db.end();
+});
+
+test('TG-11 确认复核查到还在：不冲正（第一次"没了"可能是节点落后）；一次"没了"后 10 分钟内不冲正', async () => {
+  const t = await setup();
+  const d = await t.deposit(100);
+  const { recheckDeposits } = await rev();
+  const start = Date.now();
+  let firstGoneAt = null;
+  // 第一次例行复核看到"没了"，之后（确认复核）都看到"还在"
+  for (let at = start; at <= start + 25 * HOUR; at += 5 * MIN) {
+    await recheckDeposits(t.db, { now: at, notify: t.notify, check: async (x, opt) => {
+      if (opt?.confirm) return true;
+      if (firstGoneAt === null) { firstGoneAt = at; return false; }
+      return true;
+    } });
+    if (firstGoneAt !== null && at < firstGoneAt + 10 * MIN) assert.equal((await t.dep(d.id)).result, 'credited', '一次"没了"后 10 分钟内不能冲正');
+  }
+  assert.ok(firstGoneAt !== null, '前提：例行复核查过');
+  assert.equal((await t.dep(d.id)).result, 'credited', '确认时还在：不冲正');
+  assert.equal((await t.callbacks('deposit.reversed')).length, 0);
+  const rows = await t.db.query(`select result, checked_at from deposit_rechecks where deposit_id = $1 order by checked_at`, [Number(d.id)]);
+  const g = rows.findIndex((r) => r.result === 'gone');
+  assert.ok(g >= 0 && rows.slice(g + 1).some((r) => r.result === 'present' && new Date(r.checked_at).getTime() - new Date(rows[g].checked_at).getTime() >= 10 * MIN), '确认复核记一行 present，且在"没了"之后至少 10 分钟');
+  await t.db.end();
+});
+
+test('TG-11 确认复核时节点落后 / 连不上（抛错）：不冲正，之后再确认', async () => {
+  const t = await setup();
+  const d = await t.deposit(100);
+  let lag = true;
+  const start = Date.now();
+  const r = await runRechecks(t, { until: start + 3 * HOUR, check: async (x, opt) => { if (opt?.confirm && lag) throw Object.assign(new Error('node_lagging'), { code: 'node_lagging' }); return false; } });
+  assert.equal(r, null);
+  assert.equal((await t.dep(d.id)).result, 'credited', '确认复核一直出错：不冲正');
+  lag = false;
+  const hit = await runRechecks(t, { from: start + 3 * HOUR, until: start + 25 * HOUR, check: async () => false, stopWhen: async () => (await t.dep(d.id)).result === 'reversed' });
+  assert.ok(hit !== null, '节点恢复后确认仍没了：冲正');
+  await t.db.end();
+});
+
+test('TG-11 最后一次例行复核才第一次查到没了：确认复核可以落在 24 小时之后，最晚入账后 25 小时完成冲正', async () => {
+  const { recheckDeposits } = await rev();
+  // 第一遍：一直"还在"，记下例行复核的时点（相对入账时间）
+  const t1 = await setup();
+  const d1 = await t1.deposit(100);
+  const c1 = new Date((await t1.dep(d1.id)).created_at).getTime();
+  const offs = [];
+  for (let now = c1; now <= c1 + 25 * HOUR; now += 5 * MIN) await recheckDeposits(t1.db, { now, notify: t1.notify, check: async (x, opt) => { if (!opt?.confirm) offs.push(now - c1); return true; } });
+  await t1.db.end();
+  assert.ok(offs.length >= 2 && Math.max(...offs) <= 24 * HOUR, `例行复核都在 24 小时内：${offs.map((x) => (x / HOUR).toFixed(2))}`);
+  const lastOff = Math.max(...offs);
+  // 第二遍：从最后一次例行复核起"没了"
+  const t = await setup();
+  const d = await t.deposit(100);
+  const c = new Date((await t.dep(d.id)).created_at).getTime();
+  let now;
+  for (now = c; now <= c + 25 * HOUR; now += 5 * MIN) {
+    await recheckDeposits(t.db, { now, notify: t.notify, check: async () => now - c < lastOff });
+    if ((await t.dep(d.id)).result === 'reversed') break;
+  }
+  assert.equal((await t.dep(d.id)).result, 'reversed', '最后一次例行复核才发现的也要确认后冲正');
+  assert.ok(now - c >= lastOff + 10 * MIN && now - c <= 25 * HOUR, `冲正应在发现后 ≥ 10 分钟、入账后 ≤ 25 小时，实际入账后 ${((now - c) / HOUR).toFixed(2)} 小时（发现于 ${(lastOff / HOUR).toFixed(2)} 小时）`);
   await t.db.end();
 });
 
@@ -258,8 +335,10 @@ test('TG-11 ⑦ 余额不够扣：可用余额扣到 0（不变负），差额�
   assert.equal(Number(b.debt), 51 * U, '差额 99 − 48 = 51 记成欠款');
   const last = (await t.ledger()).at(-1);
   assert.equal(last.type, 'reversal');
-  assert.equal(Number(last.amount), -48 * U, '账本记实际扣掉的');
+  assert.equal(Number(last.amount), -99 * U, '一行冲正，金额是入账净额（补充说明第 9 条）');
+  assert.equal(Number(last.available_after), 0);
   assert.equal(Number(last.debt_after), 51 * U);
+  assert.deepEqual(last.detail, { gross: 100 * U, fee: U, from_available: 48 * U, to_debt: 51 * U });
   assert.match(t.mails.at(-1).text, /欠款/);
   assert.match(t.mails.at(-1).text, /51/);
   // 余额不许为负的约束还在
@@ -296,6 +375,60 @@ test('TG-11 ⑦ 余额不够扣：可用余额扣到 0（不变负），差额�
   assert.equal(Number(b2.available), 29_700_000);
   // 还清后能提币
   assert.equal((await t.api(t.a, 'POST', 'withdrawals/', { kind: 'payout', chain: 'tron', to: TO, amount: '1' })).status, 200);
+  await t.db.end();
+});
+
+test('TG-11 ⑥ 有欠款时已在待审核的提现也不能通过（refused debt_outstanding，留在待审核）；可以驳回，驳回退回的钱不自动还欠款；审核页 limit_check', async () => {
+  const t = await setup();
+  const d = await t.deposit(100); // 入账 99
+  const w1 = await t.api(t.a, 'POST', 'withdrawals/', { kind: 'payout', chain: 'tron', to: TO, amount: '30' }); // 冻结 31
+  const w2 = await t.api(t.a, 'POST', 'withdrawals/', { kind: 'payout', chain: 'tron', to: TO, amount: '10' }); // 冻结 11
+  const m = await core.getMerchant(t.db, 'ma');
+  const s = await t.ops.payoutSubmit(m, [{ chain: 'tron', to: TO, amount: '5', line: 1 }], 'api', false); // 冻结 6
+  const { reverseDeposit } = await rev();
+  await reverseDeposit(t.db, d.id, { now: Date.now(), notify: t.notify });
+  const b = await t.balance('ma');
+  assert.equal(Number(b.frozen), 48 * U, '冻结的不动');
+  assert.equal(Number(b.available), 0);
+  assert.equal(Number(b.debt), 48 * U, '99 − 可用 51 = 48 记欠款');
+  const payout = await import('../server/pay/payout.js');
+  const r = await payout.approvePayouts(t.db, { ids: [w1.body.withdrawal_no], actor: 'admin', now: Date.now() });
+  assert.deepEqual(r.refused, [{ id: w1.body.withdrawal_no, reason: 'debt_outstanding' }], JSON.stringify(r));
+  assert.equal((await t.db.query('select status from withdrawals where id = $1', [w1.body.withdrawal_no]))[0].status, 'pending');
+  await assert.rejects(() => payout.reviewPayoutBatch(t.db, { batchNo: s.batch_no, approve: s.accepted.map((x) => x.withdrawal_no), actor: 'admin', now: Date.now() }), (e) => e.status === 409 && e.code === 'debt_outstanding');
+  const { payoutAdminActions } = await import('../server/pay/payout-admin.js');
+  const ov = JSON.parse(JSON.stringify(await payoutAdminActions({ db: t.db, tron: null, verifyAdminCode: async () => true })['payout-overview']()));
+  assert.equal(ov.singles.find((x) => x.id === w1.body.withdrawal_no).limit_check, 'debt_outstanding');
+  // 驳回可以；退回的 31 回到可用余额，不还欠款（只有新到账才还）
+  await core.rejectWithdrawal(t.db, w2.body.withdrawal_no, '有欠款', 'admin');
+  const b2 = await t.balance('ma');
+  assert.equal(Number(b2.available), 11 * U);
+  assert.equal(Number(b2.debt), 48 * U, '驳回退回的钱不自动还欠款');
+  assert.ok(!(await t.ledger()).some((x) => x.type === 'debt_repay'));
+  // 新到账才还：可用 11 + 入账 49.5 = 60.5 ≥ 48，还清后能通过
+  await t.deposit(50);
+  assert.equal(Number((await t.balance('ma')).debt), 0);
+  assert.equal(Number((await t.balance('ma')).available), 12_500_000);
+  assert.deepEqual((await payout.approvePayouts(t.db, { ids: [w1.body.withdrawal_no], actor: 'admin', now: Date.now() })).approved, [w1.body.withdrawal_no], '还清后可以通过');
+  await t.db.end();
+});
+
+test('TG-11 冲正扣回客户统计（total、count、fees）和地址上未归集的 onchain；最近到账时间 last_at 不回退', async () => {
+  const t = await setup({ fund: 500 });
+  await t.deposit(20);
+  const d = await t.deposit(100, new Date(Date.now() + 1000));
+  const cust = async () => (await t.db.query(`select total, count, fees, onchain, last_at from customers where merchant_id = 'ma' and customer_id = 'c1'`))[0];
+  const before = await cust();
+  assert.equal(Number(before.total), 120 * U);
+  assert.equal(Number(before.count), 2);
+  const { reverseDeposit } = await rev();
+  await reverseDeposit(t.db, d.id, { now: Date.now(), notify: t.notify });
+  const after = await cust();
+  assert.equal(Number(after.total), 20 * U);
+  assert.equal(Number(after.count), 1);
+  assert.equal(Number(after.fees), Number(before.fees) - U);
+  assert.equal(Number(after.onchain), Number(before.onchain) - 100 * U, '链上已不存在的钱不能再去归集');
+  assert.equal(new Date(after.last_at).getTime(), new Date(before.last_at).getTime(), 'last_at 不回退');
   await t.db.end();
 });
 

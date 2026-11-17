@@ -14,7 +14,9 @@
 //   - 迁移：migrate() 建唯一约束之前，把已有的重复单号处理掉：同一商户同一单号保留最早的一笔（created_at 最早，相同再按 id），
 //     其余改成 `<原单号前 40 字>~<提现号>`；每改一笔记一条审计 pay_audit（action = 'withdrawal.merchant_ref_dedup'，target = 提现号，
 //     detail 带 before、after）。migrate() 可以重复执行（没有重复时什么都不改）；如果用了"只执行一次"的 pay_meta 标记，键名以 merchant_ref 开头。
-//   - 开发者文档（site/src/docs/api-reference.mjs）：merchant_ref 说明写明同一商户永久唯一；错误码表加 409 duplicate_merchant_ref；
+//   - 长度（产品 11/17 补充说明第 1 条）：去掉首尾空格后超过 64 个字符 → 拒收，不截断：单笔提币 422 invalid_param、error.field = 'merchant_ref'；
+//     批量打款那一行报错（行错误码沿用 invalid_merchant_ref，整批 422 invalid_rows）。正好 64 个（含首尾空格去掉后 64 个）可以，存的是去掉首尾空格后的。
+//   - 开发者文档（site/src/docs/api-reference.mjs）：merchant_ref 说明写明同一商户永久唯一、最多 64 字超长拒收；错误码表加 409 duplicate_merchant_ref；
 //     POST withdrawals/ 的 errors 加它；GET withdrawals/ 加 merchant_ref 查询参数。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -73,6 +75,29 @@ test('TG-1 不填单号照旧可以提交多笔（选填）；空串、空格不
     assert.equal(r.status, 200, `merchant_ref=${JSON.stringify(ref)}：${JSON.stringify(r.body)}`);
   }
   assert.equal(await count(w.db, 'ma'), 5);
+  await w.db.end();
+});
+
+test('TG-1 单号超过 64 字（去掉首尾空格后）拒收 422 invalid_param，不截断；正好 64 字可以；批量那一行报错', async () => {
+  const w = await world();
+  const r65 = await w.api(w.a, 'POST', 'withdrawals/', wd('X'.repeat(65)));
+  assert.equal(r65.status, 422, `65 字要拒收，不能截断：${JSON.stringify(r65.body)}`);
+  assert.equal(r65.body.error.code, 'invalid_param');
+  assert.equal(r65.body.error.field, 'merchant_ref');
+  assert.equal(await count(w.db, 'ma'), 0, '不冻结、不建单');
+  assert.equal((await w.balance('ma')).frozen, 0);
+  const r64 = await w.api(w.a, 'POST', 'withdrawals/', wd(`  ${'Y'.repeat(64)}  `));
+  assert.equal(r64.status, 200, `去掉首尾空格后 64 字可以：${JSON.stringify(r64.body)}`);
+  assert.equal(r64.body.merchant_ref, 'Y'.repeat(64), '存去掉首尾空格后的');
+  // 两个前 64 字相同的长单号：第二个也是因为太长被拒（不是被当成重复）
+  const r65b = await w.api(w.a, 'POST', 'withdrawals/', wd(`${'Y'.repeat(64)}Z`));
+  assert.equal(r65b.status, 422);
+  assert.equal(r65b.body.error.code, 'invalid_param');
+  const pb = await w.api(w.a, 'POST', 'payouts/batch/', { items: [{ chain: 'tron', to: TO, amount: '1', merchant_ref: 'OK-1' }, { chain: 'tron', to: TO, amount: '1', merchant_ref: 'Q'.repeat(65) }] });
+  assert.equal(pb.status, 422);
+  assert.equal(pb.body.error.code, 'invalid_rows');
+  const row = pb.body.error.rows.find((x) => x.index === 1);
+  assert.ok(row && row.errors.includes('invalid_merchant_ref'), JSON.stringify(pb.body.error.rows));
   await w.db.end();
 });
 
@@ -255,6 +280,9 @@ test('TG-1 开发者文档：单号说明写"同一商户永久唯一"；错误�
   const p = post.body.find((x) => x[0] === 'merchant_ref');
   assert.match(p[3][0], /unique/i, `英文说明：${p[3][0]}`);
   assert.match(p[3][1], /永久唯一/, `中文说明：${p[3][1]}`);
+  assert.match(p[3][1], /64/);
+  assert.match(p[3][1], /拒收/, '中文说明要写超长拒收（不截断）');
+  assert.match(p[3][0], /reject/i, '英文说明要写超长拒收');
   assert.ok(post.errors.includes('duplicate_merchant_ref'), 'POST withdrawals/ 的错误码要有 duplicate_merchant_ref');
   const e = ERRORS.find((x) => x[1] === 'duplicate_merchant_ref');
   assert.ok(e, '错误码表要有 duplicate_merchant_ref');
