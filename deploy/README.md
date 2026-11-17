@@ -48,10 +48,10 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 | `sudo topup status` | 版本、容器、健康检查、还没填的变量、备份、证书、内存、磁盘、检查发现的问题 |
 | `sudo topup keys` | 哪些密钥已填（只显示名字）、普通设置的值 |
 | `sudo topup set-key 变量名` | 填密钥：屏幕上不显示；只接受清单里的名字；拒绝空格、引号、`$` 等；私钥、节点地址、邮箱先检查格式；写完自动重建 web、worker，报告健康检查里对应的一项 |
-| `sudo topup set 变量名 值` | 填普通设置（收件人、确认数等）；`set TRON_NODE_QPS 数字` 改每秒最多发给 TRON 节点的请求数（正整数，不填默认 10；按节点套餐的限额填），写完自动重建 web、worker |
+| `sudo topup set 变量名 值` | 填普通设置（收件人、确认数等）；`set TRON_NODE_QPS 数字` 改每秒最多发给 TRON 节点的请求数（正整数，不填默认 10；按节点套餐的限额填），写完自动重建 web、worker。**要等服务端按每秒次数限流的改动（P1 节点那一项）合并、新版本上了服务器才生效**，在那之前填了也不起作用；web 和 worker 各自按这个数限，合计最多是它的 2 倍（按节点套餐限额的一半填更稳） |
 | `sudo topup gen-operator` | 只用于测试环境：在服务器上随机生成两个归集发起账户（ETH/BSC 一把、TRON 一把，已有的不重新生成），私钥只写进 `.env`，屏幕上只显示地址（拿去领测试币、登记进合约） |
 | `sudo topup admin-token` | 在终端上显示一次运营后台的初始化口令（不进日志）；初始化完成后后台拒绝再次初始化，口令就没用了 |
-| `sudo topup admin-reset --confirm` | 管理员密码或验证器丢了时重置运营后台的管理员账号。不带 `--confirm` 只说明会做什么、什么都不改。带 `--confirm`：先过和别的重建路径一样的环境检查 → 换一个新的初始化口令写进 `.env`（旧的作废）→ 重建 web、等健康检查（新口令生效）→ 用 `redis-cli` 删掉 Redis 里的 `topup:admin`、`topup:admin:pending`、`:lock`、`:fails`、`:totp-last`（先换口令再删账号：账号删掉之后只有新口令能重新初始化）。新旧口令都不显示、不进日志；日志 `logs/admin-reset-*.log` 记下操作人（`SUDO_USER`）和时间，并尝试发一封提醒邮件给 `MAIL_TO`。之后 `sudo topup admin-token` 看新口令，打开后台重新设置密码和验证器 |
+| `sudo topup admin-reset --confirm` | 管理员密码或验证器丢了时重置运营后台的管理员账号。不带 `--confirm` 只说明会做什么、什么都不改。带 `--confirm`：先过和别的重建路径一样的环境检查 → 换一个新的初始化口令写进 `.env`（旧的作废）→ 重建 web、等健康检查（新口令生效）→ 用 `redis-cli` 删掉 Redis 里的 `topup:admin`、`topup:admin:pending`、`:lock`、`:fails`、`:totp-last`（先换口令再删账号：账号删掉之后只有新口令能重新初始化）。新旧口令都不显示、不进日志；日志 `logs/admin-reset-*.log` 记下操作人（`SUDO_USER`）和时间，并尝试发一封提醒邮件给 `MAIL_TO`。之后 `sudo topup admin-token` 看新口令，打开后台重新设置密码和验证器。删完会再查一遍这几个键确实不在了（`redis-cli` 遇到错误回复退出码也是 0，所以不能只看退出码），还在就报错。注意：已经登录的旧会话要等服务端的会话修正上线后才会随重置一起作废，在那之前重置后最多 8 小时内旧会话可能仍然有效 |
 | `sudo topup gen-test-admin` | 只用于测试环境：生成测试管理员的令牌（给 GitHub 上的自动验收用例 `staging-e2e` 用，第 9 节）。服务器的 `.env` 只写它的 SHA-256（`TEST_ADMIN_TOKEN_SHA256`），令牌原文只在终端上显示一次、不进日志；再运行一次就换新令牌，旧的立刻作废 |
 | `sudo topup test-admin-off` | 关掉测试管理员：删掉 `TEST_ADMIN_TOKEN_SHA256`，令牌立刻作废 |
 | `sudo topup set TEST_MERCHANT_IP_BYPASS 商户编号` | 只用于测试环境：打开"测试商户免 IP 白名单"（第 9 节末尾），这个商户调开放 API 提币、批量打款时不查 IP 白名单；不是测试环境的服务器上直接拒绝 |
@@ -59,7 +59,8 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 | `sudo topup test-mail` | 发一封测试邮件到 `MAIL_TO` |
 | `sudo topup backup` | 立刻备份一次（本机加密保存，默认不传到别处） |
 | `sudo topup restore-drill` | 恢复演练：本机最近一份备份解密后恢复进临时容器，核对表、行数、Redis、开户文件、主密钥；不碰正在运行的数据，解密出的临时文件用完删除 |
-| `sudo topup restore [备份文件名] --confirm` | 把本机的一份加密备份恢复进正在运行的系统（第 5 节）。不写文件名用最新的一份，写了就用 `backup/` 下的那一份（找不到就拒绝）；不带 `--confirm` 只说明会做什么；**生产还要再加 `--production`**。本机没有备份、备份和这台不是同一个环境、备份里的主密钥 `APP_SECRET` 和现在的不一样（开户资料会解不开）都直接拒绝，什么都不动。`.env`、`deploy.env` 不被覆盖；输出和日志里没有任何密钥的值 |
+| `sudo topup restore [备份文件名] --confirm` | 把本机的一份加密备份恢复进正在运行的系统（第 5 节）。不写文件名用最新的一份，写了就用 `backup/` 下的那一份（找不到就拒绝）；不带 `--confirm` 只说明会做什么；**生产还要再加 `--production`**。本机没有备份、备份和这台不是同一个环境、备份里的主密钥 `APP_SECRET` 和现在的不一样（开户资料会解不开）都直接拒绝，什么都不动。`.env`、`deploy.env` 不被覆盖；输出和日志里没有任何密钥的值。**恢复后只启动 web，worker 暂停**（见 `start-worker`）；中途出错或被中断时会自动收拾并给出可以直接运行的命令（第 5 节） |
+| `sudo topup start-worker --confirm` | `restore` 之后用：不带 `--confirm` 再显示一遍核对清单、什么都不做；核对完备份时间之后链上已经发生的打款、归集，带 `--confirm` 启动 worker，记下操作人并发提醒邮件。worker 暂停期间（`state/worker-hold`）自动更新不换版本，`start`、`set` / `set-key`、`rollback` 等都不启动 worker，`status` 和每 5 分钟检查会提示 |
 | `sudo topup backup-key`、`restore-drill --from-r2` | 异地备份用（默认关闭，见第 5 节）：生成管理员的备份密钥对（公钥写进 `deploy.env`，私钥只在屏幕上显示一次）；从 R2 下载最新一份、粘贴私钥解密后演练 |
 | `sudo topup rollback` | 换回上一个版本，并且不再自动更新到当前版本 |
 | `sudo topup retry` | 清掉"不再重试"的记录（`state/skip`），下一分钟重新尝试最新版本 |
@@ -112,7 +113,10 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 - 异地备份上传到 R2 的 `topup-<环境>/` 目录（`topup-staging/`、`topup-production/`），`restore-drill --from-r2` 也从同一个目录下载。
 - 异地（Cloudflare R2）：**默认关闭**（`BACKUP_OFFSITE=off`），没配置不报错。以后要开：`sudo topup backup-key`（管理员私钥存进密码管理器）→ `set BACKUP_OFFSITE r2` → 填 `R2_…` → 装 `rclone`；上传的是同一份密文（配置只经环境变量交给 `rclone`）。打开了但没配好：本机照样备份，只提示、记 `r2=not_configured`；上传失败才报错。
 - 恢复演练：`sudo topup restore-drill`（本机那份，用本机密钥解密到临时目录，用完删除）；打开异地后可以 `--from-r2`（下载 R2 上最新一份，管理员粘贴私钥解密，私钥只在内存盘里用完即删）。
-- 真的恢复：`sudo topup restore [备份文件名] --confirm`（生产另加 `--production`）。顺序：解密到临时目录、核对环境和主密钥（这一步什么都不动）→ 先把现在的数据备份一次（`topup-<时间>-pre-restore.tar.age`，这次不清旧备份）→ 停 web、worker → `pg_restore --clean --if-exists --single-transaction` 导入正在运行的 Postgres（一个事务，失败就什么都没变，重新启动后报错）→ 停 Redis，原来的数据目录挪开，备份里的快照作为 AOF 的基础文件放进 `data/redis`（Redis 开着 AOF，只放 `dump.rdb` 不会被读）→ 开户文件目录换成备份里的 → 启动、等健康检查 → 删掉挪开的旧数据和解密出的临时文件，尝试发一封提醒邮件。备份之后产生的数据都会没有（只在 pre-restore 那份里）；备份之后才建的表 `--clean` 不会删。`.env`、`deploy.env` 一直用现在的，不从备份里恢复。
+- 真的恢复：`sudo topup restore [备份文件名] --confirm`（生产另加 `--production`）。顺序：解密到临时目录、核对环境和主密钥（这一步什么都不动）→ 先把现在的数据备份一次（`topup-<时间>-pre-restore.tar.age`，这次不清旧备份）→ 停 web、worker → `pg_restore --clean --if-exists --single-transaction` 导入正在运行的 Postgres（一个事务，失败就什么都没变，重新启动后报错）→ 停 Redis，原来的数据目录挪开，备份里的快照作为 AOF 的基础文件放进 `data/redis`（Redis 开着 AOF，只放 `dump.rdb` 不会被读）→ 开户文件目录换成备份里的 → 只启动 web（worker 暂停）、等 web 的健康检查 → 删掉挪开的旧数据和解密出的临时文件 → 在屏幕上打印、并发邮件一份"核对清单"。开始前先查磁盘（按备份大小的 4 倍再加 200 MB 估，不够就拒绝）；恢复前的那份备份做完会再解开核对一遍。
+  - **为什么 worker 要暂停（测试环境、生产都一样）**：数据库回到备份时，备份之后在链上已经发出的打款、归集，系统里会变回"已审核 / 待签名 / 待归集"，worker 或管理员再签名就会**重复付款**。所以恢复后 worker 不启动（`--scale worker=0`），按清单在区块浏览器核对备份时间之后热钱包、打款合约、归集账户的转出，链上已经付过的不要再签名、截图发运维；核对完 `sudo topup start-worker --confirm`。
+  - **中途出错或被中断**（Ctrl+C、终端断开、`kill`）：数据库还没动（导入失败时一个事务回滚）就照常启动、报错；数据库可能已经换了（导入中途被打断也可能刚好提交了），就先结束容器里还在跑的 `pg_restore`（`pg_terminate_backend`），把挪开的 Redis、开户文件放回恢复前的，worker 保持暂停，启动 web，打印两条可以直接运行的命令：再恢复一次同一份，或者用 pre-restore 那份回到恢复前。
+  - 备份之后产生的数据都会没有（只在 pre-restore 那份里）；备份之后才建的表 `--clean` 不会删。`.env`、`deploy.env` 一直用现在的，不从备份里恢复。
 - 文件名每次都不同：日志 `logs/<命令>-<时间>-<随机后缀>.log`（同一秒里跑两次 watch、update、backup 也不会互相覆盖或删掉对方的日志）；备份同一秒里已经有同名的就加序号（`topup-<时间>-2-<标签>.tar.age`）。备份标签只能用字母、数字、点、横线、下划线。
 
 ## 6. 检查和告警

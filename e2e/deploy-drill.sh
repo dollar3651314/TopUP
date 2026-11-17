@@ -219,11 +219,16 @@ rm -f "$TOPUP_DIR/data/blobs/restore.txt"; echo later > "$TOPUP_DIR/data/blobs/l
 envsum=$(cat "$TOPUP_DIR/.env" "$TOPUP_DIR/deploy.env" | sha256sum)
 out=$(T restore "$rb" 2>&1); check "restore 不带 --confirm：什么都不做（数据还是恢复前的）" "grep -q -- '--confirm' <<< \"\$out\" && [ \"\$(P 'select v from drill_mark')\" = after ]"
 out=$(T restore "$rb" --confirm 2>&1); rc=$?; echo "$out" | sed 's/^/    /'
-check "restore --confirm：数据库、Redis、开户文件都回到备份时；先备份了一份 pre-restore；健康检查通过" "[ $rc = 0 ] && [ \"\$(P 'select v from drill_mark')\" = before ] && [ \"\$(R get drill:restore)\" = before ] && [ -f '$TOPUP_DIR/data/blobs/restore.txt' ] && [ ! -e '$TOPUP_DIR/data/blobs/later.txt' ] && ls '$TOPUP_DIR'/backup/topup-*-pre-restore.tar.age > /dev/null && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\" and .db == true and .worker.ok == true' > /dev/null"
+check "restore --confirm：数据库、Redis、开户文件都回到备份时；先备份了一份 pre-restore；web 健康检查通过；worker 暂停、打印了核对清单" "[ $rc = 0 ] && [ \"\$(P 'select v from drill_mark')\" = before ] && [ \"\$(R get drill:restore)\" = before ] && [ -f '$TOPUP_DIR/data/blobs/restore.txt' ] && [ ! -e '$TOPUP_DIR/data/blobs/later.txt' ] && ls '$TOPUP_DIR'/backup/topup-*-pre-restore.tar.age > /dev/null && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.commit == \"${v2:0:7}\" and .db == true' > /dev/null && [ -f '$TOPUP_DIR/state/worker-hold' ] && [ -z \"\$(docker ps -q --filter name=topup-worker-1)\" ] && grep -q 'start-worker --confirm' <<< \"\$out\""
 check "restore：.env、deploy.env 没变；屏幕和日志里没有主密钥；明文临时目录、挪开的旧数据已删" "[ \"\$(cat '$TOPUP_DIR/.env' '$TOPUP_DIR/deploy.env' | sha256sum)\" = '$envsum' ] && ! grep -rqF \"\$(sed -n 's/^APP_SECRET=//p' '$TOPUP_DIR/.env')\" '$TOPUP_DIR/logs' <<< \"\$out\" && ! grep -qF \"\$(sed -n 's/^APP_SECRET=//p' '$TOPUP_DIR/.env')\" <<< \"\$out\" && [ -z \"\$(find '$TOPUP_DIR/backup' -name '.restore-*')\" ] && [ ! -e '$TOPUP_DIR/data/redis.pre-restore' ] && [ ! -e '$TOPUP_DIR/data/blobs.pre-restore' ]"
 docker restart topup-redis-1 > /dev/null; for _ in $(seq 1 30); do [ "$(R ping 2> /dev/null)" = PONG ] && break; sleep 1; done
 check "恢复出的 Redis 数据写进了 AOF：Redis 重启后还在" "[ \"\$(R get drill:restore)\" = before ]"
 P "drop table drill_mark" > /dev/null
+T update > /dev/null 2>&1; T set MAIL_TO ops2@example.com > /dev/null 2>&1
+check "worker 暂停期间：自动更新、set 都不启动 worker" "[ -z \"\$(docker ps -q --filter name=topup-worker-1)\" ]"
+out=$(T start-worker 2>&1); check "start-worker 不带 --confirm：再显示核对清单，worker 还暂停" "grep -q '重复付款' <<< \"\$out\" && [ -f '$TOPUP_DIR/state/worker-hold' ] && [ -z \"\$(docker ps -q --filter name=topup-worker-1)\" ]"
+out=$(SUDO_USER=drill-ops T start-worker --confirm 2>&1); rc=$?
+check "start-worker --confirm：worker 启动、健康检查（含 worker）通过、记下操作人" "[ $rc = 0 ] && [ ! -f '$TOPUP_DIR/state/worker-hold' ] && curl -s http://127.0.0.1:18080/api/health/ | jq -e '.worker.ok == true' > /dev/null && grep -q drill-ops \"\$(ls -1t '$TOPUP_DIR'/logs/start-worker-*.log | head -1)\""
 
 A=http://127.0.0.1:18080/api/kyb/?g=admin
 setup() { curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' --data "{\"setupToken\":\"$1\",\"password\":\"drill-password-123\"}" "$A&a=setup-begin"; }
