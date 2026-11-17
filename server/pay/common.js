@@ -51,6 +51,7 @@ const MESSAGES = {
   idempotency_key_required: 'Idempotency-Key header is required', rate_limited: 'Too many requests', wallet_not_initialized: 'Service not ready', invalid_address: 'Invalid TRON address',
   address_not_registered: 'Address is not a registered cash-out wallet', invalid_state: 'Not allowed in the current state', request_in_progress: 'A request with this Idempotency-Key is still in progress', cannot_match: 'Deposit cannot be matched to this order', not_matched: 'Deposit is not matched to this order',
   node_busy: 'Blockchain node is busy, try again later', rpc_unreachable: 'Blockchain node is unreachable, try again later',
+  node_error: 'Blockchain node returned an error, try again later', stale_page: 'The page is out of date, reload it',
 };
 export function errorResponse(e) {
   if (e instanceof PayError) return json(e.status, { error: { code: e.code, message: MESSAGES[e.code] || e.code, ...(e.field ? { field: e.field } : {}), ...(e.withdrawal_no ? { withdrawal_no: e.withdrawal_no } : {}), ...(e.rows ? { rows: e.rows } : {}) } });
