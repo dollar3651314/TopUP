@@ -3,9 +3,13 @@ import AppLayout from '../../layouts/AppLayout.astro';
 import { IS_PROTOTYPE, IS_STAGING } from '../../lib/env';
 // 签名页面用哪一组热钱包、冷钱包地址（config/wallets.json）：构建时就确定，服务器改不了
 const WALLET_ENV = IS_STAGING ? 'staging' : !IS_PROTOTYPE && process.env.APP_ENV === 'production' ? 'production' : 'local';
+// 构建时的提交号（Dockerfile 传进来，本地构建是空的）：页面调 /api/wallet/ 时带 X-TopUP-Build，部署后没刷新的旧页面服务器回 409 stale_page
+// 空的也写成 data-build=""（Astro 遇到空字符串只写属性名，用 String 对象让它照常写出等号和引号）
+// eslint-disable-next-line no-new-wrappers
+const BUILD = new String(String(process.env.GIT_COMMIT || '').replace(/[^0-9a-f]/gi, '').toLowerCase());
 ---
 <AppLayout lang="zh" title="TopUP 审核后台" badge="审核后台">
-  <div id="admin-root" data-prototype={IS_PROTOTYPE ? '1' : undefined} data-wallet-env={WALLET_ENV}>
+  <div id="admin-root" data-build={BUILD} data-prototype={IS_PROTOTYPE ? '1' : undefined} data-wallet-env={WALLET_ENV}>
     <!-- 首次初始化 -->
     <section class="container" data-view="setup" hidden>
       <form class="card login-card form-card" data-setup novalidate>
