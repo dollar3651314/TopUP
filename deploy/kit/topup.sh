@@ -226,8 +226,16 @@ check_ports() {
 others_running() { local p; for p in $(other_projects); do project_running "$p" && printf '%s ' "$p"; done; }
 
 # 环境和 .env 对不上的原因（空 = 没问题）：生产必须连主网、不能有测试环境专用的变量；测试环境必须连 Nile。只说变量名，不说值
+# .env 每一行只能是"变量名=值"（或注释、空行）。docker compose 还认 "export X=…"、"X = …"、行首空格这些写法，
+# 而这里的 envval 只认最简单的写法：两边读法不一样就可能放过实际是 nile 或带着测试变量的配置，所以这类行直接拒绝（只报行号）
+env_bad_lines() {
+  [ -f "$TOPUP_DIR/.env" ] || return 0
+  awk '/^[[:space:]]*(#|$)/ { next } !/^[A-Za-z_][A-Za-z0-9_]*=/ { printf "%s%d", (n++ ? "、" : ""), NR }' "$TOPUP_DIR/.env"
+}
 env_refusal() {
-  local net k
+  local net k bad
+  bad=$(env_bad_lines)
+  [ -z "$bad" ] || { echo ".env 第 ${bad} 行写法不对（只能是 变量名=值：不要 export、等号两边不要空格、行首不要空格）"; return; }
   net=$(envval TRON_NETWORK)
   if [ "$(topup_env)" = production ]; then
     [ "$net" = mainnet ] || { echo "生产必须连 TRON 主网：.env 里 TRON_NETWORK 要是 mainnet（现在是 ${net:-空的}）"; return; }
@@ -242,9 +250,62 @@ refusal_next() {
   case "$1" in
     *TEST_ADMIN_TOKEN_SHA256*) echo "sudo topup test-admin-off 删掉它，再运行同一条命令" ;;
     *TEST_MERCHANT_IP_BYPASS*) echo "sudo topup test-merchant-ip-off 删掉它，再运行同一条命令" ;;
+    *写法不对*) echo "把那几行改成 变量名=值 的写法（sudo nano $TOPUP_DIR/.env），再运行同一条命令" ;;
     *) echo "截图发运维（不要自己改环境：测试环境和生产要分开两台机器）" ;;
   esac
 }
+# 会重建 web、worker 之前都要过这一关（install、start、update、自动换回、rollback、set / set-key 之后的生效）
+env_guard() {
+  local why; why=$(env_refusal)
+  [ -z "$why" ] || die "${why}；${1:-TopUP 没有动}" "$(refusal_next "$why")"
+}
+
+# TOPUP_REAL_IP_FROM 的一段：IPv4（前缀 16～32）或 IPv6（前缀 48～128），不写前缀 = 单个地址；
+# 不能和 Docker 默认地址池 172.17.0.0～172.31.255.255 重叠（端口转发经过 docker-proxy 时 Nginx 看到的来源在这里面，信任它等于信任所有人带的请求头）
+ipv4_int() {
+  local IFS=. o n=0 parts
+  read -ra parts <<< "$1"
+  [ "${#parts[@]}" = 4 ] || return 1
+  for o in "${parts[@]}"; do
+    [[ $o =~ ^[0-9]{1,3}$ ]] && [ $((10#$o)) -le 255 ] || return 1
+    n=$(( n * 256 + 10#$o ))
+  done
+  echo "$n"
+}
+ipv6_ok() {
+  local a=$1 left right g n=0 groups=()
+  [[ $a =~ ^[0-9A-Fa-f:]+$ ]] || return 1
+  if [[ $a == *::* ]]; then
+    left=${a%%::*}; right=${a#*::}
+    [[ $right != *::* ]] || return 1
+    [ -z "$left" ] || { IFS=: read -ra g <<< "$left"; groups+=("${g[@]}"); [[ $left != *: ]] || return 1; }
+    [ -z "$right" ] || { IFS=: read -ra g <<< "$right"; groups+=("${g[@]}"); [[ $right != :* && $right != *: ]] || return 1; }
+    [ "${#groups[@]}" -le 7 ] || return 1
+  else
+    IFS=: read -ra groups <<< "$a"
+    [ "${#groups[@]}" = 8 ] && [[ $a != *: ]] || return 1
+  fi
+  for g in "${groups[@]}"; do [[ $g =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1; done
+}
+realip_from_ok() {
+  local v=$1 item addr pfx n start end lo hi
+  case "$v" in '' | ,* | *, | *,,*) return 1 ;; esac
+  lo=$(ipv4_int 172.17.0.0); hi=$(ipv4_int 172.31.255.255)
+  for item in ${v//,/ }; do
+    addr=${item%%/*}; pfx=
+    [[ $item == */* ]] && { pfx=${item#*/}; [[ $pfx =~ ^[0-9]{1,3}$ ]] || return 1; pfx=$((10#$pfx)); }
+    if n=$(ipv4_int "$addr"); then
+      pfx=${pfx:-32}; [ "$pfx" -ge 16 ] && [ "$pfx" -le 32 ] || return 1
+      start=$(( n & ~((1 << (32 - pfx)) - 1) )); end=$(( start + (1 << (32 - pfx)) - 1 ))
+      [ "$end" -lt "$lo" ] || [ "$start" -gt "$hi" ] || return 1
+    elif ipv6_ok "$addr"; then
+      pfx=${pfx:-128}; [ "$pfx" -ge 48 ] && [ "$pfx" -le 128 ] || return 1
+    else
+      return 1
+    fi
+  done
+}
+
 
 # 平台网关模式的真实 IP（nginx-gateway/ 模板 include 这个文件）：deploy.env 的 TOPUP_REAL_IP_HEADER（off / X-Forwarded-For / X-Real-IP）
 # 和 TOPUP_REAL_IP_FROM（逗号分隔的网关地址段）都填了才打开；默认关（不信任任何请求头）
@@ -262,14 +323,50 @@ write_realip() {
     echo "# 由 deploy/kit/topup.sh 按 deploy.env 生成，不要手改（改用 sudo topup set TOPUP_REAL_IP_HEADER / TOPUP_REAL_IP_FROM）"
     if [ "$mode" = off ]; then
       echo "# 真实 IP：关（不信任任何请求头；应用看到的访客 IP 都是平台网关的地址）"
+      echo "# 第一道限流：所有访客共用网关的地址，按 IP 的额度等于全站的额度，所以放宽成只防整站被打满（每秒 200 个、瞬间多 400 个、同时 512 个连接）"
+      echo "limit_req_zone \$binary_remote_addr zone=topup_req:10m rate=200r/s;"
+      echo "limit_conn_zone \$binary_remote_addr zone=topup_conn:10m;"
+      echo "limit_req zone=topup_req burst=400 nodelay;"
+      echo "limit_conn topup_conn 512;"
     else
       for a in $(dval TOPUP_REAL_IP_FROM | tr ',' ' '); do echo "set_real_ip_from $a;"; done
       echo "real_ip_header $mode;"
       echo "real_ip_recursive on;"
+      echo "# 第一道限流（按访客的真实 IP，和测试环境一样）：每个 IP 每秒 20 个，瞬间最多多出 200 个；同时 100 个连接"
+      echo "limit_req_zone \$binary_remote_addr zone=topup_req:10m rate=20r/s;"
+      echo "limit_conn_zone \$binary_remote_addr zone=topup_conn:10m;"
+      echo "limit_req zone=topup_req burst=200 nodelay;"
+      echo "limit_conn topup_conn 100;"
     fi
   } > "$dir/realip.conf.new"
   chmod 644 "$dir/realip.conf.new"
   mv "$dir/realip.conf.new" "$dir/realip.conf"
+}
+# 改了真实 IP 的设置以后：写 realip.conf → 运行中的 Nginx 里 nginx -t → reload → 经 Nginx 的端口查健康检查。
+# 任何一步不通过：deploy.env 的这一项、realip.conf 都换回原来的（再 reload 一次），退出码 1
+apply_realip() {
+  local key=$1 old=$2 conf="$TOPUP_DIR/state/nginx/realip.conf" bak port body i
+  bak=$(mktemp); [ -f "$conf" ] && cp "$conf" "$bak"
+  write_realip
+  if [ -f "$TOPUP_DIR/state/stopped" ] || [ ! -s "$TOPUP_DIR/state/image.env" ]; then rm -f "$bak"; ok "TopUP 现在没有在运行，下次启动时生效"; return 0; fi
+  realip_undo() {
+    VAL="$old" env_write "$key" "$TOPUP_DIR/deploy.env"
+    if [ -s "$bak" ]; then cp "$bak" "$conf"; chmod 644 "$conf"; else write_realip; fi
+    rm -f "$bak"
+    compose exec -T nginx nginx -s reload >> "$LOG" 2>&1 || true
+    die "$1；已换回原来的 $key 和 Nginx 设置" "截图发运维（日志 $LOG）"
+  }
+  compose exec -T nginx nginx -t >> "$LOG" 2>&1 || realip_undo "Nginx 不接受新的设置（nginx -t 没通过）"
+  compose exec -T nginx nginx -s reload >> "$LOG" 2>&1 || realip_undo "Nginx 重新加载设置失败"
+  port=$(dval TOPUP_HTTP_PORT); body=""
+  for i in 1 2 3 4 5; do
+    body=$(curl -s --max-time 5 "http://127.0.0.1:$port/api/health/" 2> /dev/null || true)
+    app_alive "$body" "$(cur_tag)" && break
+    body=""; [ -n "$DRILL" ] || sleep 2
+  done
+  [ -n "$body" ] || realip_undo "改了以后经 Nginx 的端口 $port 健康检查没有通过"
+  rm -f "$bak"
+  ok "已生效。真实 IP：$(realip_mode)$( [ "$(realip_mode)" = off ] && echo '（关；两项都填了才开）')"
 }
 
 
@@ -606,7 +703,9 @@ cmd_update() {
   note "更新失败：$new。web 最后 50 行日志："
   compose logs --no-color --tail 50 web worker >> "$LOG" 2>&1 || true
   echo "$new" > "$TOPUP_DIR/state/skip"
-  if [ -n "$cur" ]; then
+  if [ -n "$cur" ] && [ -n "$(env_refusal)" ]; then
+    note "没有自动换回：$(env_refusal)"
+  elif [ -n "$cur" ]; then
     sync_kit "$image:$cur" >> "$LOG" 2>&1 || true
     switch_to "$cur"
     if wait_alive "$cur"; then note "已自动换回 $cur"; else note "换回 $cur 后仍然没有通过健康检查，需要人工处理"; fi
@@ -633,6 +732,7 @@ cmd_rollback() {
   cur=$(cur_tag); prev=$(cat "$TOPUP_DIR/state/previous" 2> /dev/null || true)
   [ -n "$prev" ] || die "没有上一个版本可以换回" "截图发运维"
   [ "$prev" != "$cur" ] || die "上一个版本就是现在这个" "截图发运维"
+  env_guard "没有换回（.env 不对时哪个版本都起不来）"
   say "  … 换回 ${prev:0:7}（当前 ${cur:0:7}，换回后不再自动更新到 ${cur:0:7}）"
   echo "$cur" > "$TOPUP_DIR/state/skip"
   sync_kit "$(dval TOPUP_IMAGE):$prev" || die "取上一个版本的部署工具包失败" "截图发运维"
@@ -898,6 +998,11 @@ cmd_keys() {
   detail "BACKUP_AGE_RECIPIENT     $([ -n "$(dval BACKUP_AGE_RECIPIENT)" ] && echo 已生成 || echo '未生成（只有打开异地备份才要：sudo topup backup-key）')"
   detail "TEST_ADMIN_TOKEN_SHA256  $([ -n "$(envval TEST_ADMIN_TOKEN_SHA256)" ] && echo '已生成（测试管理员开着；sudo topup test-admin-off 关）' || echo '未生成（只在测试环境用：sudo topup gen-test-admin）')"
 }
+# 改了要重建 web、worker 的设置（写进 .env 的）：.env 现在就和环境对不上时什么都不改（改了也起不来）
+guard_before_change() {
+  case "$DEPLOY_KEYS" in *" $1 "*) return 0 ;; esac
+  env_guard "什么都没有改（这一项要重建 web、worker 才生效，带着这样的 .env 起不来）"
+}
 key_file() { case "$DEPLOY_KEYS" in *" $1 "*) echo "$TOPUP_DIR/deploy.env" ;; *) echo "$TOPUP_DIR/.env" ;; esac; }
 key_value() { envval "$1" "$(key_file "$1")"; }
 
@@ -906,15 +1011,12 @@ apply_env() {
   local key=$1 body
   case "$key" in
     TOPUP_REAL_IP_HEADER | TOPUP_REAL_IP_FROM)
-      write_realip
-      if [ -f "$TOPUP_DIR/state/stopped" ] || [ ! -s "$TOPUP_DIR/state/image.env" ]; then ok "TopUP 现在没有在运行，下次启动时生效"; return 0; fi
-      compose restart nginx >> "$LOG" 2>&1 || die "重启 Nginx 失败" "截图发运维；也可以 sudo topup set TOPUP_REAL_IP_HEADER off 关掉"
-      wait_alive "$(cur_tag)" || die "改了以后 3 分钟内健康检查没有通过" "截图发运维"
-      ok "已生效。真实 IP：$(realip_mode)$( [ "$(realip_mode)" = off ] && echo '（关；两项都填了才开）')"
+      apply_realip "$key" "${2:-}"
       return 0 ;;
   esac
   case "$DEPLOY_KEYS" in *" $key "*) ok "下一次备份开始使用（可以 sudo topup backup 立刻试一次）"; return 0 ;; esac
   if [ -f "$TOPUP_DIR/state/stopped" ] || [ ! -s "$TOPUP_DIR/state/image.env" ]; then ok "TopUP 现在没有在运行，下次启动时生效"; return 0; fi
+  env_guard "已经写进 .env，但没有重建 web、worker"
   say "  … 让它生效（重建 web、worker，数据不动，约 1 分钟）"
   compose up -d web worker >> "$LOG" 2>&1 || die "重建容器失败" "截图发运维"
   wait_alive "$(cur_tag)" || die "改了以后 3 分钟内健康检查没有通过" "截图发运维；也可以再运行一次 set-key 换回原来的值"
@@ -959,8 +1061,8 @@ check_value() {
       case "$val" in off | X-Forwarded-For | X-Real-IP) ;; *) die "TOPUP_REAL_IP_HEADER 只能是 off、X-Forwarded-For、X-Real-IP（按实测网关带的那个填）；什么都没有改" ;; esac ;;
     TOPUP_REAL_IP_FROM)
       gateway || die "只在平台网关模式用（这台不是）；什么都没有改"
-      printf '%s' "$val" | grep -Eq '^[0-9A-Fa-f.:]+(/[0-9]{1,3})?(,[0-9A-Fa-f.:]+(/[0-9]{1,3})?)*$' \
-        || die "TOPUP_REAL_IP_FROM 应该是网关的地址或地址段，多个用逗号隔开（不要空格）；什么都没有改" ;;
+      realip_from_ok "$val" \
+        || die "TOPUP_REAL_IP_FROM 不合格；什么都没有改" "填网关的地址或地址段，多个用逗号隔开（不要空格、结尾不要逗号）；IPv4 前缀 16～32、IPv6 前缀 48～128；不能和 Docker 默认网段 172.17.0.0～172.31.255.255 重叠" ;;
     TEST_MERCHANT_IP_BYPASS)
       [ "$(dval TOPUP_ENV)" = staging ] || die "只用于测试环境；生产不能有这一项（应用会拒绝启动），什么都没有改"
       printf '%s' "$val" | grep -Eq '^[A-Za-z0-9_-]{1,64}$' || die "TEST_MERCHANT_IP_BYPASS 应该是一个商户编号（例如运营后台商户列表里 m_ 开头的那一列）；什么都没有改" ;;
@@ -983,6 +1085,7 @@ cmd_set_key() {
   val=$(printf '%s' "$val" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   [ -n "$val" ] || { say "没有输入，什么都没有改。"; exit 0; }
   check_value "$key" "$val"
+  guard_before_change "$key"
   file=$(key_file "$key")
   if [ "$(envval "$key" "$file")" = "$val" ]; then unset val; say "和原来的值一样，没有改。"; exit 0; fi
   VAL="$val" env_write "$key" "$file"
@@ -999,11 +1102,14 @@ cmd_set() {
   [ -f "$TOPUP_DIR/.env" ] || die "还没有部署过" "先粘贴第一次部署的那条命令"
   [ -n "$val" ] || die "要写值，例如：sudo topup set $key 值"
   check_value "$key" "$val"
+  guard_before_change "$key"
   file=$(key_file "$key")
-  [ "$(envval "$key" "$file")" != "$val" ] || { say "和原来的值一样，没有改。"; exit 0; }
+  local old; old=$(envval "$key" "$file")
+  [ "$old" != "$val" ] || { say "和原来的值一样，没有改。"; exit 0; }
   VAL="$val" env_write "$key" "$file"
   ok "已设置 $key=$val"
-  apply_env "$key"
+  apply_env "$key" "$old"
+
 }
 
 # 第一次进运营后台要的初始化口令：只显示在终端上（不进日志）；初始化完成后它就没用了（后台会拒绝再次初始化）
@@ -1134,10 +1240,10 @@ cmd_stop() {
 
 cmd_start() {
   start_log start
-  local p avail limits why running
+  local p avail limits running
   [ -s "$TOPUP_DIR/state/image.env" ] || die "还没有部署过" "先粘贴第一次部署的那条命令"
-  why=$(env_refusal)
-  [ -z "$why" ] || die "$why；TopUP 没有启动" "$(refusal_next "$why")"
+  env_guard "TopUP 没有启动"
+
   if [ "$(topup_env)" = production ]; then
     # 生产从不停别的项目
     running=$(others_running)

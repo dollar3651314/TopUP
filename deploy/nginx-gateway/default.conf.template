@@ -13,15 +13,15 @@ server_tokens off;
 # 开户文件单个最大 10 MB（server/kyb/schema.js），留一点余量
 client_max_body_size 12m;
 
+# 真实 IP 和第一道限流（topup.sh 生成，见下）
 include /etc/nginx/topup/realip.conf;
 
 log_format topup_gw '$realip_remote_addr client=$remote_addr xff="$http_x_forwarded_for" xri="$http_x_real_ip" '
                     '[$time_local] "$request" $status $body_bytes_sent "$http_user_agent"';
 
-# 第一道限流（只防明显的洪水；精细的按 IP 限流在 web 进程里）：每个 IP 每秒 20 个，瞬间最多多出 200 个；同时 100 个连接
-# 注意：真实 IP 没打开时所有访客共用网关地址这一个额度
-limit_req_zone $binary_remote_addr zone=topup_req:10m rate=20r/s;
-limit_conn_zone $binary_remote_addr zone=topup_conn:10m;
+# 第一道限流的额度也在上面 include 的 realip.conf 里（topup.sh 按真实 IP 开没开生成）：
+#   - 真实 IP 开：按访客 IP，每个 IP 每秒 20 个、瞬间多 200 个、同时 100 个连接（和测试环境一样）
+#   - 真实 IP 关：所有访客都是网关这一个地址，按 IP 的额度就是全站的额度，放宽成每秒 200 个、瞬间多 400 个、同时 512 个连接，只防整站被打满
 limit_req_status 429;
 limit_conn_status 429;
 
@@ -41,8 +41,6 @@ server {
     set $topup_web http://web:8080;
 
     location / {
-        limit_req zone=topup_req burst=200 nodelay;
-        limit_conn topup_conn 100;
         proxy_pass $topup_web;
         proxy_http_version 1.1;
         # 主机名一律用部署时定的 DOMAIN（= PUBLIC_URL 的主机名）：网关转过来时 Host 是什么都不影响应用的同源检查

@@ -58,7 +58,7 @@ else
 fi
 check "页面没有原型标识" lacks "$home" 'data-prototype-banner'
 check "开户页是真实模式（不是原型）" has "$(req "$BASE/onboarding/")" '&quot;prototype&quot;:false'
-check "响应头包含 CSP" has "$(req -I "$BASE/" | tr 'A-Z' 'a-z')" 'content-security-policy'
+check "响应头包含 CSP（真正生效的 Content-Security-Policy，不算 Report-Only）" grep -Eiq '^content-security-policy:' <<< "$(req -I "$BASE/")"
 check "未登录访问后台数据返回 401" eq "$(code "$BASE/api/kyb/?g=admin&a=apps")" 401
 check "无效的开户链接返回 404" eq "$(code -H 'x-kyb-token: invalid' "$BASE/api/kyb/?g=onboarding&a=state")" 404
 check "跨站请求返回 403" eq "$(code -X POST -H 'content-type: application/json' -H 'origin: https://evil.example' -d '{}' "$BASE/api/kyb/?g=admin&a=invite")" 403

@@ -256,11 +256,15 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # 推送后的镜像摘要：promote-production 按摘要改 :production（标签被人挪过也不会推错镜像）
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
         with:
           persist-credentials: false
       - name: 构建并推送生产镜像（APP_ENV=production，标签 prod-<提交号>）
+        id: push
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -271,7 +275,10 @@ jobs:
             --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             -t "$image:prod-$GITHUB_SHA" .
           docker push -q "$image:prod-$GITHUB_SHA"
-          echo "已推送 $image:prod-$GITHUB_SHA（还没有上生产：等 promote-production 批准）" >> "$GITHUB_STEP_SUMMARY"
+          digest=$(docker buildx imagetools inspect "$image:prod-$GITHUB_SHA" --format '{{.Manifest.Digest}}')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::取不到镜像摘要"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "已推送 $image:prod-$GITHUB_SHA（$digest；还没有上生产：等 promote-production 批准）" >> "$GITHUB_STEP_SUMMARY"
 
   # 上生产：GitHub 环境 production（Required reviewers = 管理员）批准后才运行。不重新构建：把 :production 指到刚才那个 :prod-<提交号>
   # （镜像仓库里直接改标签，内容和上一步推的一模一样）。生产服务器每分钟自己来拉 :production，起不来自动换回上一个版本。
@@ -285,15 +292,22 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: 把 :production 指到 :prod-<提交号>（不重新构建）
+      # PRODUCTION_PROMOTE_GUARD 只放在 GitHub 环境 production 的环境密钥里（值随便，不打印）：环境没建好时 GitHub 会自动建一个
+      # 没有保护、没有这个密钥的同名环境，这里读不到就失败，不会不经批准就上生产
+      - name: 把 :production 指到刚推的镜像（按摘要，不重新构建）
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRODUCTION_PROMOTE_GUARD: ${{ secrets.PRODUCTION_PROMOTE_GUARD }}
+          DIGEST: ${{ needs.image-production.outputs.digest }}
         run: |
+          [ -n "$PRODUCTION_PROMOTE_GUARD" ] || { echo "::error::GitHub 环境 production 里没有环境密钥 PRODUCTION_PROMOTE_GUARD（环境没建好？），不上生产"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::镜像摘要格式不对（要 sha256:[0-9a-f]{64}），不上生产"; exit 1; }
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/topup"
           echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker buildx imagetools create -t "$image:production" "$image:prod-$GITHUB_SHA"
+          docker buildx imagetools create -t "$image:production" "$image@$DIGEST"
           docker buildx imagetools inspect "$image:production"
-          echo "生产标签已指到 $image:prod-$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "生产标签已指到 $image@$DIGEST（提交 $GITHUB_SHA）" >> "$GITHUB_STEP_SUMMARY"
+
 
   # 移动 :production 之后：等生产服务器换成这个提交，再跑生产冒烟检查（e2e/smoke.sh … production）。
   # 地址在仓库密钥 PRODUCTION_URL（不写在仓库里、日志里自动遮盖）；没有配置时跳过。

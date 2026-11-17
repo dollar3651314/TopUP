@@ -98,7 +98,7 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/staging/deploy/ki
 ## 4. 两个配置文件（只在服务器上，权限 600，不进仓库、不进镜像）
 - `deploy.env`：部署用。`install` 生成：`TOPUP_DIR`、`TOPUP_IMAGE`、`TOPUP_ENV`（staging / production，之后不能改）、`DOMAIN`、`CERT_EMAIL`、`CERT_NAME`、`LE_DIR`、`WEBROOT_DIR`（这四项平台网关模式没有）、`POSTGRES_PASSWORD`、`REDIS_PASSWORD`；平台网关模式另有 `TOPUP_GATEWAY=platform`、`TOPUP_HTTP_PORT`、`TOPUP_REAL_IP_HEADER=off`、`TOPUP_REAL_IP_FROM=`（第 7 节）；`BACKUP_OFFSITE=off`（异地备份默认关）。只有打开异地备份时才用到：`backup-key` 写 `BACKUP_AGE_RECIPIENT`；管理员填 `R2_ACCOUNT_ID`、`R2_BUCKET`（`set`）和 `R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`（`set-key`）。本机备份的加密密钥在 `state/backup-identity`（服务器生成，600）。
 - `.env`：应用用，变量见仓库根目录 `.env.example`。`install` 生成 `APP_SECRET`、`ADMIN_SETUP_TOKEN`，设 `TRON_NETWORK=nile`（生产 `mainnet`；生产的 `.env` 里不放 `TEST_ADMIN_TOKEN_SHA256`、`TEST_MERCHANT_IP_BYPASS` 这两行）；
-其余由管理员用 `set-key` / `set` 填。`APP_ENV`、`PUBLIC_URL`、`DATABASE_URL`、`REDIS_URL`、`BLOB_DIR`、`TRUST_PROXY=1`、`HOST`、`PORT` 由 `compose.yml` 决定，不放进 `.env`。
+其余由管理员用 `set-key` / `set` 填。`APP_ENV`、`PUBLIC_URL`、`DATABASE_URL`、`REDIS_URL`、`BLOB_DIR`、`TRUST_PROXY=1`、`HOST`、`PORT` 由 `compose.yml` 决定，不放进 `.env`。`.env` 每一行只能写成 `变量名=值`（或注释、空行）：`export X=…`、`X = …`、行首有空格这些 docker compose 也认的写法，部署工具一律拒绝（只报行号）——两边读法不一样会让环境检查看漏实际生效的值。
 
 ## 5. 备份和恢复
 - 内容：`pg_dump`（Postgres）、Redis 快照（开户资料和管理员会话在 Redis 里）、开户文件目录、两个配置文件（主密钥 `APP_SECRET` 丢了开户资料就解不开）。
@@ -123,9 +123,10 @@ Nginx 用 `$remote_addr` 覆盖 `X-Real-IP` 和 `X-Forwarded-For`；web 设 `TRU
 ### 平台网关模式（生产现在用的）
 机器没有公网 IP，访客 → 平台网关（TLS）→ 机器的 `TOPUP_HTTP_PORT` → Nginx。Nginx 看到的 `$remote_addr` 是**网关的地址**。网关用哪个请求头带访客 IP（`X-Forwarded-For` 还是 `X-Real-IP`）、从哪些地址连过来，**还没有实测**，所以默认不信任任何请求头（访客自己带的也不算）：
 
-- 默认（`TOPUP_REAL_IP_HEADER=off`）：所有访客在应用看来都是网关的地址。后果：按 IP 限流大家共用一个额度（第一道限流每秒 20 个请求、应用里的限流也一样）；**商户的 IP 白名单在生产上未验证、不能用**——白名单里填商户自己的 IP 会一直 403，填网关的地址又等于谁都能过。三条链都没开通，现在没有影响；开通收付款、给商户开 API 之前必须先做下面的实测。`sudo topup status` 和 install 的摘要里有一行"真实 IP：关"提醒。
+- 默认（`TOPUP_REAL_IP_HEADER=off`）：所有访客在应用看来都是网关的地址。后果：按 IP 的限流全部变成**全站共用一个额度**——Nginx 的第一道限流在这种情况下放宽成每秒 200 个、瞬间多 400 个、同时 512 个连接（只防整站被打满；如果照测试环境的每 IP 每秒 20 个、100 个连接，几十个正常访客同时打开页面就会互相挤掉，比没有限流还糟），应用里按 IP 的限流没法放宽，也是全站共用；**商户的 IP 白名单在生产上未验证、不能用**——白名单里填商户自己的 IP 会一直 403，填网关的地址又等于谁都能过。三条链都没开通，现在没有影响；**开通收付款、给商户开 API 之前必须先按下面实测并打开真实 IP**（打开后 Nginx 的第一道限流自动回到每 IP 每秒 20 个、100 个连接）。`sudo topup status` 和 install 的摘要里有一行"真实 IP：关"提醒。
 - 怎么实测（未验证，按这个做）：从自己的电脑访问一次平台地址，在机器上 `docker logs --tail 5 topup-nginx-1`。访问日志每行开头是连进来的地址（网关），后面是 `xff="…"`、`xri="…"` 两个请求头：哪个里面有自己电脑的公网 IP，就是网关用的头；开头的地址（多访问几次，看是不是总在同一个网段）就是网关的地址段。
-- 打开：`sudo topup set TOPUP_REAL_IP_FROM <网关地址段>`（多个用逗号隔开，例如 `10.0.0.0/8`），再 `sudo topup set TOPUP_REAL_IP_HEADER X-Forwarded-For`（或 `X-Real-IP`）。`topup.sh` 生成 `state/nginx/realip.conf`（`set_real_ip_from` + `real_ip_header` + `real_ip_recursive on`）并重启 Nginx：只有从网关地址段连进来的请求，才按这个头取访客 IP；`X-Forwarded-For` 里取最右边一个不在网关地址段里的地址（访客自己在最左边塞的假地址不算）。两项都填了才打开，`set TOPUP_REAL_IP_HEADER off` 关。
+- 打开：`sudo topup set TOPUP_REAL_IP_FROM <网关地址段>`（多个用逗号隔开，不要空格；例如 `10.20.0.0/16`），再 `sudo topup set TOPUP_REAL_IP_HEADER X-Forwarded-For`（或 `X-Real-IP`）。地址段的要求：IPv4 前缀 16～32、IPv6 前缀 48～128（不写前缀 = 单个地址）；不能和 Docker 默认网段 172.17.0.0～172.31.255.255 重叠（经 docker-proxy 转进来的连接来源在这里面，信任它等于信任所有人带的请求头；172.16.x 可以）；不合格什么都不改。`topup.sh` 生成 `state/nginx/realip.conf`（`set_real_ip_from` + `real_ip_header` + `real_ip_recursive on` + 第一道限流），在运行中的 Nginx 里 `nginx -t`、重新加载，再经 `http://127.0.0.1:<TOPUP_HTTP_PORT>/api/health/` 查一次；任何一步不通过就把 `deploy.env` 的这一项和 `realip.conf` 都换回原来的，报错退出：
+只有从网关地址段连进来的请求，才按这个头取访客 IP；`X-Forwarded-For` 里取最右边一个不在网关地址段里的地址（访客自己在最左边塞的假地址不算）。两项都填了才打开，`set TOPUP_REAL_IP_HEADER off` 关。
 - 本机实测过（开发机，nginx:1.27-alpine）：关的时候应用拿到的是连进来的地址、访客自己带的 `X-Forwarded-For` 不起作用；打开后拿到的是 `X-Forwarded-For` 里最右边那个不可信的地址。InstaBox 网关本身的行为没有测过。
 - 以后换成自己的域名经 Cloudflare 代理（上线前另测）时，网关前面又多一层 CDN，`TOPUP_REAL_IP_FROM` 和请求头要重新实测。
 
@@ -198,7 +199,7 @@ flowchart LR
 | | 测试环境 | 生产 |
 |---|---|---|
 | 镜像标签 | `staging`（合并到 `staging` 就推） | `production`（合并到 `main` 后先推 `prod-<提交号>`，管理员批准才移动 `production`） |
-| `TRON_NETWORK` | 必须 `nile` | 必须 `mainnet`（对不上 install、start 都拒绝，自动更新也不换版本） |
+| `TRON_NETWORK` | 必须 `nile` | 必须 `mainnet`：部署工具在每条会重建 web、worker 的路上都检查（install、start、update、自动换回、rollback、set / set-key 之后的生效），对不上就不动；应用自己也拒绝启动（`APP_ENV=production` 且 `TRON_NETWORK` 不是 `mainnet`，`server/app.js` 的 `refuseTronNetwork`；没填按 mainnet） |
 | 测试变量 | 可以开测试管理员、测试商户免 IP 白名单 | `.env` 里有 `TEST_ADMIN_TOKEN_SHA256` 或 `TEST_MERCHANT_IP_BYPASS` 时 install、start 拒绝（只报变量名）；`gen-test-admin`、`set TEST_MERCHANT_IP_BYPASS` 直接拒绝；健康检查里也没有这两项 |
 | 别的项目 | 停掉（同一时间只运行一个） | **从不停**，只报出名字 |
 | 对外 | Nginx 80、443，Let's Encrypt 证书 | 平台网关模式：Nginx 只发布 `TOPUP_HTTP_PORT`（8080）的普通 HTTP，不申请证书；`PUBLIC_URL` = `https://<平台发布的主机名>` |
@@ -222,9 +223,12 @@ curl -fsSL https://raw.githubusercontent.com/<所有者>/TopUP/main/deploy/kit/t
 - 以后换成自己的域名（经 Cloudflare 代理，上线前另测）：要重新定 `DOMAIN`、真实 IP（第 7 节），现在的工具不支持原地改域名，到时候另出方案。
 
 ### 管理员在 GitHub 上要做的（只做一次）
+**第一次合并到 `main` 之前**，先建好 GitHub 环境 `production`（含 Required reviewers、只允许 `main`、环境密钥 `PRODUCTION_PROMOTE_GUARD`）。原因：环境不存在时，GitHub 会在第一次运行 `promote-production` 时自动建一个同名、没有任何保护的环境，不经批准就会上生产；`promote-production` 一开始就检查只放在这个环境里的密钥 `PRODUCTION_PROMOTE_GUARD`，读不到就失败、不改 `production` 标签。
+
 1. Settings → Environments → New environment，名字 `production`；打开 Required reviewers，加管理员自己；Deployment branches 选 Selected branches，只加 `main`。
-2. Settings → Secrets and variables → Actions → Repository secrets，新建 `PRODUCTION_URL`，值是平台发布的地址（`https://8080-<编号>.<平台域名>`，不带最后的斜杠）。没填时 `production-smoke` 跳过（只警告）。
-3. 以后每次合并到 `main`：CI 全绿后 `promote-production` 等批准；批准前看一眼这次的提交。批准后生产机一分钟内开始换版本，`production-smoke` 等它换好再检查。不批准就不会上生产（`prod-<提交号>` 镜像推了也不影响生产）。
+2. 同一个环境里 → Environment secrets → Add secret，名字 `PRODUCTION_PROMOTE_GUARD`，值随便填一串（例如 `ok`；不是密码，只用来证明"环境 production 是管理员建的"，流程里不打印）。**不要**建成仓库密钥（Repository secrets）——那样任何 job 都读得到，就没有守门的作用了。
+3. Settings → Secrets and variables → Actions → Repository secrets，新建 `PRODUCTION_URL`，值是平台发布的地址（`https://8080-<编号>.<平台域名>`，不带最后的斜杠）。没填时 `production-smoke` 跳过（只警告）。
+4. 以后每次合并到 `main`：CI 全绿后 `promote-production` 等批准；批准前看一眼这次的提交。批准后它按 `image-production` 推出的镜像摘要（`sha256:…`）把 `production` 标签指过去（不按 `prod-<提交号>` 标签，标签被挪过也不会推错镜像）；生产机一分钟内开始换版本，`production-smoke` 等它换好再检查。不批准就不会上生产（`prod-<提交号>` 镜像推了也不影响生产）。
 
 注意：同一个 `main` 上又合并了新的提交时，CI 的并发设置会取消前一次还在等批准的运行（只批准最新的那次就行）。Required reviewers 挡不住用管理员自己账号操作的智能体（第 9 节第 3 条同样的问题），智能体不批准部署按公司制度处理。
 
