@@ -101,6 +101,10 @@ test('开发者文档：每个接口实际返回的字段、类型和文档一�
   check('GET', 'ledger/', await call('GET', 'ledger/'));
   const w = check('POST', 'withdrawals/', await call('POST', 'withdrawals/', { kind: 'payout', customer_id: 'c1', to: TO, amount: '10', merchant_ref: 'R-1' }));
   check('GET', 'withdrawals/', await call('GET', `withdrawals/?withdrawal_no=${w.withdrawal_no}`));
+  // v1.1：按时间段对账的提现列表（和 GET withdrawals/ 同一个对象）；带 from 的到账、账本查询返回的字段不变
+  const day = (ms) => new Date(ms).toISOString();
+  check('GET', 'withdrawals/list/', await call('GET', `withdrawals/list/?from=${encodeURIComponent(day(Date.now() - 86_400_000))}`));
+  check('GET', 'deposits/', await call('GET', `deposits/?from=${encodeURIComponent(day(Date.now() - 86_400_000))}`));
   check('POST', 'withdrawals/cancel/', await call('POST', 'withdrawals/cancel/', { withdrawal_no: w.withdrawal_no }));
   // 批量打款（第 3 批）：两条链各一笔（TRON 带客户和备注、以太坊不带），提交后再按批次号查
   const BATCH_ITEM = /\[\{ ([a-z_, ]+) \}\]/.exec(OBJECTS.PayoutBatch.find((f) => f[0] === 'items')[2][0])[1].split(', ');
@@ -120,6 +124,15 @@ test('开发者文档：每个接口实际返回的字段、类型和文档一�
   checkBatchItems('GET payouts/batch/', check('GET', 'payouts/batch/', await call('GET', `payouts/batch/?batch_no=${pb.batch_no}`)));
   assert.deepEqual([...seen].sort(), ENDPOINTS.map((e) => `${e.method} ${e.path}`).sort(), '有接口没有被检查到');
 
+  // v1.1：冲正一笔到账（server/pay/reversal.js），产生 deposit.reversed 回调；冲正后到账、账本、余额的字段也和文档一致
+  const { reverseDeposit } = await import('../server/pay/reversal.js');
+  await core.recordDeposit(db, { txid: 'c'.repeat(64), logIndex: 0, block: 3, to: c.address, amount: 20 * U, time: new Date() });
+  const [rd] = await db.query(`select id from deposits where txid = $1`, ['c'.repeat(64)]);
+  assert.equal((await reverseDeposit(db, rd.id, { now: Date.now(), notify: null })).status, 'reversed');
+  const after = check('GET', 'deposits/', await call('GET', 'deposits/?customer_id=c1'));
+  assert.ok(after.items.some((d) => d.result === 'reversed' && d.reversed_at), '冲正过的到账要能看到，reversed_at 有值');
+  check('GET', 'ledger/', await call('GET', 'ledger/'));
+  check('GET', 'balance/', await call('GET', 'balance/'));
   // 回调：检查实际发出去的请求体（外层和每种事件的 data）
   const sent = [];
   await deliverDue(db, {
