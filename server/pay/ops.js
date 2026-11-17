@@ -173,8 +173,8 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
 
     // ---------- 余额、账本、到账 ----------
     async balance(m) {
-      const [b] = await db.query('select available, frozen from balances where merchant_id = $1', [m.id]);
-      return { available: b.available, frozen: b.frozen, currency: 'USDT' };
+      const [b] = await db.query('select available, frozen, debt from balances where merchant_id = $1', [m.id]);
+      return { available: b.available, frozen: b.frozen, debt: b.debt, currency: 'USDT' };
     },
     // range（v1.1 对账查询）：{ from, to }，按 created_at 从早到晚、游标是（时间, id）；from、to 都没带（range 为 null）的旧调用照旧按 id 从新到旧
     async ledger(m, { cursor = null, limit = 50, customerId = '', range = null }) {
@@ -189,16 +189,17 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
         const rows = await db.query(`select * from ledger where ${where} order by id desc limit $${vals.length}`, vals);
         p = page(rows.map((r) => ({ ...r, cursor: r.id })), limit);
       }
-      return { items: p.items.map((l) => ({ id: String(l.id), type: l.type, amount: l.amount, available_after: l.available_after, frozen_after: l.frozen_after, ref: l.ref, customer_id: l.customer_id, created_at: iso(l.created_at) })), next_cursor: p.next_cursor };
+      return { items: p.items.map((l) => ({ id: String(l.id), type: l.type, amount: l.amount, available_after: l.available_after, frozen_after: l.frozen_after, debt_after: l.debt_after, detail: l.type === 'reversal' ? l.detail : null, ref: l.ref, customer_id: l.customer_id, created_at: iso(l.created_at) })), next_cursor: p.next_cursor };
     },
     // range（v1.1 对账查询）按 TopUP 入账时间 created_at（不是链上付款时间 time）从早到晚；txid 精确匹配。from、to 都没带的旧调用照旧按 id 从新到旧
     async deposits(m, { cursor = null, limit = 50, customerId = '', matched = '', txid = '', range = null }) {
       const vals = [m.id];
       // 低于 1 USDT 的到账不入账、不结算给商户，商户（后台和开放 API）看不到，只在运营后台的"异常到账"里显示
-      let where = "merchant_id = $1 and result = 'credited'";
+      // 冲正过的（v1.1）照样列出：result = reversed、reversed_at 有值
+      let where = "merchant_id = $1 and result in ('credited', 'reversed')";
       if (customerId) { vals.push(customerId); where += ` and customer_id = $${vals.length}`; }
       if (txid) { vals.push(String(txid)); where += ` and txid = $${vals.length}`; }
-      if (matched === 'false') where += ' and order_id is null';
+      if (matched === 'false') where += " and order_id is null and result = 'credited'";
       if (matched === 'true') where += ' and order_id is not null';
       let p;
       if (range) p = await rangePage(db, { table: 'deposits', timeCol: 'created_at', idCast: 'bigint', where, vals, range, cursor, limit });
@@ -209,13 +210,14 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
         p = page(rows.map((r) => ({ ...r, cursor: r.id })), limit);
       }
       return {
-        items: p.items.map((d) => ({ id: String(d.id), customer_id: d.customer_id, chain: d.chain, address: d.address, txid: d.txid, amount: d.amount, fee: d.fee, credited: d.result === 'credited' ? d.amount - d.fee : 0, result: d.result, order_no: d.order_id, matched_by: d.match_type, time: iso(d.time), credited_at: iso(d.created_at) })),
+        items: p.items.map((d) => ({ id: String(d.id), customer_id: d.customer_id, chain: d.chain, address: d.address, txid: d.txid, amount: d.amount, fee: d.fee, credited: d.amount - d.fee, result: d.result, order_no: d.order_id, matched_by: d.match_type, time: iso(d.time), credited_at: iso(d.created_at), reversed_at: iso(d.reversed_at) })),
         next_cursor: p.next_cursor,
       };
     },
 
     // ---------- 提币 ----------
     async withdraw(m, b, source) {
+      await core.assertNoDebt(db, m.id); // v1.1：有欠款先说欠款（参数对不对都一样提不了）
       return core.requestWithdrawal(db, m, { kind: String(b.kind || ''), chain: b.chain === undefined || b.chain === null || b.chain === '' ? 'tron' : String(b.chain), to: String(b.to || '').trim(), amount: parseAmount(b.amount), customerId: b.customer_id ? String(b.customer_id) : null, source, merchantRef: b.merchant_ref });
     },
     /** 按提现号或提现单号（merchant_ref，二选一）查一笔；别的商户的 404 */

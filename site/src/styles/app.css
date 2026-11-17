@@ -428,6 +428,11 @@ tr[data-wait="late"] td:first-child { box-shadow: inset 4px 0 0 var(--danger); }
 .wallet-card .wl-sec { border-top: 1px solid var(--border); padding-top: 10px; display: grid; gap: 4px; }
 .wallet-card .mono { word-break: break-all; }
 .meter-row { width: 100%; height: 8px; accent-color: var(--accent); }
+/* 打款审核"今天已通过"：用满变橙、超过变红 */
+.meter-row[data-meter="full"]::-webkit-meter-optimum-value { background: #e8590c; }
+.meter-row[data-meter="full"]::-moz-meter-bar { background: #e8590c; }
+.meter-row[data-meter="over"]::-webkit-meter-optimum-value { background: var(--danger); }
+.meter-row[data-meter="over"]::-moz-meter-bar { background: var(--danger); }
 .decoded-table .ok, .decoded-table .bad { white-space: nowrap; }
 .cell-2.cell-start { align-items: flex-start; justify-items: start; }
 /* 打款审核：超过单笔上限的行标红 */
@@ -443,3 +448,17 @@ tr.row-over td .btn-primary { color: var(--accent-contrast); }
 @media (prefers-color-scheme: dark) {
   .btn[disabled], .btn:disabled { opacity: 1; background: #24364f; border-color: #35506f; color: #a3b3c6; cursor: not-allowed; }
 }
+
+/* v1.1 冲正：异常到账的子标签数字、冲正详情时间线、商户欠款 */
+.filters button .badge { margin-left: 6px; background: var(--danger); color: #fff; border-radius: 999px; font-size: 0.72rem; padding: 0 7px; font-weight: 700; }
+.rv-timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.rv-timeline li { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 8px; align-items: start; }
+.rv-timeline .tl-dot { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 0.75rem; font-weight: 800; background: rgba(18,184,134,0.12); color: var(--accent); }
+.rv-timeline .tl-bad .tl-dot { background: rgba(201,42,42,0.1); color: var(--danger); }
+.rv-timeline .tl-warn .tl-dot { background: rgba(245,184,61,0.18); color: #b35c00; }
+.debt-alert { border-left-color: var(--danger); }
+.amt-struck { text-decoration: line-through; color: var(--text-muted); }
+/* v1.1 提币：有欠款时整个表单不能填（fieldset disabled），红条和"发起提币"之间留空 */
+.wd-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.wd-fieldset:disabled { opacity: 0.6; }
+.debt-block { margin: 0 0 16px; }

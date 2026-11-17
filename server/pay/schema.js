@@ -373,6 +373,34 @@ alter table withdrawals add column if not exists hold_reason text;
 -- TRON：交了签名的那笔交易原文里的过期时间（毫秒）。链上最新区块时间过了它、链上仍查不到，才算没发出去
 alter table withdrawals add column if not exists tx_expires_at bigint;
 alter table withdrawals add column if not exists gone_suspect_at timestamptz; -- TRON：第一次判"已过期、链上查不到"的时间（隔一轮再确认）
+
+-- v1.1 冲正和欠款：入账后 24 小时内复核到账还在不在链上，没了就冲正（账本追加一行），可用余额不够扣的差额记成欠款。
+-- 已有的记录不动：到账照旧是 credited、欠款 0、账本的 debt_after 是 0；升级前的到账不复核（recheck_next_at 为空）
+alter table balances add column if not exists debt bigint not null default 0;
+alter table balances drop constraint if exists balances_debt_check;
+alter table balances add constraint balances_debt_check check (debt >= 0);
+alter table ledger add column if not exists debt_after bigint not null default 0;
+alter table ledger add column if not exists detail jsonb not null default '{}'; -- 冲正这一行：{ gross, fee, from_available, to_debt }
+alter table ledger drop constraint if exists ledger_type_check;
+alter table ledger add constraint ledger_type_check check (type in ('deposit', 'fee_in', 'freeze', 'unfreeze', 'withdraw', 'fee_out', 'reversal', 'debt_repay'));
+alter table deposits drop constraint if exists deposits_result_check;
+alter table deposits add constraint deposits_result_check check (result in ('credited', 'below_min', 'reversed'));
+alter table deposits add column if not exists reversed_at timestamptz;
+alter table deposits add column if not exists reversal jsonb; -- 冲正明细：到账、手续费、扣回入账、实际从可用余额扣的、记成欠款的、冲正前匹配的订单
+-- 复核排期（server/pay/reversal.js）：下一次复核的时间、已经确认还在的次数、第一次查到"没了"的时间（隔 10 分钟再查一次确认）
+alter table deposits add column if not exists recheck_next_at timestamptz;
+alter table deposits alter column recheck_next_at set default (now() + interval '30 minutes');
+alter table deposits add column if not exists recheck_n int not null default 0;
+alter table deposits add column if not exists recheck_gone_at timestamptz;
+create index if not exists deposits_recheck_due on deposits (recheck_next_at) where result = 'credited' and recheck_next_at is not null;
+create table if not exists deposit_rechecks (
+  id bigserial primary key,
+  deposit_id bigint not null,
+  checked_at timestamptz not null,
+  result text not null check (result in ('present', 'gone', 'error')),
+  detail text not null default ''
+);
+create index if not exists deposit_rechecks_deposit on deposit_rechecks (deposit_id, checked_at);
 -- v1.1 对账查询：按时间段从早到晚翻页（提现、账本、到账都按记录的创建时间，到账即 TopUP 入账时间；相同时间按编号）
 create index if not exists withdrawals_merchant_created on withdrawals (merchant_id, created_at, id);
 create index if not exists deposits_merchant_created on deposits (merchant_id, created_at, id);

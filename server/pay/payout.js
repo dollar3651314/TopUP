@@ -2,7 +2,7 @@
 // 按链凑批后的记账（ETH / BSC 一批一笔交易，失败整批回到已审核；TRON 逐笔记账，失败的回到已审核待签名）。
 // 金额一律是 0.000001 USDT 为单位的整数（这里用 Number；单笔、每批都远小于 2^53）。链上交易的出具、签名核对、广播在 server/wallet/payout.js。
 import { randomBytes } from 'node:crypto';
-import { PayError, audit, getMeta, setMeta, ensureCustomer, post, wdCallback, withdrawalView, chainAddress, PAYOUT_CHAINS, CUSTOMER_RE, MERCHANT_REF_MAX, withRefGuard } from './core.js';
+import { PayError, audit, getMeta, setMeta, ensureCustomer, post, wdCallback, withdrawalView, chainAddress, PAYOUT_CHAINS, CUSTOMER_RE, MERCHANT_REF_MAX, withRefGuard, assertNoDebt } from './core.js';
 import { calcFee, fmtUsdt, parseUsdt } from './money.js';
 
 const U = 1_000_000;
@@ -128,6 +128,7 @@ export async function approvedTodayByMerchant(t, nowMs) {
  */
 export function limitCheck(w, limits, today) {
   const amount = Number(w.amount);
+  if (Number(w.merchant_debt || 0) > 0) return 'debt_outstanding'; // v1.1：商户有欠款，还清前不能通过
   if (amount > limits.perItem) return 'exceeds_per_item_limit';
   if ((today.m.get(w.merchant_id) || 0) + amount > limits.perMerchantDay) return 'exceeds_merchant_daily_limit';
   if (today.v + amount > limits.perDay) return 'exceeds_daily_limit';
@@ -138,7 +139,9 @@ async function approveOne(t, id, { actor, now, limits, today }) {
   const [w] = await t.query(`select * from withdrawals where id = $1 for update`, [id]);
   if (!w) return 'not_found';
   if (w.status !== 'pending') return 'invalid_state';
-  const why = limitCheck(w, limits, today);
+  // v1.1：商户有欠款（到账被冲正、余额不够扣）时，已经提交的单也不能通过，还清后再审
+  const [debt] = await t.query('select debt from balances where merchant_id = $1', [w.merchant_id]);
+  const why = limitCheck({ ...w, merchant_debt: debt ? debt.debt : 0 }, limits, today);
   if (why !== 'ok') return why;
   await t.query(`update withdrawals set status = 'approved', approved_at = $2, approved_by = $3, updated_at = now() where id = $1`, [id, new Date(now), actor]);
   today.v += Number(w.amount);
@@ -317,6 +320,7 @@ export function totalsByChain(rows) {
  * 不在处理时段照样通知管理员（notify），返回 service.next_open_at。
  */
 export async function submitPayoutBatch(db, merchant, { rows = [], source = 'web', onlyValid = false, now = Date.now(), notify = null, batchNo = null }) {
+  await assertNoDebt(db, merchant.id); // v1.1：有欠款不能提交（事务里锁住余额行再查一次）
   if (!Array.isArray(rows) || !rows.length) throw new PayError('invalid_param', 422, 'rows');
   if (rows.length > MAX_ITEMS_PER_REQUEST) throw new PayError('too_many_items', 422, 'rows');
   const checked = await markDuplicateRefs(db, merchant.id, checkPayoutRows(rows, merchant));
@@ -328,6 +332,7 @@ export async function submitPayoutBatch(db, merchant, { rows = [], source = 'web
   const sum = good.reduce((s, r) => s + r.amount + r.fee, 0);
   // 两个请求同时用同一个单号：数据库唯一索引拒绝后到的，整批不收（409 duplicate_merchant_ref）
   const accepted = await withRefGuard(db, merchant.id, good.map((r) => r.merchant_ref), () => db.tx(async (t) => {
+    await assertNoDebt(t, merchant.id, true);
     await t.query('insert into payout_batches (batch_no, merchant_id, source, item_count, total) values ($1, $2, $3, $4, $5)', [no, merchant.id, source, good.length, good.reduce((s, r) => s + r.amount, 0)]);
     // 一次冻结整批（余额不够时数据库约束拒绝，整批不收）；之后逐笔解冻 / 扣除
     await post(t, merchant.id, 'freeze', -sum, sum, no, null);

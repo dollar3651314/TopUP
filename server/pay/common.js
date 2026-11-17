@@ -28,7 +28,9 @@ const AMOUNT_KEYS = new Set(['amount', 'matched', 'fee', 'credited', 'available'
   'profit_total', 'profit_now', 'profit_after_sweep', 'income_fee_in', 'income_fee_out', 'income_dust', 'withdrawals_amount',
   'over_threshold_total', 'threshold', 'hot_trx', 'month_sweep_trx', 'fees_in',
   // 对账的各链明细
-  'receivable']);
+  'receivable',
+  // v1.1 冲正和欠款
+  'debt', 'debt_after', 'taken', 'debt_added', 'net', 'gross', 'from_available', 'to_debt', 'merchant_debt']);
 // 注意：只有值是数字时才转换，所以 hot、cold 作为地址（字符串）时不受影响；数量类的字段不要用上面的名字（例如 total 是金额，地址数量用 address_count）
 /** 把对象里的金额字段（整数）转成字符串 */
 export function money(v) {
@@ -50,6 +52,7 @@ const MESSAGES = {
   duplicate_merchant_order_no: 'merchant_order_no already used', duplicate_merchant_ref: 'merchant_ref already used by another withdrawal (see error.withdrawal_no)', idempotency_conflict: 'Idempotency-Key reused with a different request', order_mode_disabled: 'Order mode is not enabled for this account',
   idempotency_key_required: 'Idempotency-Key header is required', rate_limited: 'Too many requests', wallet_not_initialized: 'Service not ready', invalid_address: 'Invalid TRON address',
   address_not_registered: 'Address is not a registered cash-out wallet', invalid_state: 'Not allowed in the current state', request_in_progress: 'A request with this Idempotency-Key is still in progress', cannot_match: 'Deposit cannot be matched to this order', not_matched: 'Deposit is not matched to this order',
+  debt_outstanding: 'Outstanding debt from a reversed deposit; withdrawals are blocked until later deposits repay it',
   node_busy: 'Blockchain node is busy, try again later', rpc_unreachable: 'Blockchain node is unreachable, try again later',
   node_error: 'Blockchain node returned an error, try again later', stale_page: 'The page is out of date, reload it',
 };

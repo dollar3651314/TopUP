@@ -79,14 +79,17 @@ export const OBJECTS = {
   Balance: [
     ['available', 'amount', ['Available balance', '可用余额']],
     ['frozen', 'amount', ['Frozen by pending withdrawals', '提币中冻结的金额']],
+    ['debt', 'amount', ['Outstanding debt (0.00 normally). If a credited deposit later disappears from the chain (e.g. a reorg) it is reversed; when your available balance cannot cover it, the rest becomes debt. While debt > 0 withdrawals are rejected with 409 debt_outstanding; later deposits repay it first', '欠款（平时是 0.00）。已入账的到账后来在链上消失（例如链重组）会被冲正；可用余额不够扣时差额记成欠款。欠款大于 0 时提币返回 409 debt_outstanding；之后的到账先还欠款']],
     ['currency', 'string', ['Always USDT', '固定为 USDT']],
   ],
   LedgerEntry: [
     ['id', 'string', ['Entry ID; also the cursor for the next page', '记录编号，也用于翻页']],
-    ['type', 'string', ['deposit, fee_in, freeze, unfreeze, withdraw or fee_out', 'deposit、fee_in、freeze、unfreeze、withdraw、fee_out 之一']],
-    ['amount', 'amount', ['Change: positive adds, negative subtracts (withdraw and fee_out change the frozen balance)', '变动金额：正数增加，负数减少（withdraw、fee_out 变动的是冻结余额）']],
+    ['type', 'string', ['deposit, fee_in, freeze, unfreeze, withdraw, fee_out, reversal (a credited deposit disappeared from the chain and was taken back, collection fee refunded) or debt_repay (a new deposit repaid debt first)', 'deposit、fee_in、freeze、unfreeze、withdraw、fee_out、reversal（已入账的到账在链上消失，扣回入账金额、退回收款手续费）、debt_repay（新到账先还欠款）之一']],
+    ['amount', 'amount', ['Change: positive adds, negative subtracts (withdraw and fee_out change the frozen balance). For reversal, amount = −(from_available + to_debt), the whole credited amount taken back; the available balance only goes down by from_available and the rest becomes debt (see detail, available_after, debt_after)', '变动金额：正数增加，负数减少（withdraw、fee_out 变动的是冻结余额）。reversal 的 amount = −(from_available + to_debt)，即扣回的整笔入账金额；可用余额只减 from_available，其余记成欠款（看 detail、available_after、debt_after）']],
     ['available_after', 'amount', ['Available balance after this entry', '这条记录之后的可用余额']],
     ['frozen_after', 'amount', ['Frozen balance after this entry', '这条记录之后的冻结余额']],
+    ['debt_after', 'amount', ['Debt after this entry (0.00 normally)', '这条记录之后的欠款（平时是 0.00）']],
+    ['detail', 'object', ['reversal only: { gross: amount received, fee: collection fee refunded, from_available: taken from available balance, to_debt: recorded as debt } (amounts as strings); null for other types', '只有 reversal 有：{ gross 到账金额, fee 退回的收款手续费, from_available 从可用余额扣的, to_debt 记成欠款的 }（金额是字符串）；其他类型为 null'], true],
     ['ref', 'string', ['Related deposit ID or withdrawal number', '关联的到账编号或提币单号']],
     ['customer_id', 'string', ['Related customer', '关联的客户'], true],
     ['created_at', 'time', ['Created at', '记录时间']],
@@ -100,11 +103,12 @@ export const OBJECTS = {
     ['amount', 'amount', ['Amount received', '到账金额']],
     ['fee', 'amount', ['Collection fee (never more than the amount)', '收款手续费（最多等于到账金额）']],
     ['credited', 'amount', ['Amount added to your balance (amount − fee)', '计入余额的金额（到账金额减手续费）']],
-    ['result', 'string', ['Always credited. Payments under 1 USDT are not credited and are not listed', '固定为 credited。低于 1 USDT 的付款不入账，也不会列出']],
+    ['result', 'string', ['credited, or reversed if it later disappeared from the chain and was taken back (see deposit.reversed). Payments under 1 USDT are not credited and are not listed', 'credited；入账后在链上消失、已冲正的是 reversed（见回调 deposit.reversed）。低于 1 USDT 的付款不入账，也不会列出']],
     ['order_no', 'string', ['Matched order', '匹配到的订单'], true],
     ['matched_by', 'string', ['deposit, order or manual', 'deposit、order、manual 之一'], true],
     ['time', 'time', ['Block time of the payment', '链上付款时间']],
     ['credited_at', 'time', ['When TopUP credited the deposit to your balance (from / to of deposits/ filter by this)', 'TopUP 入账时间（deposits/ 的 from、to 按它筛选）']],
+    ['reversed_at', 'time', ['When it was reversed; null if not reversed', '冲正时间；没有冲正为 null'], true],
   ],
   PayoutBatch: [
     ['batch_no', 'string', ['Batch number', '批次号']],
@@ -278,7 +282,7 @@ export const ENDPOINTS = [
       ['customer_id', 'string', false, ['For payouts: the customer being paid', '代付时填写收款的客户']],
       ['merchant_ref', 'string', false, ['Your withdrawal reference, up to 64 characters (longer is rejected with 422 invalid_param, not truncated; leading and trailing spaces are removed; empty means none). Optional, case-sensitive, but once used it is unique per account forever: across single withdrawals, dashboard withdrawals and batch payout items, in any status including rejected and cancelled. Reusing it returns 409 duplicate_merchant_ref with error.withdrawal_no of the original withdrawal', '你的提现单号，最多 64 个字符（超过拒收，返回 422 invalid_param，不截断；首尾空格去掉，空串算没填）。选填，区分大小写，填了就同一商户永久唯一：单笔提币、商户后台提币、批量打款的每一笔一起算，任何状态都算（驳回、取消的也算）；重复时返回 409 duplicate_merchant_ref，error.withdrawal_no 是原来那笔的提币单号']],
     ],
-    returns: ['Withdrawal'], errors: ['ip_not_allowed', 'invalid_address', 'address_not_registered', 'insufficient_balance', 'duplicate_merchant_ref', 'invalid_param'],
+    returns: ['Withdrawal'], errors: ['ip_not_allowed', 'invalid_address', 'address_not_registered', 'insufficient_balance', 'debt_outstanding', 'duplicate_merchant_ref', 'invalid_param'],
     note: ['Requires an IP whitelist. Amount + fee is frozen immediately. Every withdrawal is reviewed manually. To be safe against retries after the Idempotency-Key expires (24 hours), always send merchant_ref: a duplicate is rejected and nothing is frozen.', '需要先设置 IP 白名单；提交后立即冻结"金额 + 手续费"；每一笔都经过人工审核。Idempotency-Key 只保留 24 小时，建议每笔都填 merchant_ref：重复的会被拒收、不冻结。'],
   },
   {
@@ -310,7 +314,7 @@ export const ENDPOINTS = [
     body: [
       ['items', 'array', true, ['Up to 500 items: [{ chain, to, amount, customer_id?, merchant_ref? }] (chain: eth, bsc or tron; amount in USDT, up to 6 decimals)', '最多 500 笔：[{ chain, to, amount, customer_id?, merchant_ref? }]（chain 是 eth、bsc 或 tron；amount 是 USDT，最多 6 位小数）']],
     ],
-    returns: ['PayoutBatch', 'PayoutBatchService'], errors: ['ip_not_allowed', 'too_many_items', 'invalid_rows', 'insufficient_balance', 'duplicate_merchant_ref', 'invalid_param'],
+    returns: ['PayoutBatch', 'PayoutBatchService'], errors: ['ip_not_allowed', 'too_many_items', 'invalid_rows', 'insufficient_balance', 'debt_outstanding', 'duplicate_merchant_ref', 'invalid_param'],
     note: ['Requires an IP whitelist. If any item is invalid the whole request is rejected with 422 invalid_rows and error.rows = [{ index, line, code, errors }] (index starts at 0, line = index + 1; code is the first problem of the item, errors lists all of them); nothing is frozen. Item codes include duplicate_merchant_ref (the merchant_ref appears earlier in the same request, or is already used by one of your withdrawals; the later item is the one reported) and invalid_merchant_ref (over 64 characters). Otherwise amount + fee of every item is frozen at once and each item is reviewed manually. Network fees are not charged separately. Body limit for this endpoint is 256 KB.', '需要先设置 IP 白名单。有一笔不对整个请求返回 422 invalid_rows，error.rows 列出 [{ index, line, code, errors }]（index 从 0 起，line = index + 1；code 是这一笔的第一个问题，errors 列出全部问题），不冻结任何金额；行错误码包括 duplicate_merchant_ref（merchant_ref 在同一个请求的前面出现过，或已被你的某笔提币用过，报在后出现的那一笔）和 invalid_merchant_ref（超过 64 个字符）；全部没问题时一次冻结每笔的"金额 + 手续费"，每一笔都经过人工审核。网络费不另收。这个接口的请求体上限是 256 KB。'],
   },
   {
@@ -325,10 +329,14 @@ export const EVENTS = [
   { type: 'deposit', data: ['DepositEvent'], when: ['A payment of 1 USDT or more to a customer address is credited', '客户地址收到 1 USDT 及以上的付款并入账'] },
   { type: 'order.matched', data: ['OrderCore'], extra: [['manual', 'boolean', ['true when matched or unmatched manually', '手动匹配或解除匹配时为 true']]], when: ['An order changes because deposits were matched or unmatched', '订单因为匹配或解除匹配发生变化'] },
   { type: 'withdrawal.updated', data: ['Withdrawal'], when: ['A withdrawal is created or changes status', '提币创建或状态变化'] },
+  {
+    type: 'deposit.reversed', data: ['DepositEvent'], extra: [['reversed_at', 'time', ['When it was reversed', '冲正时间']]],
+    when: ['A credited deposit disappeared from the chain (e.g. a reorg; we re-check every deposit at least twice within 24 hours) and was taken back: the credited amount is deducted from your available balance (collection fee refunded), any shortfall becomes debt, and a matched order is unmatched (you also get order.matched)', '已入账的到账在链上消失（例如链重组；每笔到账入账后 24 小时内至少复核 2 次）、已冲正：从可用余额扣回入账金额（退回收款手续费），不够扣的记成欠款；匹配过的订单解除匹配（另发 order.matched）'],
+  },
 ];
 export const EVENT_ENVELOPE = [
   ['id', 'string', ['Event ID; deduplicate by it', '事件编号，请按它去重']],
-  ['type', 'string', ['deposit, order.matched or withdrawal.updated', 'deposit、order.matched、withdrawal.updated 之一']],
+  ['type', 'string', ['deposit, order.matched, withdrawal.updated or deposit.reversed. New event types may be added later: please ignore unknown events and return 200', 'deposit、order.matched、withdrawal.updated、deposit.reversed 之一。以后可能增加新的事件类型：不认识的事件请忽略并返回 200']],
   ['created_at', 'time', ['When the event was created', '事件产生时间']],
   ['data', 'object', ['Event data, see below', '事件内容，见下表']],
 ];
@@ -351,6 +359,7 @@ export const ERRORS = [
   ['409', 'not_matched', ['The deposit is not matched to this order', '这笔到账没有匹配在这个订单上']],
   ['409', 'chain_not_enabled', ['This chain is not enabled on this platform, so no address can be assigned on it', '这条链在本平台没有开通，不能在这条链分配地址']],
   ['409', 'invalid_state', ['Not allowed in the current state (e.g. cancelling a withdrawal that is no longer pending)', '当前状态不允许这个操作（例如取消已经不是待审核的提币）']],
+  ['409', 'debt_outstanding', ['You have outstanding debt (a credited deposit was reversed and your available balance could not cover it); withdrawals are blocked until later deposits repay it. See balance/ debt', '你有欠款（已入账的到账被冲正、可用余额不够扣），还清前不能提币；之后的到账会先还欠款。见 balance/ 的 debt']],
   ['409', 'batch_item_cancel', ['The withdrawal belongs to a batch payout and cannot be cancelled on its own; cancel the batch instead', '这笔属于批量打款，不能单笔取消，请整批取消（只取消还没审核的部分）']],
   ['413', 'too_large', ['Request body over 32 KB (256 KB for POST payouts/batch/)', '请求体超过 32 KB（POST payouts/batch/ 是 256 KB）']],
   ['422', 'invalid_param', ['A parameter is missing or invalid; see error.field', '参数缺失或格式错误，见 error.field']],

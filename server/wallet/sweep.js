@@ -197,7 +197,7 @@ export async function reconcileReleased(db, chain, enriched) {
   const fixed = [];
   for (const c of enriched) {
     const [r] = await db.query(`select
-        coalesce((select sum(d.amount) from deposits d where d.chain = $1 and lower(d.address) = lower($2)), 0)::bigint dep,
+        coalesce((select sum(d.amount) from deposits d where d.chain = $1 and lower(d.address) = lower($2) and d.result <> 'reversed'), 0)::bigint dep,
         coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = $1 and lower(i.address) = lower($2) and i.status = 'swept'), 0)::bigint swept`, [chain, c.address]);
     let extra = BigInt(r.dep) - BigInt(r.swept) - BigInt(c.balance);
     if (extra <= 0n) continue;

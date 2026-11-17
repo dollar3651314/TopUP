@@ -89,12 +89,14 @@ export function payoutAdminActions({ db, tron, wallets = {}, layer = null, payou
       const limits = await payout.getPayoutLimits(db);
       // 今天已通过：全平台、每家商户（东八区 0 点重置）；待审核的每一笔按"现在单独审这一笔"给出上限检查结果
       const today = { v: await payout.approvedToday(db, now()), m: await payout.approvedTodayByMerchant(db, now()) };
-      const rows = await db.query(`select w.*, m.name merchant, m.cashout_wallets from withdrawals w join merchants m on m.id = w.merchant_id where w.status = 'pending' order by w.created_at, coalesce(w.batch_line, 0), w.id limit 1000`);
+      const rows = await db.query(`select w.*, m.name merchant, m.cashout_wallets, b.debt merchant_debt from withdrawals w join merchants m on m.id = w.merchant_id join balances b on b.merchant_id = w.merchant_id where w.status = 'pending' order by w.created_at, coalesce(w.batch_line, 0), w.id limit 1000`);
       // 代付的收款地址是不是第一次付（原型偏离第 2 条：没有白名单，审核时提示）
       const seen = new Set((await db.query(`select distinct merchant_id || '|' || chain || '|' || lower(to_address) k from withdrawals where status = 'completed'`)).map((r) => r.k));
       const item = (w) => ({
         id: w.id, merchant_id: w.merchant_id, merchant: w.merchant, kind: w.kind, chain: w.chain, to: w.to_address, amount: usdt(w.amount), fee: usdt(w.fee), source: w.source,
         customer_id: w.customer_id, merchant_ref: w.merchant_ref, batch_no: w.batch_ref || null, created_at: iso(w.created_at),
+        // v1.1：商户有欠款（到账被冲正）时不能通过，还清后再审（可以驳回）
+        merchant_debt: usdt(w.merchant_debt),
         registered: w.kind === 'cashout', first_time: w.kind === 'payout' && !seen.has(`${w.merchant_id}|${w.chain}|${String(w.to_address).toLowerCase()}`),
         limit_check: payout.limitCheck(w, limits, today),
       });

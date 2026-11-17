@@ -81,7 +81,15 @@
       "unmatchedSub": "{n} deposits not linked to an order",
       "byChain": "Today · {net}",
       "byChainSub": "{n} payments",
-      "oneBalance": "Your balance is one number across chains; you choose the chain when withdrawing."
+      "oneBalance": "Your balance is one number across chains; you choose the chain when withdrawing.",
+      "debt": "Debt",
+      "debtNone": "No debt",
+      "debtSub": "Withdrawals are blocked until it is repaid",
+      "debtTitle": "You owe {amount} USDT. Withdrawals are blocked until it is repaid",
+      "debtText": "A credited deposit later disappeared from the chain (e.g. a reorg) and was reversed. Your available balance could not cover it, so the rest was recorded as debt. Later deposits repay it automatically first; withdrawals resume once it is repaid, nothing to apply for.",
+      "debtGo": "See which deposit was reversed",
+      "recentReversals": "No debt. {n} deposit(s) were taken back by the chain (reversed) in the last 7 days.",
+      "recentGo": "See reversals"
     },
     "dep": {
       "cols": {
@@ -104,10 +112,30 @@
       "result": {
         "confirming": "Confirming {n}/19",
         "credited": "Credited",
-        "below_min": "Below 1 USDT (not credited)"
+        "below_min": "Below 1 USDT (not credited)",
+        "reversed": "Reversed",
+        "repaid": "Credited, repaid debt first"
       },
       "unmatched": "Unmatched",
-      "filterUnmatched": "Unmatched only"
+      "filterUnmatched": "Unmatched only",
+      "repaidNote": "Repaid {amount} of debt first",
+      "orderReleased": "Unmatched",
+      "rev": {
+        "title": "Deposit taken back (reversed)",
+        "lead": "When we re-checked this deposit after crediting it, it was no longer on the chain (e.g. a reorg), so it was reversed automatically: a reversal entry was appended to the ledger; earlier entries are unchanged.",
+        "time": "Reversed at",
+        "tx": "Transaction",
+        "amount": "Amount received",
+        "net": "Credited amount taken back (fee refunded)",
+        "taken": "From available balance",
+        "debt": "Recorded as debt",
+        "noDebt": "0.00 (balance covered it, no debt)",
+        "order": "Order",
+        "orderReleased": "{order} unmatched (order.matched callback sent)",
+        "noOrder": "This deposit was not matched to an order",
+        "callback": "We sent the deposit.reversed callback (please ignore unknown events and return 200).",
+        "debtNote": "Withdrawals are blocked while you have debt; later deposits repay it first and withdrawals resume automatically once it is cleared."
+      }
     },
     "orders": {
       "title": "Orders",
@@ -197,9 +225,14 @@
         "freeze": "Frozen for withdrawal",
         "unfreeze": "Unfrozen",
         "withdraw": "Withdrawal",
-        "fee_out": "Payout fee"
+        "fee_out": "Payout fee",
+        "reversal": "Reversal",
+        "debt_repay": "Debt repayment"
       },
-      "ledgerNote": "The ledger is append-only: every balance change is a new line and nothing is ever edited."
+      "ledgerNote": "The ledger is append-only: every balance change is a new line and nothing is ever edited.",
+      "onlyReversed": "Reversed only",
+      "noneReversed": "No reversed deposits.",
+      "debtCol": "Debt after"
     },
     "wd": {
       "title": "Withdrawals",
@@ -267,7 +300,8 @@
       "payTo": "Recipient address",
       "errAddressChain": "Enter a valid {net} address.",
       "chainCol": "Chain",
-      "balanceNote": "Your available balance is shared by all three chains; choose the chain when you withdraw."
+      "balanceNote": "Your available balance is shared by all three chains; choose the chain when you withdraw.",
+      "debtBlock": "You owe {amount} USDT, so you cannot withdraw until it is repaid. Requests through the API are rejected too (409 debt_outstanding). Later deposits repay it first."
     },
     "api": {
       "title": "API settings",
@@ -448,7 +482,8 @@
       "generic": "Something went wrong. Please try again.",
       "too_many_items": "At most 500 items at a time.",
       "invalid_rows": "Some rows have problems; see the check result of each row.",
-      "invalid_sheet": "Could not read the sheet: the first row must be the header chain,to,amount."
+      "invalid_sheet": "Could not read the sheet: the first row must be the header chain,to,amount.",
+      "debt_outstanding": "You have outstanding debt from a reversed deposit; withdrawals resume once later deposits repay it."
     },
     "picker": {
       "placeholder": "Search by customer ID, name or email, or type a new ID",
@@ -647,7 +682,15 @@
       "unmatchedSub": "{n} 笔还没匹配到订单",
       "byChain": "今日收款 · {net}",
       "byChainSub": "{n} 笔",
-      "oneBalance": "余额是一个数（各链合计），提币时再选链。"
+      "oneBalance": "余额是一个数（各链合计），提币时再选链。",
+      "debt": "欠款",
+      "debtNone": "没有欠款",
+      "debtSub": "还清前不能提币",
+      "debtTitle": "你有欠款 {amount} USDT，还清前不能提币",
+      "debtText": "有一笔到账被链上撤回（冲正），扣回时你的余额不够，差额记成欠款。之后的到账会先自动还欠款，还清后提币自动恢复，不用申请。",
+      "debtGo": "看是哪笔到账被撤回",
+      "recentReversals": "没有欠款。最近 7 天有 {n} 笔到账被链上撤回（已冲正）。",
+      "recentGo": "看冲正记录"
     },
     "dep": {
       "cols": {
@@ -670,10 +713,30 @@
       "result": {
         "confirming": "确认中 {n}/19",
         "credited": "已入账",
-        "below_min": "低于 1 USDT（不入账）"
+        "below_min": "低于 1 USDT（不入账）",
+        "reversed": "已冲正",
+        "repaid": "已入账，先还欠款"
       },
       "unmatched": "未匹配",
-      "filterUnmatched": "只看未匹配"
+      "filterUnmatched": "只看未匹配",
+      "repaidNote": "这笔入账先还了欠款 {amount}",
+      "orderReleased": "已解除匹配",
+      "rev": {
+        "title": "到账被撤回（已冲正）",
+        "lead": "这笔到账入账后复核时链上已经找不到了（例如链重组），系统已自动冲正：账本追加一行冲正，旧记录不改。",
+        "time": "冲正时间",
+        "tx": "交易哈希",
+        "amount": "到账金额",
+        "net": "扣回入账（已退手续费）",
+        "taken": "从可用余额扣",
+        "debt": "记成欠款",
+        "noDebt": "0.00（余额够扣，没有欠款）",
+        "order": "订单",
+        "orderReleased": "{order} 已解除匹配（已回调 order.matched）",
+        "noOrder": "这笔没有匹配订单",
+        "callback": "我们已发回调 deposit.reversed（不认识的事件请忽略并返回 200）。",
+        "debtNote": "有欠款时不能提币；之后的到账会先还欠款，还清后自动恢复。"
+      }
     },
     "orders": {
       "title": "订单",
@@ -763,9 +826,14 @@
         "freeze": "提币冻结",
         "unfreeze": "解冻",
         "withdraw": "提币",
-        "fee_out": "付款手续费"
+        "fee_out": "付款手续费",
+        "reversal": "冲正",
+        "debt_repay": "还欠款"
       },
-      "ledgerNote": "账本只追加：每一次余额变动都是新的一行，任何记录都不会被修改。"
+      "ledgerNote": "账本只追加：每一次余额变动都是新的一行，任何记录都不会被修改。",
+      "onlyReversed": "只看已冲正",
+      "noneReversed": "没有被撤回的到账。",
+      "debtCol": "变动后欠款"
     },
     "wd": {
       "title": "提币",
@@ -833,7 +901,8 @@
       "payTo": "收款地址",
       "errAddressChain": "请输入正确的 {net} 地址。",
       "chainCol": "链",
-      "balanceNote": "可用余额是一个数，三条链共用，提的时候选链。"
+      "balanceNote": "可用余额是一个数，三条链共用，提的时候选链。",
+      "debtBlock": "有欠款 {amount} USDT，还清前不能提币。用 API 提交也会被拒（错误码 debt_outstanding）。之后的到账会先还欠款，还清后自动恢复。"
     },
     "api": {
       "title": "API 设置",
@@ -1014,7 +1083,8 @@
       "generic": "操作失败，请稍后重试。",
       "too_many_items": "一次最多 500 笔。",
       "invalid_rows": "表格里有问题的行，请看每一行的检查结果。",
-      "invalid_sheet": "没读出表格：第一行要是表头 chain,to,amount。"
+      "invalid_sheet": "没读出表格：第一行要是表头 chain,to,amount。",
+      "debt_outstanding": "你有欠款（到账被冲正），还清前不能提币；之后的到账会先还欠款。"
     },
     "picker": {
       "placeholder": "输入客户编号、名称或邮箱搜索；也可以输入新的编号",

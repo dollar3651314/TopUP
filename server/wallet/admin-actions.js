@@ -171,7 +171,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
           row.operator = await operatorGas(chain); // 发起账户的手续费币（归集页的卡片）
           // 估算（按数据库：到账合计 − 已归集），真正凑批时向链上查余额
           const [est] = await db.query(`with a as (
-              select ca.address, coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address)), 0)
+              select ca.address, coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address) and d.result <> 'reversed'), 0)
                 - coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept'), 0) v
               from customer_addresses ca where ca.chain = $1 and ca.provider = 'contract')
             select count(*) filter (where v > 0)::int n, coalesce(sum(v) filter (where v > 0), 0)::bigint total,
@@ -192,7 +192,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
       const chain = q?.get('chain') || 'eth';
       if (!SWEEP_CHAINS.includes(chain)) throw new PayError('invalid_param', 422, 'chain');
       const rows = await db.query(`select ca.address, ca.status, ca.customer_id, m.name merchant,
-          coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address)), 0)
+          coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address) and d.result <> 'reversed'), 0)
           - coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept'), 0) v,
           (select i.batch_id from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status in ('pending', 'sent') limit 1) in_batch_id,
           exists (select 1 from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept') swept_before

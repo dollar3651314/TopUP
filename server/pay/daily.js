@@ -22,7 +22,7 @@ const EVM_CHAINS = ['eth', 'bsc'];
 /** 合约钱包的充值地址（含停用的旧地址）：按账本估算的未归集金额从多到少，最多 limit 个 */
 async function contractAddresses(db, chain, limit) {
   return db.query(`select ca.merchant_id, ca.customer_id, ca.address,
-      coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address)), 0)
+      coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address) and d.result <> 'reversed'), 0)
       - coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept'), 0) v
     from customer_addresses ca where ca.chain = $1 and ca.provider = 'contract' order by v desc, ca.id desc limit $2`, [chain, limit]);
 }
@@ -112,7 +112,8 @@ export async function runDaily({ db, tron, wallets, layer = null, notify, now = 
   }
 
   // 每条链的账本应收：到账 − 已完成的打款
-  const depBy = Object.fromEntries((await db.query(`select chain, coalesce(sum(amount), 0)::bigint v from deposits group by chain`)).map((x) => [x.chain, Number(x.v)]));
+  // 冲正过的到账（v1.1）链上已经没有了，不算应收
+  const depBy = Object.fromEntries((await db.query(`select chain, coalesce(sum(amount), 0)::bigint v from deposits where result <> 'reversed' group by chain`)).map((x) => [x.chain, Number(x.v)]));
   const outBy = Object.fromEntries((await db.query(`select w.chain, coalesce(-sum(l.amount), 0)::bigint v from ledger l join withdrawals w on w.id = l.ref where l.type = 'withdraw' group by w.chain`)).map((x) => [x.chain, Number(x.v)]));
   for (const [k, r] of Object.entries(byChain)) {
     r.total = r.addresses + r.hot + r.cold;
@@ -124,8 +125,10 @@ export async function runDaily({ db, tron, wallets, layer = null, notify, now = 
   const sum = (k) => rows.reduce((a, r) => a + r[k], 0);
   const chainAddr = sum('addresses'), hot = sum('hot'), cold = sum('cold');
   const checked = sum('checked'), addressCount = sum('address_count');
-  const [s] = await db.query(`select coalesce(sum(available + frozen), 0)::bigint balances from balances`);
-  const [f] = await db.query(`select coalesce(-sum(amount) filter (where type = 'fee_in'), 0)::bigint fee_in, coalesce(-sum(amount) filter (where type = 'fee_out'), 0)::bigint fee_out from ledger`);
+  // v1.1：商户欠我们的（欠款）从商户余额里减掉；冲正退回的收款手续费从手续费收入里减掉
+  const [s] = await db.query(`select coalesce(sum(available + frozen - debt), 0)::bigint balances from balances`);
+  const [f] = await db.query(`select coalesce(-sum(amount) filter (where type = 'fee_in'), 0)::bigint - coalesce((select sum(fee) from deposits where result = 'reversed'), 0)::bigint fee_in,
+    coalesce(-sum(amount) filter (where type = 'fee_out'), 0)::bigint fee_out from ledger`);
   const [bm] = await db.query(`select coalesce(sum(amount), 0)::bigint below from deposits where result = 'below_min'`);
   const chain = chainAddr + hot + cold;
   const fees = f.fee_in + f.fee_out + bm.below;
