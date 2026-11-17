@@ -129,7 +129,12 @@ export async function rangePage(db, { table, timeCol, idCast, where, vals, range
   const p = (v) => { vals.push(v); return `$${vals.length}`; };
   if (range.from) where += ` and ${timeCol} >= ${p(range.from)}::timestamptz`;
   where += ` and ${timeCol} < ${p(range.to)}::timestamptz`;
-  if (cursor) { const c = decodeCursor(cursor); where += ` and (${timeCol}, id) > (${p(c.t)}::timestamptz, ${p(c.id)}::${idCast})`; }
+  if (cursor) {
+    // 游标那一条的时间直接从库里取（记录的创建时间不会变），不靠游标里的时间字符串来回转换；那一条查不到时才用游标里的时间
+    const c = decodeCursor(cursor);
+    const id = p(c.id);
+    where += ` and (${timeCol}, id) > (coalesce((select ${timeCol} from ${table} where id = ${id}::${idCast} and merchant_id = $1), ${p(c.t)}::timestamptz), ${id}::${idCast})`;
+  }
   const rows = await db.query(`select *, ${usText(timeCol)} as cursor_t from ${table} where ${where} order by ${timeCol}, id limit ${p(limit + 1)}`, vals);
   const more = rows.length > limit;
   const items = more ? rows.slice(0, limit) : rows;
