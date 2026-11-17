@@ -13,6 +13,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../server/config.js';
 import { createPgDb } from '../server/pay/db.js';
+import { fakeTronGridNet, TRON_GENESIS_NILE } from './tron-helpers.js';
 
 const PG = process.env.TEST_DATABASE_URL || '';
 const RD = process.env.TEST_REDIS_URL || '';
@@ -51,6 +52,8 @@ test('run.mjs 对本机的测试环境跑 basics.test.mjs：全部通过，输�
   const u = new URL(PG); u.searchParams.set('options', `-c search_path=${schema}`);
   const dir = mkdtempSync(join(tmpdir(), 'topup-e2ekit-'));
   const { createWeb } = await import('../server/web.js');
+  // TRON 节点（TRON_NODE_URL 指的本机关着的端口）和 TronGrid 由本机替身回答创世块：K-4 起测试管理员要核对节点真是 Nile
+  const restoreNet = fakeTronGridNet({ '127.0.0.1:9': TRON_GENESIS_NILE });
   const err = console.error; console.error = () => {};
   const web = createWeb(loadConfig({
     APP_ENV: 'staging', DATABASE_URL: u.toString(), REDIS_URL: RD, APP_SECRET: 'k'.repeat(40), BLOB_DIR: dir, PUBLIC_URL: 'https://x.test',
@@ -81,6 +84,7 @@ test('run.mjs 对本机的测试环境跑 basics.test.mjs：全部通过，输�
     assert.match(outside.out, /只能跑 e2e\/staging-e2e/);
   } finally {
     console.error = err;
+    restoreNet();
     server.close();
     await (await web.app).close().catch(() => {});
     rmSync(dir, { recursive: true, force: true });

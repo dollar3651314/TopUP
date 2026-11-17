@@ -13,7 +13,7 @@ import { signerOf } from './signing.js';
 import { deriveAddress, isValidAddress } from './tron.js';
 import { inviteMerchantUser } from './merchant-api.js';
 import { diskUsage } from './disk.js';
-import { walletAdminActions } from '../wallet/admin-actions.js';
+import { walletAdminActions, nodeFailure } from '../wallet/admin-actions.js';
 import { evmUnswept } from '../wallet/addresses.js';
 import { getSweepSettings } from '../wallet/sweep.js';
 import { payoutAdminActions } from './payout-admin.js';
@@ -27,7 +27,28 @@ const VERIFY_TTL_MS = 5 * 60 * 1000; // 验证码通过后 5 分钟内必须提�
 const ENERGY_PER_SWEEP = 65_000; // 转 USDT 到已经有 USDT 的地址，大约需要的能量
 const USDT_FEE_LIMIT = 30 * TRX;
 
-export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null, payoutSvc = null }) {
+/**
+ * 老 TronGrid 客户端（server/pay/trongrid.js）抛出的错打上 node = true：nodeFailure 只把带这个标记的 TypeError / SyntaxError / 超时等
+ * 换成节点错误码（K-13），别处来的同类错误（发邮件失败、数据坏了）照旧 500。方法同步返回的照旧同步返回
+ */
+export function nodeClient(client) {
+  if (!client) return client;
+  const tag = (e) => { if (e && typeof e === 'object') { try { e.node = true; } catch { /* 冻结的对象不打标记 */ } } throw e; };
+  return new Proxy(client, {
+    get(t, k) {
+      const v = Reflect.get(t, k);
+      if (typeof v !== 'function') return v;
+      return (...args) => {
+        let r;
+        try { r = v.apply(t, args); } catch (e) { tag(e); }
+        return r && typeof r.then === 'function' ? r.catch(tag) : r;
+      };
+    },
+  });
+}
+
+export function createWalletApi({ db, tron: rawTron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null, payoutSvc = null }) {
+  const tron = nodeClient(rawTron); // 老 TronGrid 客户端的错打上 node 标记（nodeFailure 只换节点的错）
   const payoutActions = payoutAdminActions({ db, tron, wallets, layer, payoutSvc, verifyAdminCode, now });
   const hot = wallets.hot, cold = wallets.cold;
   const need = (cond, code, status = 422, field) => { if (!cond) throw new PayError(code, status, field); };
@@ -61,11 +82,17 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     need(statuses.includes(b.status), 'invalid_state', 409);
     return b;
   }
-  /** 广播一组已签名的步骤；返回失败的原因（没有失败返回 null） */
+  /**
+   * 广播一组已签名的步骤；返回失败的原因（没有失败返回 null）。
+   * 节点回 DUP_TRANSACTION_ERROR（同一份已签名交易节点已经有了，例如 503 重试前其实已经收到）：按已广播处理，记下本地算的交易号（和打款一样）
+   */
   async function broadcastSteps(steps) {
     for (const s of steps) {
       try { s.txid = await tron.broadcastHex(encodeSigned(s.rawHex, s.signature)); s.status = 'broadcast'; }
-      catch (e) { s.status = 'failed'; s.error = e.message; return e.message; }
+      catch (e) {
+        if (e?.code === 'DUP_TRANSACTION_ERROR' || /DUP_TRANSACTION/i.test(String(e?.message))) { s.txid = s.txID; s.status = 'broadcast'; delete s.error; continue; }
+        s.status = 'failed'; s.error = e.message; return e.message;
+      }
     }
     return null;
   }
@@ -165,16 +192,17 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const pick = new Set(p.batches[0].items.map((x) => x.id));
       const left = rows.length - pick.size;
       const total = Number(p.batches[0].total);
-      // 之前凑了没签的 TRON 批次作废（单回到已审核）；已经交了签名的（不是 planned）不动
-      for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) await voidTronBatch(x.id);
-      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: actor || 'admin' });
-      rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, coalesce(batch_line, 0), id', [[...pick]]);
+      // 先向节点把每笔交易建好，再凑批：建交易途中节点出错（429、连不上）不留下没签名的批次，单仍是已审核、没凑批，之前凑的也不作废
+      rows = rows.filter((w) => pick.has(w.id)); // 已按审核先后排好
       const steps = [];
       const seen = new Set();
       for (const w of rows) {
         const tx = await tron.buildUsdtTransfer({ from: hot, to: w.to_address, amount: w.amount, feeLimit: USDT_FEE_LIMIT });
         steps.push({ kind: 'withdraw', stage: 1, withdrawal_id: w.id, owner: hot, expect: { to: w.to_address, amount: w.amount }, ...withExpiry(tx, seen) });
       }
+      // 之前凑了没签的 TRON 批次作废（单回到已审核）；已经交了签名的（不是 planned）不动
+      for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) await voidTronBatch(x.id);
+      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: actor || 'admin' });
       const id = await saveBatch('withdraw', { steps, payout_batch: ptId });
       return { batch_id: id, payout_batch: ptId, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total, count: pick.size, left };
     },
@@ -505,9 +533,10 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
   }
 
   const handle = async function handle(request) {
+    let a = '';
     try {
       const url = new URL(request.url);
-      const a = url.searchParams.get('a') || '';
+      a = url.searchParams.get('a') || '';
       if (!actions[a]) return json(404, { error: { code: 'not_found' } });
       const isPost = request.method === 'POST';
       if (isPost && request.headers.get('x-topup-csrf') !== '1') return json(403, { error: { code: 'csrf' } });
@@ -516,8 +545,9 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       if (who?.testAdmin) return await asTestAdminCall(a, b, url.searchParams, isPost);
       return json(200, money(await actions[a](b, 'admin', url.searchParams)));
     } catch (e) {
-      if (e?.status === 401) return json(401, { error: { code: 'unauthorized' } });
-      return errorResponse(e);
+      if (e?.status === 401 && !/^trongrid /.test(String(e?.message || ''))) return json(401, { error: { code: 'unauthorized' } });
+      // 节点出错换成 node_busy / rpc_unreachable / node_error（K-13）；老 TRON 的"核对并签名"、归集出交易：返回不是 JSON、节点没给结果也算节点的问题
+      return errorResponse(nodeFailure(e));
     }
   };
   handle.actions = Object.keys(actions); // 项目索引的测试用：检查每个动作都写进了《项目索引》

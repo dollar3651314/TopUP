@@ -37,10 +37,16 @@ const ERR: Record<string, string> = {
   invalid_state: '状态已经变化，请刷新后再试。', nothing_to_sweep: '选中的地址在链上已经没有 USDT。', sweep_in_progress: '有地址正在归集中，请等上一次完成。', cold_wallet_not_configured: '还没有配置冷钱包地址。',
   already_initialized: '已经初始化过了。', first_address_mismatch: '服务器算出的第 1 个地址和浏览器不一致，已停止。', private_key_not_allowed: '只能提交公钥。', invalid_fee: '手续费格式不对。', invalid_order_mode: '订单模式的设置超出范围。',
   invalid_address: 'TRON 地址格式不对。', not_configured: '收付款还没有配置好（数据库、TronGrid 等），请先在服务器上完成配置（看"系统状态"里哪一项没配置）。', unauthorized: '登录已过期，请重新登录。',
+  node_busy: '链上节点繁忙（请求太多被限流），这次没有执行、钱没动；请过一两分钟再试。', rpc_unreachable: '链上节点暂时连不上，这次没有执行、钱没动；请稍后再试。',
+  node_error: '链上节点回了错误，这次没有执行、钱没动；请稍后再试，一直这样看"系统状态"。',
+  stale_page: '后台已经更新到新版本，这个页面是旧的：请刷新页面后再操作（填了一半的内容请先记下）。',
 };
 const errText = (e: unknown) => ERR[(e as WErr).code] || `操作失败（${(e as WErr).code || '网络错误'}），请稍后重试。`;
+// 构建时的提交号（#admin-root 的 data-build）：每次调接口都带上，部署后没刷新的旧页面服务器回 409 stale_page（空的不带）
+const BUILD = root.dataset.build || '';
 async function call(a: string, body?: unknown, qs = '') {
-  const res = await fetch(`/api/wallet/?a=${a}${qs}`, body === undefined ? { credentials: 'same-origin' } : { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-topup-csrf': '1' }, body: JSON.stringify(body) });
+  const headers: Record<string, string> = { ...(BUILD ? { 'x-topup-build': BUILD } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json', 'x-topup-csrf': '1' }) };
+  const res = await fetch(`/api/wallet/?a=${a}${qs}`, body === undefined ? { credentials: 'same-origin', headers } : { method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify(body) });
   const d = await res.json().catch(() => ({}));
   if (!res.ok) throw new WErr(d?.error?.code || `http_${res.status}`, d?.error?.field, d?.error?.rows);
   return d;
@@ -56,7 +62,9 @@ async function show(tab: string) {
   const slow = switching ? window.setTimeout(() => p.replaceChildren(h('p', { class: 'muted', 'data-loading': '' }, '加载中……')), 300) : 0;
   try { await render[tab.slice(2)](p); p.dataset.shown = '1'; } catch (e) {
     p.dataset.shown = '';
-    p.replaceChildren(h('div', { class: 'alert', 'data-load-error': '' }, errText(e), ' ', h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => show(tab) }, '重试')));
+    // 页面过期（部署后没刷新）：重试没用，按钮改成"刷新页面"
+    const stale = (e as WErr).code === 'stale_page';
+    p.replaceChildren(h('div', { class: stale ? 'warn-box' : 'alert', 'data-load-error': '' }, errText(e), ' ', h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => (stale ? location.reload() : show(tab)) }, stale ? '刷新页面' : '重试')));
   } finally { clearTimeout(slow); }
   counts();
 }
@@ -198,7 +206,7 @@ render.merchants = async (p) => {
       table(['编号', '企业名称', '授权联系人邮箱', '提现钱包', ''], pending.map((a: any) => [a.ref, a.company, a.email || '—', a.cashout_wallets.length ? mono(shortAddr(a.cashout_wallets[0]), a.cashout_wallets[0]) : '—',
         h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: () => openMerchant(a) }, '开通商户')]), '—')) : h('span'),
     table(['商户', '状态', '手续费（收款 / 付款）', '订单模式（下限–上限 · 过期 · 回看）', '可用余额', '客户数', 'API 提币', '登录账号'], merchants.map((m: any) => [
-      m.name, status(m.status === 'active' ? 'approved' : 'expired', m.status === 'active' ? '已开通' : '已停用'), `${describeFee(m.fee_in)} / ${describeFee(m.fee_out)}`, modeText(m.order_mode),
+      sub(m.name, mono(m.id)), status(m.status === 'active' ? 'approved' : 'expired', m.status === 'active' ? '已开通' : '已停用'), `${describeFee(m.fee_in)} / ${describeFee(m.fee_out)}`, modeText(m.order_mode),
       sub(usd(m.available), u(m.frozen) ? `冻结 ${usd(m.frozen)}` : ''), String(m.customers), m.ip_whitelist.length ? '已设白名单' : h('span', { class: 'muted' }, '未开放（没有白名单）'),
       m.users.map((x: any) => `${x.email}${x.active ? '' : '（未设置密码）'}`).join('，') || '—']), '暂无商户', { onRow: (i) => editMerchant(merchants[i]) }),
   );
@@ -226,7 +234,8 @@ function editMerchant(m: any) {
   const wallets = h('textarea', { rows: '3', class: 'mono-input', placeholder: 'eth 0x…\nbsc 0x…\ntron T…' }) as HTMLTextAreaElement;
   wallets.value = m.cashout_wallets.map((w: any) => (typeof w === 'string' ? `tron ${w}` : `${w.chain} ${w.address}`)).join('\n');
   const reEmail = h('input', { type: 'email', value: m.users[0]?.email || '' }) as HTMLInputElement;
-  dialog(m.name, h('div', { class: 'stack' }, h('label', { class: 'check-row' }, active, '启用（停用后商户不能登录，API 返回 403，已分配的地址照常监控入账）'),
+  dialog(m.name, h('div', { class: 'stack' }, h('dl', { class: 'kv kv-tight m0' }, h('dt', {}, '商户编号'), h('dd', {}, h('span', { class: 'copy-row' }, mono(m.id), copyBtn(() => m.id, '复制', '已复制')))),
+    h('label', { class: 'check-row' }, active, '启用（停用后商户不能登录，API 返回 403，已分配的地址照常监控入账）'),
     fin.box, fout.box, mode.box, field('em-w', '已登记的提现钱包（每行一个："链 地址"，链是 eth、bsc 或 tron；同一串 0x 地址要两条链都能提就写两行）', wallets),
     h('div', { class: 'inline-form' }, field('em-re', '重新发送设置密码的邮件', reEmail), h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: async () => {
       try { await call('merchant-reinvite', { id: m.id, email: reEmail.value.trim() }); say('已重新发送'); } catch (e) { say(errText(e)); }

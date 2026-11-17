@@ -2,13 +2,16 @@
 // 按链凑批后的记账（ETH / BSC 一批一笔交易，失败整批回到已审核；TRON 逐笔记账，失败的回到已审核待签名）。
 // 金额一律是 0.000001 USDT 为单位的整数（这里用 Number；单笔、每批都远小于 2^53）。链上交易的出具、签名核对、广播在 server/wallet/payout.js。
 import { randomBytes } from 'node:crypto';
-import { PayError, audit, getMeta, setMeta, ensureCustomer, post, wdCallback, withdrawalView, chainAddress, PAYOUT_CHAINS, CUSTOMER_RE, assertNoDebt } from './core.js';
+import { PayError, audit, getMeta, setMeta, ensureCustomer, post, wdCallback, withdrawalView, chainAddress, PAYOUT_CHAINS, CUSTOMER_RE, MERCHANT_REF_MAX, withRefGuard, assertNoDebt } from './core.js';
 import { calcFee, fmtUsdt, parseUsdt } from './money.js';
 
 const U = 1_000_000;
-/** 默认上限（技术方案 06 页）：单笔 5,000、每批 20,000、每天 30,000；热钱包上限 10,000、低于 2,000 提醒。管理员能在后台改（Q-B1） */
-export const PAYOUT_DEFAULTS = Object.freeze({ perItem: 5_000 * U, perBatch: 20_000 * U, perDay: 30_000 * U, hotMax: 10_000 * U, hotLow: 2_000 * U });
-export const LIMIT_KEYS = ['perItem', 'perBatch', 'perDay', 'hotMax', 'hotLow'];
+/**
+ * 默认上限（技术方案 06 页）：单笔 5,000、每批 20,000、每天 30,000（全平台合计）；热钱包上限 10,000、低于 2,000 提醒。管理员能在后台改（Q-B1）。
+ * v1.1：每个商户每天上限 perMerchantDay 默认 30,000（对所有商户一起生效）；一笔要同时不超过这家商户今天的余量和全平台今天的余量。
+ */
+export const PAYOUT_DEFAULTS = Object.freeze({ perItem: 5_000 * U, perBatch: 20_000 * U, perDay: 30_000 * U, perMerchantDay: 30_000 * U, hotMax: 10_000 * U, hotLow: 2_000 * U });
+export const LIMIT_KEYS = ['perItem', 'perBatch', 'perDay', 'perMerchantDay', 'hotMax', 'hotLow'];
 /** 一张表 / 一次 API 最多 500 笔（Q-B6） */
 export const MAX_ITEMS_PER_REQUEST = 500;
 /** 一笔链上交易最多几笔：ETH / BSC 是 BatchPayout.MAX_ITEMS；TRON 每批 20 笔（Nile 实测后再调） */
@@ -24,10 +27,17 @@ export const newTxBatchId = (chain, now = Date.now()) => `PT-${chain.toUpperCase
 // ---------- 上限（后台可改：原因 + 动态码 + 审计） ----------
 export async function getPayoutLimits(q) {
   const saved = (await getMeta(q, META_LIMITS)) || {};
-  return Object.fromEntries(LIMIT_KEYS.map((k) => [k, Number.isSafeInteger(Number(saved[k])) && Number(saved[k]) > 0 ? Number(saved[k]) : PAYOUT_DEFAULTS[k]]));
+  const has = (k) => Number.isSafeInteger(Number(saved[k])) && Number(saved[k]) > 0;
+  const out = Object.fromEntries(LIMIT_KEYS.map((k) => [k, has(k) ? Number(saved[k]) : PAYOUT_DEFAULTS[k]]));
+  // 升级前已经把全平台每天改到 30,000 以下、还没存过商户每天的：商户每天按全平台每天算（不能大于全平台），否则下次改上限会被约束挡住
+  if (!has('perMerchantDay')) out.perMerchantDay = Math.min(out.perMerchantDay, out.perDay);
+  return out;
 }
-/** values：{ perItem, perBatch, perDay, hotMax, hotLow }（0.000001 单位，字符串或数字）；先核对动态码，再核对原因和数字 */
-export async function updatePayoutLimits(db, { actor, reason, values = {}, code, verifyCode }) {
+/**
+ * values：{ perItem, perBatch, perDay, perMerchantDay, hotMax, hotLow }（0.000001 单位，字符串或数字）；先核对动态码，再核对原因和数字。
+ * 返回新的上限 + warnings：全平台每天改到低于今天已通过的合计时照样保存，warnings 含 'per_day_below_today_approved'（今天剩下的单都会留在待审核）
+ */
+export async function updatePayoutLimits(db, { actor, reason, values = {}, code, verifyCode, now = Date.now() }) {
   if (!verifyCode || !(await verifyCode(String(code || '')))) throw new PayError('bad_code', 400);
   if (!String(reason || '').trim()) throw new PayError('reason_required', 422, 'reason');
   const before = await getPayoutLimits(db);
@@ -42,13 +52,16 @@ export async function updatePayoutLimits(db, { actor, reason, values = {}, code,
   const rule = (field, r) => Object.assign(new PayError('invalid_param', 422, field), { rows: [{ rule: r }] });
   if (next.perItem > next.perBatch) throw rule('perItem', 'per_item_le_per_batch');
   if (next.perBatch > next.perDay) throw rule('perBatch', 'per_batch_le_per_day');
+  if (next.perMerchantDay > next.perDay) throw rule('perMerchantDay', 'per_merchant_day_le_per_day');
   if (next.hotLow > next.hotMax) throw rule('hotLow', 'hot_low_le_hot_max');
   const toUsdt = (o) => Object.fromEntries(LIMIT_KEYS.map((k) => [k, usdt(o[k])]));
+  const warnings = [];
   await db.tx(async (t) => {
     await setMeta(t, META_LIMITS, next);
-    await audit(t, actor, 'payout.limits', '', { reason: String(reason).trim().slice(0, 500), before: toUsdt(before), after: toUsdt(next) });
+    if (next.perDay < await approvedToday(t, now)) warnings.push('per_day_below_today_approved');
+    await audit(t, actor, 'payout.limits', '', { reason: String(reason).trim().slice(0, 500), before: toUsdt(before), after: toUsdt(next), ...(warnings.length ? { warnings } : {}) });
   });
-  return next;
+  return { ...next, warnings };
 }
 
 // ---------- 凑批 ----------
@@ -97,38 +110,58 @@ export function serviceWindow(nowMs = Date.now()) {
 export const dayStart = (nowMs = Date.now()) => { const l = new Date(nowMs + TZ_MS); return Date.UTC(l.getUTCFullYear(), l.getUTCMonth(), l.getUTCDate()) - TZ_MS; };
 
 // ---------- 审核 ----------
-async function approvedToday(t, nowMs) {
-  const [r] = await t.query(`select coalesce(sum(amount), 0)::bigint v from withdrawals where approved_at >= $1 and status in ('approved', 'signing', 'broadcast', 'completed')`, [new Date(dayStart(nowMs))]);
+/** "今天已通过"的口径：approved_at ≥ 东八区今天 0 点，状态 approved / signing / broadcast / completed */
+const TODAY_WHERE = `approved_at >= $1 and status in ('approved', 'signing', 'broadcast', 'completed')`;
+/** 全平台今天已通过的合计 */
+export async function approvedToday(t, nowMs) {
+  const [r] = await t.query(`select coalesce(sum(amount), 0)::bigint v from withdrawals where ${TODAY_WHERE}`, [new Date(dayStart(nowMs))]);
   return Number(r.v);
 }
-/** 审核一笔（在事务里）：超单笔上限、超当天上限的留在 pending；返回 null 表示通过，否则是原因 */
+/** 每家商户今天已通过的合计：Map(merchant_id → 金额)；没有的商户不在里面（算 0） */
+export async function approvedTodayByMerchant(t, nowMs) {
+  const rows = await t.query(`select merchant_id, coalesce(sum(amount), 0)::bigint v from withdrawals where ${TODAY_WHERE} group by merchant_id`, [new Date(dayStart(nowMs))]);
+  return new Map(rows.map((r) => [r.merchant_id, Number(r.v)]));
+}
+/**
+ * 现在单独审这一笔会不会超限（页面"上限检查"和审核共用同一个顺序）：单笔 → 这家商户今天 → 全平台今天。
+ * today：{ v: 全平台今天已通过, m: Map(merchant_id → 这家今天已通过) }。返回 'ok' 或原因码
+ */
+export function limitCheck(w, limits, today) {
+  const amount = Number(w.amount);
+  if (Number(w.merchant_debt || 0) > 0) return 'debt_outstanding'; // v1.1：商户有欠款，还清前不能通过
+  if (amount > limits.perItem) return 'exceeds_per_item_limit';
+  if ((today.m.get(w.merchant_id) || 0) + amount > limits.perMerchantDay) return 'exceeds_merchant_daily_limit';
+  if (today.v + amount > limits.perDay) return 'exceeds_daily_limit';
+  return 'ok';
+}
+/** 审核一笔（在事务里）：超单笔上限、超这家商户每天上限、超全平台每天上限的留在 pending；返回 null 表示通过，否则是原因 */
 async function approveOne(t, id, { actor, now, limits, today }) {
   const [w] = await t.query(`select * from withdrawals where id = $1 for update`, [id]);
   if (!w) return 'not_found';
   if (w.status !== 'pending') return 'invalid_state';
   // v1.1：商户有欠款（到账被冲正、余额不够扣）时，已经提交的单也不能通过，还清后再审
   const [debt] = await t.query('select debt from balances where merchant_id = $1', [w.merchant_id]);
-  if (debt && Number(debt.debt) > 0) return 'debt_outstanding';
-  if (w.amount > limits.perItem) return 'exceeds_per_item_limit';
-  if (today.v + w.amount > limits.perDay) return 'exceeds_daily_limit';
+  const why = limitCheck({ ...w, merchant_debt: debt ? debt.debt : 0 }, limits, today);
+  if (why !== 'ok') return why;
   await t.query(`update withdrawals set status = 'approved', approved_at = $2, approved_by = $3, updated_at = now() where id = $1`, [id, new Date(now), actor]);
-  today.v += w.amount;
+  today.v += Number(w.amount);
+  today.m.set(w.merchant_id, (today.m.get(w.merchant_id) || 0) + Number(w.amount));
   await audit(t, actor, 'payout.approve', id, { amount: usdt(w.amount), chain: w.chain });
   await wdCallback(t, id);
   return null;
 }
-/** 审核要按"每天上限"算今天已通过的合计：两个审核同时进来会各算各的、合起来超上限，所以事务里先拿一把审核锁（事务结束自动释放） */
+/** 审核要按"每天上限"（这家商户、全平台）算今天已通过的合计：两个审核同时进来会各算各的、合起来超上限，所以事务里先拿一把审核锁（事务结束自动释放） */
 const APPROVE_LOCK = 7_310_331; // pg_advisory_xact_lock 的键，只给打款审核用
 async function lockApprovals(t) { await t.query('select pg_advisory_xact_lock($1)', [APPROVE_LOCK]); }
 
-/** Q-B3 单笔一单一审：pending → approved；超单笔上限 exceeds_per_item_limit、超每天上限 exceeds_daily_limit 的留在 pending */
+/** Q-B3 单笔一单一审：pending → approved；超单笔上限 exceeds_per_item_limit、超这家商户每天上限 exceeds_merchant_daily_limit、超全平台每天上限 exceeds_daily_limit 的留在 pending */
 export async function approvePayouts(db, { ids = [], actor, now = Date.now() }) {
   const list = [...new Set(ids.map(String))];
   if (!list.length || list.length > MAX_ITEMS_PER_REQUEST) throw new PayError('invalid_param', 422, 'ids');
   return db.tx(async (t) => {
     await lockApprovals(t);
     const limits = await getPayoutLimits(t);
-    const today = { v: await approvedToday(t, now) };
+    const today = { v: await approvedToday(t, now), m: await approvedTodayByMerchant(t, now) };
     const approved = [], refused = [];
     for (const id of list) {
       const why = await approveOne(t, id, { actor, now, limits, today });
@@ -217,7 +250,7 @@ export async function reviewPayoutBatch(db, { batchNo, approve = [], reason = ''
     const why = String(reason || '').trim();
     if (rejectIds.length && !why) throw new PayError('reason_required', 422, 'reason');
     const limits = await getPayoutLimits(t);
-    const today = { v: await approvedToday(t, now) };
+    const today = { v: await approvedToday(t, now), m: await approvedTodayByMerchant(t, now) };
     for (const p of pend) {
       if (!ok.has(p.id)) continue;
       const r = await approveOne(t, p.id, { actor, now, limits, today });
@@ -242,8 +275,11 @@ export function checkPayoutRows(rows, merchant) {
     if (!amount) errors.push('invalid_amount');
     const cid = r?.customer_id ? String(r.customer_id).trim() : '';
     if (cid && !CUSTOMER_RE.test(cid)) errors.push('invalid_customer_id');
-    const ref = r?.merchant_ref ? String(r.merchant_ref).trim() : '';
-    if (ref.length > 64) errors.push('invalid_merchant_ref');
+    // 和单笔（core.normMerchantRef）同一套：字符串或数字，去首尾空格，空的算没填；别的类型、超过 64 字是这一行的 invalid_merchant_ref
+    const rawRef = r?.merchant_ref;
+    const refOk = rawRef === undefined || rawRef === null || typeof rawRef === 'string' || typeof rawRef === 'number';
+    const ref = refOk && rawRef !== undefined && rawRef !== null ? String(rawRef).trim() : '';
+    if (!refOk || ref.length > MERCHANT_REF_MAX) errors.push('invalid_merchant_ref');
     const fee = amount ? calcFee(amount, merchant.fee_out) : 0;
     return { index: i, line: r?.line ?? i + 1, chain: chain || String(r?.chain ?? ''), to: to || String(r?.to ?? ''), amount: amount || 0, fee, customer_id: cid || null, merchant_ref: ref || null, errors, warnings: [], ok: !errors.length };
   });
@@ -252,6 +288,21 @@ export function checkPayoutRows(rows, merchant) {
   for (const r of out) if (r.ok) { const k = `${r.chain}|${r.to.toLowerCase()}|${r.amount}`; seen.set(k, (seen.get(k) || 0) + 1); }
   for (const r of out) if (r.ok && seen.get(`${r.chain}|${r.to.toLowerCase()}|${r.amount}`) > 1) r.warnings.push('duplicate_row');
   return out;
+}
+/**
+ * 提现单号永久唯一（v1.1）：同一批里后出现的同号行、和这个商户已有提现（任何状态）同号的行，都加行错误 duplicate_merchant_ref。
+ * checked 是 checkPayoutRows 的结果（原地修改）；表格第 2 步和提交时共用。
+ */
+export async function markDuplicateRefs(q, merchantId, checked) {
+  const refs = [...new Set(checked.map((r) => r.merchant_ref).filter(Boolean))];
+  const used = new Set(refs.length ? (await q.query(`select merchant_ref from withdrawals where merchant_id = $1 and merchant_ref = any($2::text[]) and merchant_ref <> ''`, [merchantId, refs])).map((x) => x.merchant_ref) : []);
+  const seen = new Set();
+  for (const r of checked) {
+    if (!r.merchant_ref) continue;
+    if (used.has(r.merchant_ref) || seen.has(r.merchant_ref)) { r.errors.push('duplicate_merchant_ref'); r.ok = false; r.warnings = r.warnings.filter((w) => w !== 'duplicate_row'); }
+    seen.add(r.merchant_ref);
+  }
+  return checked;
 }
 /** 按链汇总：{ <链>: { count, amount, fee, total } }（金额是 USDT 字符串，网络费不另收） */
 export function totalsByChain(rows) {
@@ -272,14 +323,15 @@ export async function submitPayoutBatch(db, merchant, { rows = [], source = 'web
   await assertNoDebt(db, merchant.id); // v1.1：有欠款不能提交（事务里锁住余额行再查一次）
   if (!Array.isArray(rows) || !rows.length) throw new PayError('invalid_param', 422, 'rows');
   if (rows.length > MAX_ITEMS_PER_REQUEST) throw new PayError('too_many_items', 422, 'rows');
-  const checked = checkPayoutRows(rows, merchant);
+  const checked = await markDuplicateRefs(db, merchant.id, checkPayoutRows(rows, merchant));
   const bad = checked.filter((r) => !r.ok);
   if (bad.length && !onlyValid) throw Object.assign(new PayError('invalid_rows', 422, 'rows'), { rows: bad.map((r) => ({ index: r.index, line: r.line, code: r.errors[0], errors: r.errors })) });
   const good = checked.filter((r) => r.ok);
   if (!good.length) throw Object.assign(new PayError('invalid_rows', 422, 'rows'), { rows: bad.map((r) => ({ index: r.index, line: r.line, code: r.errors[0], errors: r.errors })) });
   const no = batchNo || newBatchNo(now);
   const sum = good.reduce((s, r) => s + r.amount + r.fee, 0);
-  const accepted = await db.tx(async (t) => {
+  // 两个请求同时用同一个单号：数据库唯一索引拒绝后到的，整批不收（409 duplicate_merchant_ref）
+  const accepted = await withRefGuard(db, merchant.id, good.map((r) => r.merchant_ref), () => db.tx(async (t) => {
     await assertNoDebt(t, merchant.id, true);
     await t.query('insert into payout_batches (batch_no, merchant_id, source, item_count, total) values ($1, $2, $3, $4, $5)', [no, merchant.id, source, good.length, good.reduce((s, r) => s + r.amount, 0)]);
     // 一次冻结整批（余额不够时数据库约束拒绝，整批不收）；之后逐笔解冻 / 扣除
@@ -295,7 +347,7 @@ export async function submitPayoutBatch(db, merchant, { rows = [], source = 'web
     }
     await audit(t, `merchant:${merchant.id}`, 'payout.batch_submit', no, { count: good.length, source });
     return out;
-  });
+  }));
   const service = serviceWindow(now);
   if (notify) {
     const lines = Object.entries(totalsByChain(good)).map(([c, x]) => `- ${c.toUpperCase()}：${x.count} 笔，合计 ${x.amount} USDT`);

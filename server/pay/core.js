@@ -364,9 +364,11 @@ export async function requestWithdrawal(db, merchant, { kind, chain = 'tron', to
   if (kind === 'cashout' && !isRegisteredCashout(merchant, chain, to)) throw new PayError('address_not_registered', 422, 'to');
   if (!Number.isInteger(amount) || amount <= 0) throw new PayError('invalid_param', 422, 'amount');
   if (customerId !== null && !CUSTOMER_RE.test(customerId)) throw new PayError('invalid_param', 422, 'customer_id');
+  merchantRef = normMerchantRef(merchantRef);
   const fee = calcFee(amount, merchant.fee_out);
-  return db.tx(async (t) => {
+  return withRefGuard(db, merchant.id, [merchantRef], () => db.tx(async (t) => {
     await assertNoDebt(t, merchant.id, true);
+    if (merchantRef) await assertRefFree(t, merchant.id, merchantRef);
     if (customerId && kind === 'payout') await ensureCustomer(t, merchant.id, customerId);
     const id = newId.withdrawal();
     await post(t, merchant.id, 'freeze', -(amount + fee), amount + fee, id, customerId);
@@ -374,7 +376,41 @@ export async function requestWithdrawal(db, merchant, { kind, chain = 'tron', to
       [id, merchant.id, kind, kind === 'payout' ? customerId : null, to, amount, fee, source, merchantRef, chain]);
     await wdCallback(t, id);
     return withdrawalView(t, id);
-  });
+  }));
+}
+
+// ---------- 提现单号（merchant_ref）：同一商户永久唯一（单笔、后台、批量每一行一起算，任何状态都算） ----------
+export const MERCHANT_REF_MAX = 64;
+/** 规范化：去掉首尾空格；没填、空串、只有空格是 null（不算单号）；超过 64 字、不是字符串或数字 422 invalid_param（不截断） */
+export function normMerchantRef(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== 'string' && typeof v !== 'number') throw new PayError('invalid_param', 422, 'merchant_ref');
+  const ref = String(v).trim();
+  if (!ref) return null;
+  if (ref.length > MERCHANT_REF_MAX) throw new PayError('invalid_param', 422, 'merchant_ref');
+  return ref;
+}
+/** 409 duplicate_merchant_ref，带原来那笔的提现号 */
+export function duplicateRefError(withdrawalNo) {
+  return Object.assign(new PayError('duplicate_merchant_ref', 409, 'merchant_ref'), { withdrawal_no: withdrawalNo });
+}
+/** 已用过这个单号的提现号（没有是 null） */
+export async function findByMerchantRef(q, merchantId, ref) {
+  const [w] = await q.query(`select id from withdrawals where merchant_id = $1 and merchant_ref = $2 and merchant_ref <> ''`, [merchantId, ref]);
+  return w ? w.id : null;
+}
+export async function assertRefFree(q, merchantId, ref) {
+  const used = await findByMerchantRef(q, merchantId, ref);
+  if (used) throw duplicateRefError(used);
+}
+const isRefConflict = (e) => e?.code === '23505' && /withdrawals_merchant_ref_unique/.test(`${e.constraint_name || ''} ${e.constraint || ''} ${e.message || ''} ${e.detail || ''}`);
+/** 两个同号请求同时进来：数据库唯一索引拒绝后一笔，这里换成 409 并查出先成功的那笔 */
+export async function withRefGuard(db, merchantId, refs, fn) {
+  try { return await fn(); } catch (e) {
+    if (!isRefConflict(e)) throw e;
+    for (const ref of refs.filter(Boolean)) { const used = await findByMerchantRef(db, merchantId, ref); if (used) throw duplicateRefError(used); }
+    throw duplicateRefError(null);
+  }
 }
 // approved：审核通过、等凑批签名；signing：已凑进一批、等签名（对外都是 approved）
 export const WD_PUBLIC = { pending: 'pending', approved: 'approved', signing: 'approved', broadcast: 'broadcast', completed: 'completed', rejected: 'rejected', cancelled: 'cancelled', failed: 'failed' };

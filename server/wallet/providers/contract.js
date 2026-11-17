@@ -9,7 +9,7 @@ import { toUnits } from '../units.js';
 import { encodeSweep, signLegacyTx, addressOfKey, keccakHex } from '../evm-tx.js';
 import { watchedAddresses } from '../addresses.js';
 import { planSweep as plan } from '../sweep-plan.js';
-import { checkTronScheme, createTronOps, tronOperatorOf } from './contract-tron.js';
+import { checkTronScheme, createTronOps, tronOperatorOf, nodeCaughtUp } from './contract-tron.js';
 
 export const EVM_CHAINS = Object.freeze(['eth', 'bsc']);
 export const CONTRACT_CHAINS = Object.freeze(['eth', 'bsc', 'tron']);
@@ -18,6 +18,7 @@ const SWEEP_FAILED_TOPIC = keccakHex(Buffer.from('SweepFailed(bytes32,address,by
 // gas 预估（实测：1 个地址首次 部署 + 归集 157,128；已部署 50,230，见 contracts/README.md）；留余量
 /** 发出后多久还查不到这笔交易，就当没送到节点 */
 export const DROPPED_AFTER_MS = 15 * 60_000;
+
 /** 连接类错误（连不上、超时、HTTP 出错）：不知道节点收没收到；JSON-RPC 返回的错误才是节点明确拒绝 */
 export const isConnectionError = (e) => ['rpc_unreachable', 'rpc_http'].includes(e?.code) || e?.name === 'TimeoutError' || e?.name === 'AbortError' || e instanceof TypeError;
 export const SWEEP_GAS = Object.freeze({ base: 40_000n, deploy: 160_000n, deployed: 45_000n });
@@ -131,13 +132,14 @@ export function createContractProvider({ db, chains = {}, operatorKey = '', tron
     },
 
     /** 归集交易的结果：按批量合约的 Swept / SweepFailed 事件逐个地址判断（部分成功照记） */
-    async sweepOutcome(chain, txRef, items, { sentAt = null, now = Date.now() } = {}) {
-      if (chain === 'tron') return tron.sweepOutcome(txRef, items, { sentAt, now, droppedAfterMs: DROPPED_AFTER_MS });
+    async sweepOutcome(chain, txRef, items, { sentAt = null, now = Date.now(), scanHead = null } = {}) {
+      if (chain === 'tron') return tron.sweepOutcome(txRef, items, { sentAt, now, droppedAfterMs: DROPPED_AFTER_MS, scanHead });
       const { adapter, scheme } = need(chain);
       const status = await adapter.txStatus(txRef);
-      if (status === 'pending' && sentAt && now - new Date(sentAt).getTime() > DROPPED_AFTER_MS && typeof adapter.txKnown === 'function') {
+      if (status === 'pending' && sentAt && now - new Date(sentAt).getTime() > DROPPED_AFTER_MS && typeof adapter.txKnown === 'function' && await nodeCaughtUp(adapter, scanHead)) {
         // 发出超过 15 分钟、节点既没有回执也不认识这笔交易：广播时没送到（或被节点丢掉了）。
-        // 地址放回待归集是安全的：就算这笔以后又上链，钱也只会进冷钱包。节点连不上（null）时照常等
+        // 地址放回待归集是安全的：就算这笔以后又上链，钱也只会进冷钱包。节点连不上（null）时照常等；
+        // 节点落后（最新区块号低于扫块见过的）时也照常等：落后的节点不认识这笔不说明什么
         const known = await adapter.txKnown(txRef).catch(() => null);
         if (known === false) return { status: 'failed', swept: [], failed: items.map((i) => ({ address: i.address, reason: 'not_broadcast' })) };
       }
