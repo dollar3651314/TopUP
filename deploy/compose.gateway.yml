@@ -1,0 +1,10 @@
+# 平台网关模式（deploy.env 里 TOPUP_GATEWAY=platform）叠加在 compose.yml 上面，由 deploy/kit/topup.sh 自动加上（-f compose.yml -f compose.gateway.yml）。
+# 机器没有公网 IP，外面进来只能走平台自带的端口发布：平台网关做 TLS，再用普通 HTTP 转到这台机器的 TOPUP_HTTP_PORT（例如 8080）。
+# 所以这里的 Nginx：不要证书、不开 80/443，只开 TOPUP_HTTP_PORT（容器里是 8080），配置用 nginx-gateway/ 里的模板。
+# state/nginx/realip.conf 由 topup.sh 按 deploy.env 的 TOPUP_REAL_IP_HEADER、TOPUP_REAL_IP_FROM 生成（默认不信任任何请求头，见 deploy/README.md 第 7 节）。
+services:
+  nginx:
+    volumes: !override
+      - "${TOPUP_DIR:?}/deploy/nginx-gateway:/etc/nginx/templates:ro"
+      - "${TOPUP_DIR:?}/state/nginx:/etc/nginx/topup:ro"
+    ports: !override ["${TOPUP_HTTP_PORT:?}:8080"]
