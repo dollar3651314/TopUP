@@ -20,7 +20,7 @@ export function createAdminGate({ redis, kybKeys, testAdminHash = '', testnetChe
       }
       if (t === false) throw Object.assign(new Error('unauthorized'), { status: 401 });
       const admin = await getAdmin();
-      if (!admin || !readSession(kybKeys.session, request.headers.get('cookie'), admin.version, now())) throw Object.assign(new Error('unauthorized'), { status: 401 });
+      if (!admin || !readSession(kybKeys.session, request.headers.get('cookie'), admin, now())) throw Object.assign(new Error('unauthorized'), { status: 401 });
       return { testAdmin: false };
     },
     async verifyAdminCode(code) {

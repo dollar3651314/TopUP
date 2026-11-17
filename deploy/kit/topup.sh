@@ -141,12 +141,22 @@ health_json() { curl -s --max-time 5 "$HEALTH" 2> /dev/null || true; }
 # 应用活着：提交号对得上、数据库、Redis、主密钥都配好，web 的收付款初始化成功，worker 5 分钟内跑过。
 # db / storage / secret 只说明"变量填了"；web 初始化失败（连不上库、建表出错）时它们照样是 true，
 # 这时健康检查里没有 wallet 这一项（server/web.js：初始化成功才有），所以还要看 wallet 在不在。
+# 第二个参数（目标版本）：web 的提交号（.commit）要等于它；worker 的心跳里带着 worker 自己的提交号（.worker.commit），也要等于它——
+#   只有 web 换了、worker 还是旧的（或新 worker 根本没起来、旧 worker 的心跳还新鲜）不算新版本活着。
+#   过渡：目标版本早于"心跳带提交号"（它的健康检查里 worker 一项根本没有 commit 这个字段）时，只能退回旧规则（只看第三个参数）。
+#   判断依据是目标版本自己的 web 返回的内容（.commit 已经等于目标版本，web 和 worker 是同一个镜像），不是别的版本留下的心跳；
+#   新版本的 web 一定有这个字段（没有心跳或心跳里没有提交号时是 null），所以只有换回老版本时才会走旧规则。
 # 第三个参数（秒）：worker 最近一次扫链要在这么多秒以内——刚换版本时旧 worker 留下的扫链时间不算新版本的 worker 活着。
 # 邮件、节点 Key 没配不算失败（那是要填的设置，换回旧版本也解决不了），在 status 和 watch 里显示
 app_alive() {
   local body=$1 want=${2:-} within=${3:-}
   [ -n "$body" ] || return 1
-  [ -z "$want" ] || [ "$(jq -r '.commit // empty' <<< "$body" 2> /dev/null)" = "${want:0:7}" ] || return 1
+  if [ -n "$want" ]; then
+    [ "$(jq -r '.commit // empty' <<< "$body" 2> /dev/null)" = "${want:0:7}" ] || return 1
+    if jq -e '(.worker | type) == "object" and (.worker | has("commit"))' <<< "$body" > /dev/null 2>&1; then
+      [ "$(jq -r '.worker.commit // empty' <<< "$body" 2> /dev/null)" = "${want:0:7}" ] || return 1
+    fi
+  fi
   [ -z "$within" ] || jq -e --argjson s "$within" '.worker.age_s != null and .worker.age_s <= $s' <<< "$body" > /dev/null 2>&1 || return 1
   jq -e '.db == true and .storage == true and .secret == true and .worker.ok == true
     and (.wallet | type) == "object" and .wallet.error == null' <<< "$body" > /dev/null 2>&1
@@ -155,7 +165,7 @@ wait_alive() {
   local want=$1 body start=$SECONDS end=$((SECONDS + ${TOPUP_WAIT_S:-180}))
   while [ "$SECONDS" -lt "$end" ]; do
     body=$(health_json)
-    # 换版本（或重建容器）之后新 worker 跑过一轮才算：扫链时间要晚于开始等的时候（多留 5 秒误差）
+    # 换版本（或重建容器）之后新 worker 跑过一轮才算：心跳里的提交号 = 目标版本，扫链时间要晚于开始等的时候（多留 5 秒误差）
     app_alive "$body" "$want" $((SECONDS - start + 5)) && return 0
     sleep 2
   done

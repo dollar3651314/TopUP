@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { json, readJson, actionOf, originOf } from './http.js';
 import { encryptJson, decryptJson, safeEqual } from './crypto.js';
 import { newTotpSecret, verifyTotp, totpStep, otpauthUrl } from './totp.js';
-import { hashPassword, verifyPassword, makeSession, readSession, sessionCookie, SESSION_TTL_MS, LOCK_MAX, LOCK_MS } from './auth.js';
+import { hashPassword, verifyPassword, makeSession, readSession, sessionCookie, SESSION_TTL_MS, LOCK_MAX, LOCK_MS, newAdminSid } from './auth.js';
 import { inviteEmail, needsInfoEmail, SECTION_LABELS } from './emails.js';
 import { SECTIONS } from './schema.js';
 
@@ -28,7 +28,7 @@ export function createAdminHandler({ repo, blobs, send, redis, keys, config, now
   const summary = (a) => ({ id: a.id, ref: a.ref, company: a.company, status: repo.effectiveStatus(a), updatedAt: a.updatedAt, createdAt: a.createdAt, submittedAt: a.submittedAt, expiresAt: a.expiresAt, retentionUntil: null, fileCount: a.fileCount, flags: a.flags || {} });
   const need = async (request) => {
     const admin = await getAdmin();
-    if (!admin || !readSession(keys.session, request.headers.get('cookie'), admin.version, now())) throw Object.assign(new Error('unauthorized'), { status: 401 });
+    if (!admin || !readSession(keys.session, request.headers.get('cookie'), admin, now())) throw Object.assign(new Error('unauthorized'), { status: 401 });
     return admin;
   };
   const byId = async (id) => { const a = await repo.get(String(id || '')); if (!a) throw Object.assign(new Error('not_found'), { status: 404 }); return a; };
@@ -36,7 +36,7 @@ export function createAdminHandler({ repo, blobs, send, redis, keys, config, now
   const open = {
     async me(request) {
       const admin = await getAdmin();
-      const authed = !!admin && !!readSession(keys.session, request.headers.get('cookie'), admin.version, now());
+      const authed = !!admin && !!readSession(keys.session, request.headers.get('cookie'), admin, now());
       return json(200, { initialized: !!admin, authed });
     },
     // 首次初始化第 1 步：校验初始化口令，设置密码，生成 TOTP 密钥（10 分钟内确认有效）
@@ -58,7 +58,7 @@ export function createAdminHandler({ repo, blobs, send, redis, keys, config, now
       if (!pending) return json(400, { ok: false, error: 'expired' });
       const pd = typeof pending === 'string' ? JSON.parse(pending) : pending;
       if (!verifyTotp(decryptJson(keys.enc, pd.totp), code, now())) return json(400, { ok: false, error: 'bad_code' });
-      await redis.set('topup:admin', JSON.stringify({ pw: pd.pw, totp: pd.totp, version: 1, createdAt: new Date(now()).toISOString() }));
+      await redis.set('topup:admin', JSON.stringify({ pw: pd.pw, totp: pd.totp, version: 1, sid: newAdminSid(), createdAt: new Date(now()).toISOString() }));
       await redis.del('topup:admin:pending');
       return json(200, { ok: true });
     },
@@ -80,14 +80,15 @@ export function createAdminHandler({ repo, blobs, send, redis, keys, config, now
       }
       await redis.del('topup:admin:fails');
       await redis.set('topup:admin:totp-last', String(step), { ex: 180 });
-      return json(200, { ok: true }, { 'set-cookie': sessionCookie(makeSession(keys.session, admin.version, now()), SESSION_TTL_MS / 1000) });
+      return json(200, { ok: true }, { 'set-cookie': sessionCookie(makeSession(keys.session, admin.version, now(), admin.sid), SESSION_TTL_MS / 1000) });
     },
   };
 
   const secured = {
-    // 退出登录：会话版本号加一，所有已签发的会话立即失效
+    // 退出登录：会话版本号加一，所有已签发的会话立即失效（管理员标识 sid 不变；只有重新初始化才换）
     async logout(request, admin) {
       admin.version += 1;
+      if (!admin.sid) admin.sid = newAdminSid(); // 升级前初始化的记录：借这次退出补上标识
       await redis.set('topup:admin', JSON.stringify(admin));
       return json(200, { ok: true }, { 'set-cookie': sessionCookie('', 0) });
     },
