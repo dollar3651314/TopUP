@@ -373,6 +373,10 @@ alter table withdrawals add column if not exists hold_reason text;
 -- TRON：交了签名的那笔交易原文里的过期时间（毫秒）。链上最新区块时间过了它、链上仍查不到，才算没发出去
 alter table withdrawals add column if not exists tx_expires_at bigint;
 alter table withdrawals add column if not exists gone_suspect_at timestamptz; -- TRON：第一次判"已过期、链上查不到"的时间（隔一轮再确认）
+-- v1.1 对账查询：按时间段从早到晚翻页（提现、账本、到账都按记录的创建时间，到账即 TopUP 入账时间；相同时间按编号）
+create index if not exists withdrawals_merchant_created on withdrawals (merchant_id, created_at, id);
+create index if not exists deposits_merchant_created on deposits (merchant_id, created_at, id);
+create index if not exists ledger_merchant_created on ledger (merchant_id, created_at, id);
 `;
 
 /**
