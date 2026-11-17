@@ -29,6 +29,7 @@ const ERR: Record<string, string> = {
   wallet_not_configured: '钱包还没有配置好，看"系统状态"。', invalid_param: '有一项填得不对，请检查标红的地方。',
   node_busy: '节点繁忙（请求太多被限流），这次没有执行、钱没动；请过一两分钟稍后再试。',
   rpc_unreachable: '节点暂时连不上，这次没有执行、钱没动；请稍后再试。',
+  node_error: '链上节点回了错误，这次没有执行、钱没动；请稍后再试，一直这样看"系统状态"。',
 };
 const err = (ui: WalletUi, e: any) => ERR[e?.code] || ui.errText(e);
 /** TRON 批次的能量一行：租到多少、花多少 TRX / 租失败已改烧 TRX */

@@ -51,6 +51,8 @@ export function failedIndexOf(data) {
 }
 /** 节点明确回了错误（回滚、余额不够付网络费等），不是连不上 */
 const isRevert = (e) => Boolean(e) && e.code !== 'rpc_unreachable' && e.code !== 'rpc_http';
+/** 节点没给结论（连不上、限流）给后台的 503：HTTP 429 / 503 → node_busy，其他 → rpc_unreachable（和 admin-actions.js 的 nodeFailure 同一口径） */
+const nodeDown = (e) => (e instanceof PayError ? e : new PayError(e?.code === 'rpc_http' && [429, 503].includes(e.httpStatus) ? 'node_busy' : 'rpc_unreachable', 503));
 
 /**
  * 启动时核对一条链的 BatchPayout（沿用 verify-onchain.js 的判定规则）：拿到了结果且不对 → mismatch（停用这条链的打款并告警）；
@@ -203,7 +205,7 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
               bad = b.items[i].id; break;
             }
             if (isRevert(e)) throw new PayError('estimate_reverted', 409);
-            throw new PayError('rpc_unreachable', 503);
+            throw nodeDown(e);
           }
           if (gas * gasPrice > MAX_FEE_WEI[chain]) throw new PayError('fee_too_high', 409);
           prepared.push({ b, batchId, items, data, gas, gasPrice });
@@ -312,7 +314,7 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
     if (b.status !== 'broadcast' || b.chain === 'tron' || !chains[b.chain]) throw new PayError('invalid_state', 409);
     const c = chains[b.chain];
     let pr;
-    try { pr = await probe(c, b); } catch { throw new PayError('rpc_unreachable', 503); }
+    try { pr = await probe(c, b); } catch (e) { throw nodeDown(e); }
     if (pr.state === 'not_used') throw new PayError('nonce_not_used', 409);
     if (pr.state === 'lagging') throw new PayError('node_lagging', 409);
     if (pr.receipt) throw new PayError('tx_on_chain', 409);
@@ -396,7 +398,7 @@ export function createPayoutService({ db, chains = {}, verifyCode, now = () => D
       let gas;
       // 以太坊先归零再设：第 2 笔试算时额度还没归零，USDT 会回滚，只有这种情况按固定值出（页面照样核对网络费上限）
       try { gas = (await c.adapter.estimateGas({ from: c.hot, to: c.token, data })) * 12n / 10n; }
-      catch (e) { if (steps.length && isRevert(e)) gas = 80_000n; else throw new PayError(isRevert(e) ? 'estimate_reverted' : 'rpc_unreachable', isRevert(e) ? 409 : 503); }
+      catch (e) { if (steps.length && isRevert(e)) gas = 80_000n; else throw isRevert(e) ? new PayError('estimate_reverted', 409) : nodeDown(e); }
       const rawHex = encodeUnsignedLegacyTx({ nonce, gasPrice, gas, to: c.token, value: 0, data, chainId });
       const expect = { chainId: String(chainId), token: c.token, spender: c.contract, amount: String(v), maxFeeWei: String(MAX_FEE_WEI[chain]) };
       decode(() => checkApproveTx(rawHex, expect));
