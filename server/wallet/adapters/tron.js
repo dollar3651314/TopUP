@@ -2,11 +2,13 @@
 // TronGrid、Nile、本机私链都是同样的路径）。
 //   - transfers：按区块读交易回执（/wallet/gettransactioninfobyblocknum），从日志里找 USDT 合约的 Transfer 事件、只要转到我们地址的；
 //     只读到"最新区块 − 确认数"；第一次（没有游标）从当前已确认区块开始、不回扫；一次最多读 maxRange 个区块；
-//     区间里任何一个块读不到（连不上、HTTP 出错含 429、返回 Error、超时）整段作废、直接抛出，游标不动
+//     区间里任何一个块读不到（连不上、HTTP 出错含 429、返回 Error、超时）整段作废、直接抛出，游标不动；
+//     第一个块失败后其余并发的读取不再发新请求（已在途的读完就停，排队的、等着重试的都不发），等它们停下再抛出，下一轮从同一个块重读
 //   - txStatus：连不上 unknown（不等于失败）；没回执 pending；确认数不够 pending；够了 SUCCESS → confirmed，否则 failed
 //   - 地址对外一律 T 开头；金额 0.000001 USDT 单位（TRON USDT 6 位小数）
 // 每个请求都有超时（timeoutMs，默认 10 秒）；错误信息不含节点地址（可能带 API Key）。
-// 限流：同一个适配器对节点同时最多 maxInFlight 个请求（默认 3，TronGrid 有每秒次数限制）；节点回 HTTP 429 / 503 时退避重试，
+// 限流：同一个适配器对节点同时最多 maxInFlight 个请求（默认 3），而且任意连续 1 秒里最多开始 qps 个请求（默认 10，重试也算；
+//   配置 TRON_NODE_QPS，TronGrid 带 Key 的每秒次数上限之下留余量）；节点回 HTTP 429 / 503 时退避重试，
 //   每个请求最多 RETRY_ATTEMPTS 次（间隔 1、2、4 秒；有 Retry-After 时至少等那么久，但每次最多 10 秒），都失败抛 rpc_http（带 httpStatus）。
 //   其他 HTTP 错误、连不上、超时不重试（由调用方决定下一轮再来）。重试只发生在节点明确"没处理、请稍后"的回应上；
 //   广播（/wallet/broadcasthex）重发的是同一笔已签名交易（txID 不变），节点已经收过的会回 DUP_TRANSACTION_ERROR，不会上链两次。
@@ -23,7 +25,38 @@ export const RETRY_ATTEMPTS = 4; // 429 / 503 时每个请求最多请求几次�
 const RETRY_STATUS = new Set([429, 503]);
 const RETRY_BASE_MS = 1000; // 第 n 次重试前等 RETRY_BASE_MS × 2^(n−1)：1、2、4 秒，合计 7 秒
 const RETRY_MAX_MS = 10_000; // 每次最多等多久（Retry-After 再大也只等这么久）
+export const DEFAULT_QPS = 10; // 每秒最多开始几个请求（TRON_NODE_QPS 的默认值）
+const STOPPED = Symbol('stopped');
 const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 每秒次数限流（滑动窗口）：返回 acquire()，在真正发请求前 await；任意连续 1000 毫秒（按时钟）里放行的不超过 qps 个。
+ * 等待一律用 sleep。时钟：传了 now 用 now；没传 now、但传了自己的 sleep（测试）时，按"真实时间 + 让 sleep 等过的毫秒数"算
+ * （不真等的 sleep 当作已经等过，不会在原地空转）；都没传就是真实时间
+ */
+export function createRateLimit({ qps = DEFAULT_QPS, now, sleep = realSleep } = {}) {
+  const limit = Math.max(1, Math.floor(Number(qps)) || DEFAULT_QPS);
+  let slept = 0;
+  const virtual = !now && sleep !== realSleep;
+  const clock = now || (virtual ? () => Date.now() + slept : Date.now);
+  const wait = virtual ? async (ms) => { slept += ms; await sleep(ms); } : sleep;
+  const starts = [];
+  let chain = Promise.resolve();
+  const acquire = () => {
+    const p = chain.then(async () => {
+      for (;;) {
+        const t = clock();
+        while (starts.length && t - starts[0] >= 1000) starts.shift();
+        if (starts.length < limit) { starts.push(t); return; }
+        await wait(Math.max(1, starts[0] + 1000 - t));
+      }
+    });
+    chain = p.catch(() => {});
+    return p;
+  };
+  acquire.qps = limit;
+  return acquire;
+}
 
 /** Retry-After：秒数或 HTTP 日期，换成毫秒；没有或看不懂返回 0 */
 function retryAfterMs(v, now = Date.now()) {
@@ -33,6 +66,9 @@ function retryAfterMs(v, now = Date.now()) {
   const t = Date.parse(s);
   return Number.isFinite(t) ? Math.max(0, t - now) : 0;
 }
+/** 429 / 503 退避的等待时间（第 n 次请求失败后）：不比上一次短；Retry-After 有就至少等那么久；每次最多 RETRY_MAX_MS */
+export const retryWait = (n, prev, retryAfter) => Math.min(RETRY_MAX_MS, Math.max(prev, RETRY_BASE_MS * 2 ** (n - 1), retryAfterMs(retryAfter)));
+export const RETRY_STATUSES = RETRY_STATUS;
 const word = (h) => String(h).replace(/^0x/, '').toLowerCase().padStart(64, '0');
 const hex41 = (a) => '41' + hex20(a);
 /** 日志里的合约地址：一般是 20 字节十六进制（不带 41），个别节点带 41 */
@@ -55,17 +91,22 @@ export function nodeMessage(m) {
 /**
  * base：节点地址（例如 https://api.trongrid.io、http://127.0.0.1:9090）；usdt：T 开头的 USDT 合约地址；
  * confirmations：确认数（默认 19，TRON 固化块）；maxRange：一次最多读多少个区块；apiKey：TronGrid 的 API Key（放请求头）；
- * sleep：async (ms) => void，429 / 503 重试前等待用（默认真的计时器，测试注入假的）；maxInFlight：同时在途的请求上限（默认 3）
+ * sleep：async (ms) => void，429 / 503 重试前、限流时等待用（默认真的计时器，测试注入假的）；now：() => 毫秒（默认 Date.now，限流的时钟）；
+ * qps：任意 1 秒里最多开始几个请求（默认 10，重试也算）；maxInFlight：同时在途的请求上限（默认 3）
  */
-export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations = 19, maxRange = 100, timeoutMs = 10_000, apiKey = '', sleep = realSleep, maxInFlight = MAX_IN_FLIGHT }) {
+export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations = 19, maxRange = 100, timeoutMs = 10_000, apiKey = '', sleep = realSleep, now, qps = DEFAULT_QPS, maxInFlight = MAX_IN_FLIGHT }) {
   if (!isTronAddress(usdt)) throw new Error('tron adapter: usdt must be a T-address');
   if (!base) throw new Error('tron adapter: node url missing');
   const usdtHex = hex20(usdt);
   const root = String(base).replace(/\/+$/, '');
   const slot = gate(Math.max(1, Number(maxInFlight) || MAX_IN_FLIGHT));
+  const rate = createRateLimit({ qps, now, sleep });
 
-  /** 一次请求（占一个在途名额，读完响应体才放）：返回 { status, retryAfter } 或 { j } */
-  const attempt = (path, payload) => slot(async () => {
+  /** 一次请求（占一个在途名额，读完响应体才放）：返回 { status, retryAfter } 或 { j }；stop() 为真时不再发（返回 STOPPED） */
+  const attempt = (path, payload, stop) => slot(async () => {
+    if (stop?.()) return STOPPED;
+    await rate();
+    if (stop?.()) return STOPPED;
     let res;
     try {
       res = await fetchImpl(root + path, {
@@ -84,18 +125,20 @@ export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations
     try { return { j: await res.json() }; } catch { throw new TronNodeError(`tron: invalid JSON ${path}`, { code: 'rpc_http' }); }
   });
 
-  async function post(path, body = {}) {
+  /** stop：() => boolean，为真时不再发请求、不再重试（扫块时同一段里别的块已经失败），抛 code 'stopped' */
+  async function post(path, body = {}, { stop } = {}) {
     const payload = JSON.stringify(body);
     let r;
     let wait = 0;
     for (let n = 1; ; n++) {
-      r = await attempt(path, payload);
+      r = await attempt(path, payload, stop);
+      if (r === STOPPED) throw new TronNodeError(`tron: stopped ${path}`, { code: 'stopped' });
       if (!r.status) break;
       if (!RETRY_STATUS.has(r.status) || n >= RETRY_ATTEMPTS) {
         throw new TronNodeError(`tron: HTTP ${r.status} ${path}${n > 1 ? ` (after ${n} attempts)` : ''}`, { code: 'rpc_http', httpStatus: r.status });
       }
-      // 退避：不比上一次短；Retry-After 有就至少等那么久；每次最多 RETRY_MAX_MS（等待时不占在途名额）
-      wait = Math.min(RETRY_MAX_MS, Math.max(wait, RETRY_BASE_MS * 2 ** (n - 1), retryAfterMs(r.retryAfter)));
+      // 退避（等待时不占在途名额）
+      wait = retryWait(n, wait, r.retryAfter);
       await sleep(wait);
     }
     const j = r.j;
@@ -110,8 +153,8 @@ export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations
     return n;
   };
 
-  async function blockInfos(n) {
-    const r = await post('/wallet/gettransactioninfobyblocknum', { num: n });
+  async function blockInfos(n, stop) {
+    const r = await post('/wallet/gettransactioninfobyblocknum', { num: n }, { stop });
     if (Array.isArray(r)) return r;
     if (r && typeof r === 'object' && !Object.keys(r).length) return []; // 空块：有的节点返回 {}
     throw new TronNodeError(`tron: block ${n}: unexpected response`);
@@ -128,10 +171,17 @@ export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations
     const nums = Array.from({ length: to - from + 1 }, (_, i) => from + i);
     const infos = new Array(nums.length);
     let next = 0;
-    // 同时最多 BLOCK_CONCURRENCY 个请求；任何一个失败整段作废（Promise.all 抛出）
+    let failure = null;
+    const stop = () => failure !== null;
+    // 同时最多 BLOCK_CONCURRENCY 个请求；任何一个失败整段作废：其余的不再取下一个块、不再发新请求、不再重试（在途的读完就停），
+    // 都停下后抛出第一个错误（抛出之后不会再有这一段的请求）
     await Promise.all(Array.from({ length: Math.min(BLOCK_CONCURRENCY, nums.length) }, async () => {
-      while (next < nums.length) { const i = next++; infos[i] = await blockInfos(nums[i]); }
+      while (!stop() && next < nums.length) {
+        const i = next++;
+        try { infos[i] = await blockInfos(nums[i], stop); } catch (e) { if (failure === null) failure = e; }
+      }
     }));
+    if (failure !== null) throw failure;
     const deposits = [];
     for (const [bi, list] of infos.entries()) {
       for (const info of list) {
@@ -191,9 +241,17 @@ export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations
     return String(r.constant_result?.[0] ?? '');
   }
 
+  /** 创世块（0 号块）的 blockID（小写十六进制）：核对节点是主网还是 Nile（server/pay/test-admin.js 的 TRON_GENESIS）；连不上抛出 */
+  async function genesisBlockId() {
+    const b = await post('/wallet/getblockbynum', { num: 0 });
+    const id = String(b?.blockID || '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(id)) throw new TronNodeError('tron: getblockbynum 0: unexpected response');
+    return id;
+  }
+
   return {
-    chain: 'tron', usdt, decimals: 6, confirmations,
-    post, head, transfers, receipt, txStatus, confirmationsOf, constantCall, callWord,
+    chain: 'tron', usdt, decimals: 6, confirmations, qps: rate.qps,
+    post, head, transfers, genesisBlockId, receipt, txStatus, confirmationsOf, constantCall, callWord,
     /** USDT 余额（原始数，bigint）：走合约 balanceOf，没激活的地址也能查到 */
     async tokenBalanceRaw(address, token = usdt) {
       const w = await callWord(token, 'balanceOf(address)', word(hex20(address)), address);

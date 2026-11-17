@@ -1,25 +1,56 @@
 // TronGrid 客户端（TRON 官方节点服务）。只做本项目用到的几个接口；fetch 可以替换，测试时用本地替身。
 // 主网 USDT 合约 TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t；测试环境用 Nile 测试网（USDT_CONTRACT 可以覆盖）。
 import { hexToAddress, addressToHex } from './tron.js';
+import { createRateLimit, retryWait, RETRY_ATTEMPTS, RETRY_STATUSES, DEFAULT_QPS } from '../wallet/adapters/tron.js';
 
 export const NETWORKS = {
   mainnet: { base: 'https://api.trongrid.io', usdt: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' },
   nile: { base: 'https://nile.trongrid.io', usdt: 'TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf' },
 };
 
-export function createTronGrid({ network = 'mainnet', apiKey = '', usdt, base, fetchImpl = fetch, timeoutMs = 8000 } = {}) {
+const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const nodeError = (message, code, httpStatus) => Object.assign(new Error(message), { code, ...(httpStatus !== undefined ? { httpStatus } : {}) });
+
+/**
+ * 限流、重试和 TRON 合约钱包的适配器（server/wallet/adapters/tron.js）同一套：任意 1 秒里最多开始 qps 个请求（默认 10，重试也算，配置 TRON_NODE_QPS）；
+ * HTTP 429 / 503 退避重试，每个请求最多 4 次（间隔 1、2、4 秒，Retry-After 照着等但每次最多 10 秒）；其他 HTTP 错误不重试。
+ * 出错：HTTP 错误 code 'rpc_http' + httpStatus；连不上、超时 code 'rpc_unreachable'（不重试：不知道节点收没收到）；返回的不是 JSON code 'rpc_http'。
+ * 错误信息里只有接口路径（不含查询串），没有节点地址和 API Key。广播重试发的是同一份请求体（同一笔已签名交易）。
+ * sleep、now：等待和限流的时钟（默认真的计时器 / Date.now，测试注入假的）
+ */
+export function createTronGrid({ network = 'mainnet', apiKey = '', usdt, base, fetchImpl = fetch, timeoutMs = 8000, qps = DEFAULT_QPS, now, sleep = realSleep } = {}) {
   const net = NETWORKS[network] || NETWORKS.mainnet;
   const root = base || net.base;
   const contract = usdt || net.usdt;
+  const rate = createRateLimit({ qps, now, sleep });
   async function call(path, body) {
-    const res = await fetchImpl(root + path, {
-      method: body ? 'POST' : 'GET',
-      headers: { accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}), ...(apiKey ? { 'TRON-PRO-API-KEY': apiKey } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!res.ok) throw Object.assign(new Error(`trongrid ${res.status} ${path.split('?')[0]}`), { status: res.status });
-    return res.json();
+    const where = path.split('?')[0];
+    const payload = body ? JSON.stringify(body) : undefined;
+    let wait = 0;
+    for (let n = 1; ; n++) {
+      await rate();
+      let res;
+      try {
+        res = await fetchImpl(root + path, {
+          method: body ? 'POST' : 'GET',
+          headers: { accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}), ...(apiKey ? { 'TRON-PRO-API-KEY': apiKey } : {}) },
+          body: payload,
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+      } catch (e) {
+        throw nodeError(`trongrid: node unreachable (${e?.cause?.code || e?.name || 'network'}) ${where}`, 'rpc_unreachable');
+      }
+      if (res.ok) {
+        try { return await res.json(); } catch { throw nodeError(`trongrid: invalid JSON ${where}`, 'rpc_http'); }
+      }
+      const retryAfter = res.headers.get('retry-after');
+      await res.body?.cancel().catch(() => {});
+      if (!RETRY_STATUSES.has(res.status) || n >= RETRY_ATTEMPTS) {
+        throw nodeError(`trongrid: HTTP ${res.status} ${where}${n > 1 ? ` (after ${n} attempts)` : ''}`, 'rpc_http', res.status);
+      }
+      wait = retryWait(n, wait, retryAfter);
+      await sleep(wait);
+    }
   }
   /** USDT 合约的 balanceOf：激活与否都能查到 */
   async function usdtBalance(address) {
@@ -29,7 +60,14 @@ export function createTronGrid({ network = 'mainnet', apiKey = '', usdt, base, f
     return Number(BigInt(`0x${hex}`));
   }
   return {
-    network, contract,
+    network, contract, qps: rate.qps,
+    /** 创世块（0 号块）的 blockID（小写十六进制）：核对节点是主网还是 Nile（test-admin.js 的 TRON_GENESIS）；连不上抛出 */
+    async genesisBlockId() {
+      const r = await call('/wallet/getblockbynum', { num: 0 });
+      const id = String(r?.blockID || '').toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(id)) throw nodeError('trongrid: getblockbynum 0: unexpected response', 'rpc_error');
+      return id;
+    },
     /**
      * 已确认的 USDT 转账事件（Transfer），按时间升序。返回 { events, next }：next 是翻页用的 fingerprint。
      * 每条事件：{ txid, logIndex, block, time, from, to, amount }

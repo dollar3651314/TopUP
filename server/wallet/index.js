@@ -39,7 +39,8 @@ export function tronChainConfig(config, tron) {
   return { chain: 'tron', rpcUrl, usdt: tron.usdt || '', scheme, complete, confirmations: config.fakeTron ? 0 : config.tronConfirmations ?? 19, decimals: 6 };
 }
 
-export function createWalletLayer({ db, config, evm = {}, tron = null }) {
+/** tronFetch：TRON 适配器用的 fetch（默认全局 fetch；测试注入替身节点，不连外网） */
+export function createWalletLayer({ db, config, evm = {}, tron = null, tronFetch }) {
   const cfg = chainConfig(config, evm);
   const tcfg = tronChainConfig(config, tron);
   if (tcfg) cfg.tron = tcfg;
@@ -60,7 +61,10 @@ export function createWalletLayer({ db, config, evm = {}, tron = null }) {
     try {
       adapters.tron = config.fakeTron
         ? createFakeTronAdapter({ usdt: tcfg.usdt })
-        : createTronAdapter({ base: tcfg.rpcUrl, apiKey: config.tronNodeUrl ? '' : config.tronApiKey || '', usdt: tcfg.usdt, confirmations: tcfg.confirmations });
+        : createTronAdapter({
+          base: tcfg.rpcUrl, apiKey: config.tronNodeUrl ? '' : config.tronApiKey || '', usdt: tcfg.usdt, confirmations: tcfg.confirmations,
+          qps: config.tronNodeQps || undefined, ...(tronFetch ? { fetchImpl: tronFetch } : {}),
+        });
       chains.tron = { adapter: adapters.tron, scheme: tcfg.scheme, usdt: tcfg.usdt };
     } catch (e) { errors.tron = e.message; }
   }
