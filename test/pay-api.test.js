@@ -46,7 +46,7 @@ test('签名：没有签名、签名错误、时间戳过期都返回 401', asyn
   assert.equal((await call(a.cred, 'GET', 'balance/', null, { ts: Math.floor(Date.now() / 1000) - 400 })).body.error.code, 'timestamp_expired');
   const ok = await call(a.cred, 'GET', 'balance/');
   assert.equal(ok.status, 200);
-  assert.deepEqual(ok.body, { available: '0.00', frozen: '0.00', currency: 'USDT' });
+  assert.deepEqual(ok.body, { available: '0.00', frozen: '0.00', debt: '0.00', currency: 'USDT' });
   // 线上经过改写后的地址（/api/v1?p=balance/）和商户签名时的地址一致
   assert.equal(canonicalPath('https://x/api/v1?p=orders/&order_no=A'), '/api/v1/orders/?order_no=A');
   // trailingSlash 开启时，改写目标是 /api/v1/?p=...（没有结尾的 / 会 404）
