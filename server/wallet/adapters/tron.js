@@ -29,26 +29,39 @@ export const DEFAULT_QPS = 10; // 每秒最多开始几个请求（TRON_NODE_QPS
 const STOPPED = Symbol('stopped');
 const realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const REAL_WINDOW_MARGIN_MS = 10; // 真实时钟下窗口多留一点：放行到真正发出请求之间有一点延迟，不能让两头凑进同一个 1000 毫秒
+
 /**
- * 每秒次数限流（滑动窗口）：返回 acquire()，在真正发请求前 await；任意连续 1000 毫秒（按时钟）里放行的不超过 qps 个。
- * 等待一律用 sleep。时钟：传了 now 用 now；没传 now、但传了自己的 sleep（测试）时，按"真实时间 + 让 sleep 等过的毫秒数"算
- * （不真等的 sleep 当作已经等过，不会在原地空转）；都没传就是真实时间
+ * 每秒次数限流（滑动窗口）：返回 acquire()，发请求前 await 它，拿到 mark，紧挨着发请求时调 mark()（按真正发出的时间记）；
+ * 任意连续 1000 毫秒里开始的请求不超过 qps 个。
+ * 三种时钟（sleep 只传调用方自己注入的，没注入就别传）：
+ *   - 传了 now：按 now 算、用 sleep（或真的计时器）等，窗口正好 1000 毫秒（测试的虚拟时钟）；
+ *   - 没传 now、传了 sleep（测试注入的假 sleep）：按"真实时间 + 让 sleep 等过的毫秒数"算（不真等的 sleep 当作已经等过，不会原地空转）；
+ *   - 都没传（生产）：单调时钟 performance.now()、真的计时器，窗口 1000 毫秒再加一点余量
  */
-export function createRateLimit({ qps = DEFAULT_QPS, now, sleep = realSleep } = {}) {
+export function createRateLimit({ qps = DEFAULT_QPS, now, sleep } = {}) {
   const limit = Math.max(1, Math.floor(Number(qps)) || DEFAULT_QPS);
   let slept = 0;
-  const virtual = !now && sleep !== realSleep;
-  const clock = now || (virtual ? () => Date.now() + slept : Date.now);
-  const wait = virtual ? async (ms) => { slept += ms; await sleep(ms); } : sleep;
-  const starts = [];
+  const injectedSleep = typeof sleep === 'function';
+  const virtual = !now && injectedSleep;
+  const real = !now && !injectedSleep;
+  const clock = now || (virtual ? () => Date.now() + slept : () => performance.now());
+  const wait = virtual ? async (ms) => { slept += ms; await sleep(ms); } : injectedSleep ? sleep : realSleep;
+  const windowMs = real ? 1000 + REAL_WINDOW_MARGIN_MS : 1000;
+  let starts = []; // 每个放行的请求：{ t }（放行时记一次；真正发出时 mark() 再改成发出的时间，只会往后挪，更保守）
   let chain = Promise.resolve();
   const acquire = () => {
     const p = chain.then(async () => {
       for (;;) {
         const t = clock();
-        while (starts.length && t - starts[0] >= 1000) starts.shift();
-        if (starts.length < limit) { starts.push(t); return; }
-        await wait(Math.max(1, starts[0] + 1000 - t));
+        starts = starts.filter((x) => t - x.t < windowMs);
+        if (starts.length < limit) {
+          const slot = { t };
+          starts.push(slot);
+          return () => { slot.t = Math.max(slot.t, clock()); }; // mark()：真正发请求前调
+        }
+        const oldest = Math.min(...starts.map((x) => x.t));
+        await wait(Math.max(1, Math.ceil(oldest + windowMs - t)));
       }
     });
     chain = p.catch(() => {});
@@ -74,6 +87,18 @@ const hex41 = (a) => '41' + hex20(a);
 /** 日志里的合约地址：一般是 20 字节十六进制（不带 41），个别节点带 41 */
 export const logAddr = (a) => { const s = String(a || '').toLowerCase(); return s.length === 42 && s.startsWith('41') ? s.slice(2) : s.padStart(40, '0'); };
 
+/**
+ * 问创世块出错时分两类：节点"答了但答的不对"（回了 Error、不是 JSON、其他 4xx 例如 404）→ code genesis_invalid（核对网络时当作不是要的网络）；
+ * 连不上、超时、429、5xx、401 / 403（API Key 不对或没权限：节点没告诉我们它在哪条链）→ 原样（这次查不到，下次再查）
+ */
+const UNVERIFIABLE_STATUS = new Set([401, 403, 429]);
+export function genesisError(e) {
+  const busy = e?.code === 'rpc_unreachable' || e?.name === 'TimeoutError' || e?.name === 'AbortError'
+    || (e?.code === 'rpc_http' && e.httpStatus !== undefined && (UNVERIFIABLE_STATUS.has(e.httpStatus) || e.httpStatus >= 500));
+  if (busy || e?.code === 'genesis_invalid') return e;
+  return Object.assign(e instanceof Error ? e : new Error(String(e)), { code: 'genesis_invalid' });
+}
+
 export class TronNodeError extends Error {
   constructor(message, { code = 'rpc_error', nodeCode, httpStatus } = {}) {
     super(message); this.code = code; this.nodeCode = nodeCode;
@@ -92,23 +117,28 @@ export function nodeMessage(m) {
  * base：节点地址（例如 https://api.trongrid.io、http://127.0.0.1:9090）；usdt：T 开头的 USDT 合约地址；
  * confirmations：确认数（默认 19，TRON 固化块）；maxRange：一次最多读多少个区块；apiKey：TronGrid 的 API Key（放请求头）；
  * sleep：async (ms) => void，429 / 503 重试前、限流时等待用（默认真的计时器，测试注入假的）；now：() => 毫秒（默认 Date.now，限流的时钟）；
- * qps：任意 1 秒里最多开始几个请求（默认 10，重试也算）；maxInFlight：同时在途的请求上限（默认 3）
+ * qps：任意 1 秒里最多开始几个请求（默认 10，重试也算）；maxInFlight：同时在途的请求上限（默认 3）；
+ * expectGenesis：节点必须在的网络（创世块 blockID，例如生产的 TRON_GENESIS.mainnet）。给了就在第一次成功问到节点之前先核对创世块：
+ *   连不上 → 这次请求照常失败（rpc_unreachable 等），下次再核对；对上了之后不再问；
+ *   回了别的创世块或回的不是创世块 → 锁住（之后每个请求都抛 code tron_node_not_mainnet，不再发），调一次 onGenesisMismatch(收到的值)
  */
-export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations = 19, maxRange = 100, timeoutMs = 10_000, apiKey = '', sleep = realSleep, now, qps = DEFAULT_QPS, maxInFlight = MAX_IN_FLIGHT }) {
+export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations = 19, maxRange = 100, timeoutMs = 10_000, apiKey = '', sleep: injectedSleep, now, qps = DEFAULT_QPS, maxInFlight = MAX_IN_FLIGHT, expectGenesis = '', onGenesisMismatch }) {
+  const sleep = injectedSleep || realSleep;
   if (!isTronAddress(usdt)) throw new Error('tron adapter: usdt must be a T-address');
   if (!base) throw new Error('tron adapter: node url missing');
   const usdtHex = hex20(usdt);
   const root = String(base).replace(/\/+$/, '');
   const slot = gate(Math.max(1, Number(maxInFlight) || MAX_IN_FLIGHT));
-  const rate = createRateLimit({ qps, now, sleep });
+  const rate = createRateLimit({ qps, now, sleep: injectedSleep }); // 只把调用方注入的 sleep 交给限流（见 createRateLimit）
 
   /** 一次请求（占一个在途名额，读完响应体才放）：返回 { status, retryAfter } 或 { j }；stop() 为真时不再发（返回 STOPPED） */
   const attempt = (path, payload, stop) => slot(async () => {
     if (stop?.()) return STOPPED;
-    await rate();
+    const mark = await rate();
     if (stop?.()) return STOPPED;
     let res;
     try {
+      mark();
       res = await fetchImpl(root + path, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json', ...(apiKey ? { 'TRON-PRO-API-KEY': apiKey } : {}) },
@@ -126,7 +156,8 @@ export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations
   });
 
   /** stop：() => boolean，为真时不再发请求、不再重试（扫块时同一段里别的块已经失败），抛 code 'stopped' */
-  async function post(path, body = {}, { stop } = {}) {
+  async function post(path, body = {}, { stop, skipNetworkCheck = false } = {}) {
+    if (!skipNetworkCheck) await ensureNetwork();
     const payload = JSON.stringify(body);
     let r;
     let wait = 0;
@@ -241,17 +272,44 @@ export function createTronAdapter({ base, fetchImpl = fetch, usdt, confirmations
     return String(r.constant_result?.[0] ?? '');
   }
 
-  /** 创世块（0 号块）的 blockID（小写十六进制）：核对节点是主网还是 Nile（server/pay/test-admin.js 的 TRON_GENESIS）；连不上抛出 */
+  // 网络核对（expectGenesis）：'ok' 核对过 / 'unverified' 还没核对上 / 'wrong' 不是要的网络（锁住）
+  const expected = String(expectGenesis || '').toLowerCase();
+  let network = expected ? 'unverified' : 'ok';
+  let checking = null;
+  const wrongNetwork = () => new TronNodeError('tron: node is not on the expected network, TRON requests are locked', { code: 'tron_node_not_mainnet' });
+  async function ensureNetwork() {
+    if (network === 'ok') return;
+    if (network === 'wrong') throw wrongNetwork();
+    if (!checking) {
+      checking = (async () => {
+        let got;
+        try { got = await genesisBlockId(); } catch (e) {
+          if (e?.code !== 'genesis_invalid') throw e; // 连不上、繁忙：这次失败，下次再核对
+          got = 'invalid';
+        }
+        if (got === expected) { network = 'ok'; return; }
+        network = 'wrong';
+        try { onGenesisMismatch?.(got); } catch { /* 告警出错不影响锁住 */ }
+      })().finally(() => { checking = null; });
+    }
+    await checking;
+    if (network === 'wrong') throw wrongNetwork();
+  }
+
+  /** 创世块（0 号块）的 blockID（小写十六进制）：核对节点是主网还是 Nile（server/pay/test-admin.js 的 TRON_GENESIS）；连不上抛出；回的不是创世块抛 code genesis_invalid */
   async function genesisBlockId() {
-    const b = await post('/wallet/getblockbynum', { num: 0 });
+    let b;
+    try { b = await post('/wallet/getblockbynum', { num: 0 }, { skipNetworkCheck: true }); } catch (e) { throw genesisError(e); }
     const id = String(b?.blockID || '').toLowerCase();
-    if (!/^[0-9a-f]{64}$/.test(id)) throw new TronNodeError('tron: getblockbynum 0: unexpected response');
+    if (!/^[0-9a-f]{64}$/.test(id)) throw new TronNodeError('tron: getblockbynum 0: unexpected response', { code: 'genesis_invalid' });
     return id;
   }
 
   return {
     chain: 'tron', usdt, decimals: 6, confirmations, qps: rate.qps,
-    post, head, transfers, genesisBlockId, receipt, txStatus, confirmationsOf, constantCall, callWord,
+    post, head, transfers, genesisBlockId,
+    /** 网络核对的状态：'ok' / 'unverified' / 'wrong'（expectGenesis 见上） */
+    networkState: () => network, receipt, txStatus, confirmationsOf, constantCall, callWord,
     /** USDT 余额（原始数，bigint）：走合约 balanceOf，没激活的地址也能查到 */
     async tokenBalanceRaw(address, token = usdt) {
       const w = await callWord(token, 'balanceOf(address)', word(hex20(address)), address);

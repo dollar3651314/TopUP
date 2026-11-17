@@ -112,7 +112,10 @@ export function createTestnetCheck(adapters = {}) {
     for (const a of Object.values(adapters)) {
       if (a && typeof a.genesisBlockId === 'function') {
         let g;
-        try { g = String(await a.genesisBlockId()).toLowerCase(); } catch { return false; }
+        try { g = String(await a.genesisBlockId()).toLowerCase(); } catch (e) {
+          if (e?.code !== 'genesis_invalid') return false; // 查不到：这次不认，下次再查
+          g = 'invalid'; // 节点答了，但答的不是创世块：和"不是 Nile"一样记住
+        }
         if (g !== TRON_GENESIS.nile) { result = false; console.error('[test-admin] TRON node is not Nile, test-only switches (test admin, merchant IP bypass) disabled'); return false; }
         continue;
       }
@@ -128,8 +131,9 @@ export function createTestnetCheck(adapters = {}) {
 }
 
 /**
- * 生产启动时核对 TRON 节点（nodes：{ 名字: 有 genesisBlockId() 的客户端 }）：创世块不是主网 → 抛错（code tron_node_not_mainnet，
- * 说明里只有名字，没有节点地址和 Key）；连不上、超时（timeoutMs，默认 10 秒）→ 不拒绝（返回 { 名字: 'unreachable' }），节点恢复后照常用。
+ * 生产启动时核对 TRON 节点（nodes：{ 名字: 有 genesisBlockId() 的客户端 }）：创世块不是主网、或节点答了但答的不是创世块（genesis_invalid）
+ * → 抛错（code tron_node_not_mainnet，说明里只有名字，没有节点地址和 Key）；连不上、繁忙、超时（timeoutMs，默认 10 秒）→ 不拒绝
+ * （返回 { 名字: 'unreachable' }）。TRON 合约钱包的适配器在生产带 expectGenesis：之后第一次问到节点前自己再核对，不是主网就锁住并告警。
  * 返回每个节点的结果：'mainnet' / 'unreachable'
  */
 export async function checkTronMainnet(nodes = {}, { timeoutMs = 10_000 } = {}) {
@@ -140,7 +144,10 @@ export async function checkTronMainnet(nodes = {}, { timeoutMs = 10_000 } = {}) 
     let timer;
     const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timeout')), timeoutMs); timer.unref?.(); });
     let g;
-    try { g = String(await Promise.race([n.genesisBlockId(), timeout])).toLowerCase(); } catch { out[name] = 'unreachable'; return; } finally { clearTimeout(timer); }
+    try { g = String(await Promise.race([n.genesisBlockId(), timeout])).toLowerCase(); } catch (e) {
+      if (e?.code === 'genesis_invalid') { out[name] = 'invalid'; bad.push(`${name}=invalid`); return; }
+      out[name] = 'unreachable'; return;
+    } finally { clearTimeout(timer); }
     if (g === TRON_GENESIS.mainnet) out[name] = 'mainnet';
     else { out[name] = g === TRON_GENESIS.nile ? 'nile' : 'other'; bad.push(`${name}=${out[name]}`); }
   }));

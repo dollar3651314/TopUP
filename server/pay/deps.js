@@ -57,7 +57,8 @@ export async function createPayDeps({ config, kyb, send, getIp, origin, tronFetc
   const keyPrefix = config.appEnv === 'production' ? 'topup_live_' : 'topup_test_';
   const wallets = walletsFor(config.appEnv);
   // 钱包层（ETH、BSC、TRON 合约钱包；cobo、fireblocks 未开通）。TRON 一节空着时不开通 TRON 合约钱包
-  const layer = createWalletLayer({ db, config, evm: wallets.evm || {}, tron: wallets.tron || null, tronFetch });
+  const notifyEarly = config.mailTo ? (subject, text) => send({ to: config.mailTo, subject: `[收付款] ${subject}`, text }).catch((e) => console.error(`[pay] mail: ${e.message}`)) : null;
+  const layer = createWalletLayer({ db, config, evm: wallets.evm || {}, tron: wallets.tron || null, tronFetch, notify: notifyEarly });
   // 生产：TRON 节点（老 TronGrid 客户端、TRON 合约钱包的节点）按创世块核对必须是主网，不是就拒绝启动；连不上不拒绝（节点恢复后照常用）
   if (config.appEnv === 'production' && !config.fakeTron) {
     try {

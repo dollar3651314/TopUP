@@ -1,7 +1,7 @@
 // TronGrid 客户端（TRON 官方节点服务）。只做本项目用到的几个接口；fetch 可以替换，测试时用本地替身。
 // 主网 USDT 合约 TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t；测试环境用 Nile 测试网（USDT_CONTRACT 可以覆盖）。
 import { hexToAddress, addressToHex } from './tron.js';
-import { createRateLimit, retryWait, RETRY_ATTEMPTS, RETRY_STATUSES, DEFAULT_QPS } from '../wallet/adapters/tron.js';
+import { createRateLimit, retryWait, RETRY_ATTEMPTS, RETRY_STATUSES, DEFAULT_QPS, genesisError } from '../wallet/adapters/tron.js';
 
 export const NETWORKS = {
   mainnet: { base: 'https://api.trongrid.io', usdt: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t' },
@@ -18,19 +18,21 @@ const nodeError = (message, code, httpStatus) => Object.assign(new Error(message
  * 错误信息里只有接口路径（不含查询串），没有节点地址和 API Key。广播重试发的是同一份请求体（同一笔已签名交易）。
  * sleep、now：等待和限流的时钟（默认真的计时器 / Date.now，测试注入假的）
  */
-export function createTronGrid({ network = 'mainnet', apiKey = '', usdt, base, fetchImpl = fetch, timeoutMs = 8000, qps = DEFAULT_QPS, now, sleep = realSleep } = {}) {
+export function createTronGrid({ network = 'mainnet', apiKey = '', usdt, base, fetchImpl = fetch, timeoutMs = 8000, qps = DEFAULT_QPS, now, sleep: injectedSleep } = {}) {
+  const sleep = injectedSleep || realSleep;
   const net = NETWORKS[network] || NETWORKS.mainnet;
   const root = base || net.base;
   const contract = usdt || net.usdt;
-  const rate = createRateLimit({ qps, now, sleep });
+  const rate = createRateLimit({ qps, now, sleep: injectedSleep }); // 只把调用方注入的 sleep 交给限流（自己的真计时器不算注入）
   async function call(path, body) {
     const where = path.split('?')[0];
     const payload = body ? JSON.stringify(body) : undefined;
     let wait = 0;
     for (let n = 1; ; n++) {
-      await rate();
+      const mark = await rate();
       let res;
       try {
+        mark();
         res = await fetchImpl(root + path, {
           method: body ? 'POST' : 'GET',
           headers: { accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}), ...(apiKey ? { 'TRON-PRO-API-KEY': apiKey } : {}) },
@@ -61,11 +63,12 @@ export function createTronGrid({ network = 'mainnet', apiKey = '', usdt, base, f
   }
   return {
     network, contract, qps: rate.qps,
-    /** 创世块（0 号块）的 blockID（小写十六进制）：核对节点是主网还是 Nile（test-admin.js 的 TRON_GENESIS）；连不上抛出 */
+    /** 创世块（0 号块）的 blockID（小写十六进制）：核对节点是主网还是 Nile（test-admin.js 的 TRON_GENESIS）；连不上抛出；答了但答的不是创世块抛 code genesis_invalid */
     async genesisBlockId() {
-      const r = await call('/wallet/getblockbynum', { num: 0 });
+      let r;
+      try { r = await call('/wallet/getblockbynum', { num: 0 }); } catch (e) { throw genesisError(e); }
       const id = String(r?.blockID || '').toLowerCase();
-      if (!/^[0-9a-f]{64}$/.test(id)) throw nodeError('trongrid: getblockbynum 0: unexpected response', 'rpc_error');
+      if (!/^[0-9a-f]{64}$/.test(id)) throw nodeError('trongrid: getblockbynum 0: unexpected response', 'genesis_invalid');
       return id;
     },
     /**

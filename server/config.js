@@ -59,7 +59,7 @@ export function loadConfig(rawEnv = process.env) {
     // 归集发起账户的私钥（只在服务器的 .env；只能调用 TRON 批量合约）、租能量平台 TronSave 的 API Key（可选，没配就烧 TRX）
     tronNodeUrl: (env.TRON_NODE_URL || '').replace(/\/+$/, ''),
     tronConfirmations: int(env.TRON_CONFIRMATIONS, 19),
-    // TRON 节点每秒最多开始几个请求（默认 10，重试也算；TRON 合约钱包的适配器和老 TronGrid 客户端各自按这个限）：
+    // TRON 节点每秒最多开始几个请求（默认 10，重试也算；web、worker 各自一份，每个进程里 TRON 合约钱包的适配器和老 TronGrid 客户端也各一份）：
     // TronGrid 带 API Key 的每秒次数上限之下留余量，自建节点可以调高
     tronNodeQps: Math.max(1, int(env.TRON_NODE_QPS, 10) || 10),
     sweepOperatorKeyTron: env.SWEEP_OPERATOR_KEY_TRON || '',
