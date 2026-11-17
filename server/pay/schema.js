@@ -411,6 +411,39 @@ export async function migrate(db) {
     await db.tx(async (t) => { await t.query('select pg_advisory_xact_lock($1)', [MIGRATE_LOCK]); await t.query(SCHEMA); await record(t); });
   } else { await db.query(SCHEMA); await record(db); }
   await repairDoubleEncoded(db);
+  // 提现单号永久唯一（v1.1）：先处理已有的重复单号，再建唯一索引；和建表一样在数据库锁里做
+  if (db.exec || !db.tx) await uniqueMerchantRef(db);
+  else await db.tx(async (t) => { await t.query('select pg_advisory_xact_lock($1)', [MIGRATE_LOCK]); await uniqueMerchantRef(t, { lockTable: true }); });
+}
+
+/** 唯一索引：同一商户的提现单号（merchant_ref）永久唯一，不看状态；没填（null、空串）不算。写入前单号已去首尾空格、空的存 null。
+ * 查询要带上同样的条件 merchant_ref <> ''，否则用不上这个部分索引 */
+export const MERCHANT_REF_INDEX = 'withdrawals_merchant_ref_unique';
+/** 改名后的单号：`<原单号前 40 字>~<提现号>`（提现号唯一，所以改完不会再撞；最长 64 字） */
+export const dedupMerchantRef = (ref, id) => `${String(ref).slice(0, 40)}~${id}`;
+
+/**
+ * 迁移：唯一索引还没建时，把同一商户同一单号的重复提现处理掉——保留最早的一笔（created_at 最早，相同再按 id），
+ * 其余改成 dedupMerchantRef，每改一笔记一条审计（withdrawal.merchant_ref_dedup，detail 带 before、after）；然后建唯一索引。
+ * 索引已经在就什么都不做（有索引就不可能有重复），所以可以重复执行。
+ */
+export async function uniqueMerchantRef(q, { lockTable = false } = {}) {
+  const [has] = await q.query(`select 1 from pg_indexes where schemaname = current_schema() and tablename = 'withdrawals' and indexname = $1`, [MERCHANT_REF_INDEX]);
+  if (has) return 0;
+  // 建索引之前挡住写入（只在索引还没建的这一次，几秒内）：还在跑的旧版本 web / worker 这时插进来的同号单会让建索引失败
+  if (lockTable) await q.query('lock table withdrawals in share row exclusive mode');
+  const dups = await q.query(`select id, merchant_ref from (
+      select id, merchant_ref, row_number() over (partition by merchant_id, merchant_ref order by created_at, id) rn
+      from withdrawals where merchant_ref <> '') d
+    where rn > 1 order by id`);
+  for (const d of dups) {
+    const after = dedupMerchantRef(d.merchant_ref, d.id);
+    await q.query('update withdrawals set merchant_ref = $2 where id = $1', [d.id, after]);
+    await q.query(`insert into pay_audit (actor, action, target, detail) values ('system', 'withdrawal.merchant_ref_dedup', $1, $2::jsonb)`,
+      [d.id, JSON.stringify({ before: d.merchant_ref, after })]);
+  }
+  await q.query(`create unique index if not exists ${MERCHANT_REF_INDEX} on withdrawals (merchant_id, merchant_ref) where merchant_ref <> ''`);
+  return dups.length;
 }
 
 /**

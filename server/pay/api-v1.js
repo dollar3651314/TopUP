@@ -122,7 +122,7 @@ export function createApiV1({ db, keys, ops, getIp = () => '', now = () => Date.
     'GET ledger': (m, q) => ops.ledger(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '' }),
     'GET deposits': (m, q) => ops.deposits(m, { cursor: q.get('cursor'), limit: limitOf(q), customerId: q.get('customer_id') || '', matched: q.get('matched') || '' }),
     'POST withdrawals': async (m, q, b, request) => { await needIp(m, request); return ops.withdraw(m, b, 'api'); },
-    'GET withdrawals': (m, q) => ops.getWithdrawal(m, q.get('withdrawal_no')),
+    'GET withdrawals': (m, q) => ops.getWithdrawal(m, q.get('withdrawal_no'), q.get('merchant_ref')),
     'POST withdrawals/cancel': (m, q, b) => ops.cancelWithdrawal(m, b.withdrawal_no),
     // 批量打款（第 3 批）：一次最多 500 笔；有一行不对整个请求 422 invalid_rows（error.rows 列出 index 和原因），不做"只收没问题的"
     'POST payouts/batch': async (m, q, b, request) => {
