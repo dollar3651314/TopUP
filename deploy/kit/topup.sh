@@ -1166,7 +1166,11 @@ usage() {
   echo "用法（都要 sudo）："; sed -n 's/^#   \(sudo topup .*\)/  \1/p' "$0"
 }
 
-[ "$(id -u)" = 0 ] || { echo "✗ 请用 sudo 运行，例如：sudo topup status"; exit 1; }
+# 要 root（服务器上部署目录在 /opt 下）。只有部署目录（还没有时看它的上一级）当前用户本来就能写时才不要求——开发机、CI 上的测试用临时目录
+if [ "$(id -u)" != 0 ]; then
+  if [ -d "$TOPUP_DIR" ]; then [ -w "$TOPUP_DIR" ]; else [ -w "$(dirname "$TOPUP_DIR")" ]; fi \
+    || { echo "✗ 请用 sudo 运行，例如：sudo topup status"; exit 1; }
+fi
 # 环境写进 deploy.env 以后就固定了：命令行带的 TOPUP_ENV 和它不一样就停下（install 自己核对，还会核对网关模式和端口）
 if [ "${1:-}" != install ] && [ -n "$ENV_ARG" ] && [ -n "$(dval TOPUP_ENV)" ] && [ "$ENV_ARG" != "$(dval TOPUP_ENV)" ]; then
   echo "✗ 这台机器是按 $(dval TOPUP_ENV) 部署的，命令里却写了 TOPUP_ENV=$ENV_ARG；什么都没有做"; exit 1
