@@ -3,7 +3,7 @@
 //   - 生产镜像 job（名字不限；认法：run 里 docker build 带 --build-arg APP_ENV=production）：只在 push 到 main 时运行、needs 有 ci-ok；
 //     只打、只推 <镜像>:prod-<提交号> 标签，不碰 :staging、:production、也不打不带前缀的 :<提交号>（那是测试环境镜像用的）
 //   - promote-production：environment: production（管理员在 GitHub 上批准）；needs 生产镜像 job；只在 push 到 main 时；不重新构建，
-//     把 :production 指到 :prod-<提交号>；不碰 :staging
+//     把 :production 指到刚推的那个镜像（第 2 轮起按摘要，见文件末尾）；不碰 :staging
 //   - production-smoke：needs promote-production；运行 bash e2e/smoke.sh <地址> <提交号> production；地址从 env 来（仓库密钥），不写在仓库里
 //   - 这三个 job 的 run: 里没有 ${{ … }}（值一律经 env: 传进去）
 //   - ci.yml 里所有 uses: 都钉在 40 位提交号上
@@ -96,7 +96,7 @@ test('生产镜像 job 只打 / 只推 :prod-<提交号>，不碰 :staging、:pr
   assert.doesNotMatch(script, /:production\b/, '移动 :production 是 promote-production 的事');
 });
 
-test('promote-production：environment: production、needs 生产镜像 job、只在 push 到 main；不重新构建，把 :production 指到 :prod-<提交号>；不碰 :staging', () => {
+test('promote-production：environment: production、needs 生产镜像 job、只在 push 到 main；不重新构建，只改 :production；不碰 :staging', () => {
   const b = J['promote-production'];
   assert.ok(b, `有 promote-production job（现在的 job：${Object.keys(J).join(', ')}）`);
   assert.ok(/^\s{4}environment:\s*production\s*$/m.test(b) || /^\s{4}environment:\s*\n\s{6}name:\s*production\s*$/m.test(b), 'environment: production（管理员批准）');
@@ -105,7 +105,7 @@ test('promote-production：environment: production、needs 生产镜像 job、�
   assert.match(cond, /github\.event_name\s*==\s*'push'/); assert.match(cond, /github\.ref\s*==\s*'refs\/heads\/main'/);
   const script = runs(b).join('\n');
   assert.doesNotMatch(script, /docker\s+build\s/, '不重新构建');
-  assert.match(script, /:prod-\$\{?GITHUB_SHA\}?/, '来源是 :prod-$GITHUB_SHA');
+  // 第 2 轮：来源改为按摘要（见文件末尾"按摘要"一条），不再要求 :prod-$GITHUB_SHA 作来源
   assert.match(script, /:production\b/, '移动 :production');
   assert.doesNotMatch(script, /:staging\b/);
   for (const x of targets(script)) assert.match(x, /:production$/, `只改 :production 这一个标签：${x}`);
@@ -144,4 +144,61 @@ test('测试环境的 image job 照旧：只在 push 到 staging、APP_ENV=stagi
   const script = runs(b).join('\n');
   assert.match(script, /APP_ENV=staging/);
   assert.doesNotMatch(script, /APP_ENV=production|:prod-|:production\b/);
+});
+
+// ---------- 第 2 轮（复核意见）----------
+// 约定（接口）：
+//   - promote-production 先检查只放在 GitHub 环境 production 里的密钥 PRODUCTION_PROMOTE_GUARD（经 env: 传进来，变量名也叫 PRODUCTION_PROMOTE_GUARD）：
+//     读不到（空）就 exit 1，在改 :production 标签之前。这样环境 production 没建好（GitHub 自动建出一个没有保护的同名环境）时不能上生产
+//   - 生产镜像 job 有 outputs.digest（推送后的镜像摘要，写进 $GITHUB_OUTPUT 的 digest=…）；promote-production 经 env: 拿
+//     needs.<生产镜像 job>.outputs.digest，先核对格式（sha256: 加 64 位十六进制，不对就 exit 1），再用 <镜像>@<摘要> 作为来源改 :production，
+//     不再用 :prod-<提交号> 标签作来源
+//   - deploy/README.md 写明：第一次合并到 main 之前先建好环境 production（含 PRODUCTION_PROMOTE_GUARD）
+const scriptOf = (body) => runs(body).join('\n');
+const esc = (s) => s.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
+/** env: 里值是 ${{ <expr> }} 的那个变量名 */
+const envVarFor = (body, expr) => {
+  const m = body.match(new RegExp(`^\\s+(\\w+):\\s*\\$\\{\\{\\s*${esc(expr)}\\s*\\}\\}`, 'm'));
+  return m ? m[1] : null;
+};
+
+test('promote-production：改标签之前先检查环境 production 专有的密钥 PRODUCTION_PROMOTE_GUARD，读不到就失败', () => {
+  const b = J['promote-production'];
+  assert.ok(b, '有 promote-production');
+  assert.equal(envVarFor(b, 'secrets.PRODUCTION_PROMOTE_GUARD'), 'PRODUCTION_PROMOTE_GUARD', 'env: PRODUCTION_PROMOTE_GUARD: ${{ secrets.PRODUCTION_PROMOTE_GUARD }}');
+  const script = scriptOf(b);
+  const v = '"\\$\\{?PRODUCTION_PROMOTE_GUARD\\}?"';
+  const guard = script.search(new RegExp(`(\\[\\s+-z\\s+${v}\\s+\\][^\\n]*exit 1|\\[\\s+-n\\s+${v}\\s+\\]\\s*\\|\\|[^\\n]*exit 1)`));
+  assert.ok(guard >= 0, `run 里有 [ -z "$PRODUCTION_PROMOTE_GUARD" ] … exit 1（或 [ -n … ] || … exit 1）：\n${script}`);
+  const move = script.search(/:production\b/);
+  assert.ok(move >= 0 && guard < move, '检查在改 :production 之前');
+  for (const l of script.split('\n')) {
+    if (/PRODUCTION_PROMOTE_GUARD/.test(l) && /\b(echo|printf)\b/.test(l)) assert.ok(/\[\s+-[zn]\s/.test(l), `不打印这个密钥：${l}`);
+  }
+});
+
+test('生产镜像 job 输出镜像摘要（outputs.digest）；promote-production 按摘要改 :production，先核对摘要格式', () => {
+  assert.ok(prodImageName, '有生产镜像 job');
+  const img = J[prodImageName];
+  assert.match(img, /^\s{4}outputs:\s*\n\s{6}digest:\s*\$\{\{\s*steps\.[\w-]+\.outputs\.digest\s*\}\}/m, `${prodImageName} 有 outputs.digest（来自某一步的 outputs.digest）`);
+  assert.match(scriptOf(img), /digest=[^\n]*>>\s*"?\$GITHUB_OUTPUT"?/, '推送后把 digest=… 写进 $GITHUB_OUTPUT');
+  const b = J['promote-production'];
+  assert.ok(b, '有 promote-production');
+  const v = envVarFor(b, `needs.${prodImageName}.outputs.digest`);
+  assert.ok(v, `promote-production 经 env: 拿 needs.${prodImageName}.outputs.digest`);
+  const script = scriptOf(b);
+  const ref = `\\$\\{?${v}\\}?`;
+  assert.ok(script.split('\n').some((l) => new RegExp(ref).test(l) && /sha256:\[0-9a-f\]\{64\}/.test(l) && /exit 1|\|\|/.test(l)),
+    `核对 $${v} 是 sha256:[0-9a-f]{64}，不对就失败：\n${script}`);
+  const create = script.split('\n').find((l) => /imagetools\s+create|docker\s+tag|docker\s+push/.test(l) && /:production\b/.test(l));
+  assert.ok(create, `有改 :production 的那一行：\n${script}`);
+  assert.match(create, new RegExp(`@"?${ref}`), `来源是 <镜像>@$${v}：${create}`);
+  assert.doesNotMatch(create, /:prod-/, `来源不再是 :prod-<提交号> 标签：${create}`);
+});
+
+test('deploy/README.md 写明：第一次合并到 main 之前先建好环境 production（含 PRODUCTION_PROMOTE_GUARD）', () => {
+  const md = readFileSync(join(ROOT, 'deploy/README.md'), 'utf8');
+  const paras = md.split(/\n\s*\n/);
+  assert.ok(paras.some((p) => /PRODUCTION_PROMOTE_GUARD/.test(p) && /production/.test(p) && /main/.test(p) && /(之前|以前)/.test(p)),
+    'README 有一段同时写了 PRODUCTION_PROMOTE_GUARD、环境 production、main 和"之前"');
 });

@@ -75,6 +75,9 @@ case "$1" in
       case "$fmt" in *Ports*) echo "$n ${"$"}{ports//;/ }" ;; *) echo "$n" ;; esac
     done
     exit 0 ;;
+  exec)
+    case "$*" in *"nginx -t"*) [ -f "$F/nginx-t-fail" ] && { echo 'nginx: [emerg] fake'; exit 1; } ;; esac
+    exit 0 ;;
   inspect)
     c=${"$"}{@: -1}; ps_lines | awk -v c="$c" '$1 == c { print $3 }'; exit 0 ;;
   stop)
@@ -96,6 +99,7 @@ case "$1" in
         [ -f "$F/ps" ] && grep -v ' topup ' "$F/ps" > "$F/ps.tmp"; [ -f "$F/ps.tmp" ] && mv "$F/ps.tmp" "$F/ps"; exit 0 ;;
       exec)
         case "$*" in
+          *"nginx -t"*) [ -f "$F/nginx-t-fail" ] && { echo 'nginx: [emerg] fake'; exit 1; }; echo 'nginx: configuration file /etc/nginx/nginx.conf test is successful' ;;
           *pg_dump*) echo FAKE-DUMP ;;
           *redis-cli*) mkdir -p "$TOPUP_DIR/data/redis"; echo FAKE-RDB > "$TOPUP_DIR/data/redis/backup.rdb" ;;
         esac
@@ -123,6 +127,8 @@ echo "$*" >> "$FAKE/curl.log"
 case "$*" in
   */api/health/*)
     [ -s "$FAKE/up" ] || exit 7
+    # 经 nginx 的内部端口（127.0.0.1:8080）那一路可以单独弄坏
+    case "$*" in *127.0.0.1:8080/*) [ -f "$FAKE/gw-health-fail" ] && exit 7 ;; esac
     tag=$(sed -n 's/^IMAGE_TAG=//p' "$TOPUP_DIR/state/image.env" 2> /dev/null)
     env=$(sed -n 's/^TOPUP_ENV=//p' "$TOPUP_DIR/deploy.env" | tail -1)
     net=$(sed -n 's/^TRON_NETWORK=//p' "$TOPUP_DIR/.env" | tail -1)
@@ -195,7 +201,7 @@ const PROD = { TOPUP_DRILL: '1', TOPUP_ENV: 'production', TOPUP_GATEWAY: 'platfo
 const STAGING = { TOPUP_DRILL: '1', TOPUP_DRILL_MEM_MB: '2000', TOPUP_DRILL_DISK_GB: '20' };
 const DOMAIN = ['pay.example.com', 'ops@example.com'];
 // 生产第一次部署用平台发布的地址（https://<端口>-<编号>.<平台域名>）：只给主机名、不给证书邮箱
-const GW_HOST = '8080-qa0test.instabox.tech';
+const GW_HOST = '8080-qa0test.example.invalid';
 const PDOM = [GW_HOST];
 
 /** compose 实际生效的配置（compose up 那一次） */
@@ -511,4 +517,178 @@ test('第 1 步：Debian 13（trixie）照常支持；已经有 Docker 不重装
     if (!hadDaemon && existsSync(daemon)) rmSync(daemon, { force: true });
     s.done();
   }
+});
+
+// ---------- 第 2 轮（复核意见）：环境检查要覆盖每一条会重建 web、worker 的路径；.env 的写法骗不过它；真实 IP 设置的校验和回退 ----------
+// 约定（接口）：
+//   - 生产装好以后，.env 被改成不合规（TRON_NETWORK 不是 mainnet、有测试变量）：set、set-key（之后要重建 web、worker）、rollback、update、start
+//     都拒绝（退出码不是 0），不重建 web、worker
+//   - .env 里 "export TRON_NETWORK=nile"、"TRON_NETWORK = nile"、" TRON_NETWORK=nile" 这类写法，docker compose 读出来就是 nile：
+//     topup.sh 要么按 compose 的读法取实际生效的值，要么拒绝这类行；总之不能带着实际是 nile 的配置启动（用真的 docker compose config 核对）
+//   - 真实 IP（平台网关模式，set TOPUP_REAL_IP_FROM / TOPUP_REAL_IP_HEADER）：
+//     · 默认关：装好以后 TOPUP_REAL_IP_HEADER 是 off（或空），realip.conf 里没有 set_real_ip_from、real_ip_header
+//     · TOPUP_REAL_IP_FROM 每一段都要是合法地址；前缀 IPv4 16～32、IPv6 48～128（不写前缀 = 单个地址）；
+//       不能和 Docker 默认的网段重叠：172.17.0.0 ～ 172.31.255.255（Docker 默认地址池；端口转发经过 docker-proxy 时 nginx 看到的来源就在这里面，
+//       信任它等于信任所有人带的请求头）。172.16.0.0/16 里的地址可以（生产机的网卡就在这一段里，平台网关可能也在）
+//     · 填进去以后：写 realip.conf → 在运行中的 nginx 里 nginx -t → 经 nginx 的端口 http://127.0.0.1:$TOPUP_HTTP_PORT/api/health/ 检查；
+//       任何一步失败：deploy.env 的这一项和 realip.conf 都换回原来的，退出码不是 0
+//     · 不合格的值：什么都不改（deploy.env、realip.conf 都不变）
+
+/** 生产装好、在运行 */
+function prodInstalled() {
+  const s = server({ demo: false });
+  const r = s.run(['install', ...PDOM], PROD);
+  assert.equal(r.code, 0, r.out);
+  return s;
+}
+const upCount = (s) => s.read('up').split('\n').filter(Boolean).length;
+
+test('生产：.env 被改成 TRON_NETWORK=nile 以后，set / set-key / update / start 都拒绝，不重建 web、worker', () => {
+  const s = prodInstalled();
+  try {
+    s.seed('.env', 'TRON_NETWORK=nile\n');
+    const n0 = upCount(s);
+    let r = s.run(['set', 'MAIL_TO', 'ops@example.com'], PROD);
+    assert.notEqual(r.code, 0, `set：${r.out}`); assert.equal(upCount(s), n0, 'set 之后没有重建');
+    r = s.run(['set-key', 'TRONGRID_API_KEY'], { ...PROD, TOPUP_DRILL_INPUT: 'k123' });
+    assert.notEqual(r.code, 0, `set-key：${r.out}`); assert.equal(upCount(s), n0, 'set-key 之后没有重建');
+    s.set('rev', V2 + '\n');
+    r = s.run(['update'], PROD);
+    assert.notEqual(r.code, 0); assert.equal(upCount(s), n0, 'update 没有换版本');
+    s.run(['stop'], PROD);
+    r = s.run(['start'], PROD);
+    assert.notEqual(r.code, 0); assert.equal(upCount(s), n0, 'start 没有启动');
+  } finally { s.done(); }
+});
+
+test('生产：.env 里有测试变量以后，set、set-key 也不重建 web、worker', () => {
+  const s = prodInstalled();
+  try {
+    s.seed('.env', 'TEST_MERCHANT_IP_BYPASS=m_qa1\n');
+    const n0 = upCount(s);
+    let r = s.run(['set', 'MAIL_TO', 'ops@example.com'], PROD);
+    assert.notEqual(r.code, 0, r.out); assert.equal(upCount(s), n0);
+    r = s.run(['set-key', 'TRONGRID_API_KEY'], { ...PROD, TOPUP_DRILL_INPUT: 'k123' });
+    assert.notEqual(r.code, 0, r.out); assert.equal(upCount(s), n0);
+    assert.ok(!r.out.includes('m_qa1'), '提示里没有值');
+  } finally { s.done(); }
+});
+
+test('生产：rollback 前也检查 .env（TRON_NETWORK=nile 时不换回旧版本）', () => {
+  const s = prodInstalled();
+  try {
+    s.set('rev', V2 + '\n');
+    assert.equal(s.run(['update'], PROD).code, 0, '前提：先更新到 v2，上一个版本是 v1');
+    s.seed('.env', 'TRON_NETWORK=nile\n');
+    const n0 = upCount(s);
+    const r = s.run(['rollback'], PROD);
+    assert.notEqual(r.code, 0, r.out);
+    assert.equal(upCount(s), n0, '没有换回 v1');
+  } finally { s.done(); }
+});
+
+for (const [name, line] of [
+  ['export TRON_NETWORK=nile', 'export TRON_NETWORK=nile\n'],
+  ['TRON_NETWORK = nile', 'TRON_NETWORK = nile\n'],
+  ['（行首空格）TRON_NETWORK=nile', ' TRON_NETWORK=nile\n'],
+]) {
+  test(`生产：.env 在 mainnet 之后多一行「${name}」→ install、start 不能带着实际是 nile 的配置启动`, { skip: noCompose }, () => {
+    // install：.env 里先有 mainnet，再有这一行
+    let s = server({ demo: false });
+    try {
+      s.seed('.env', `TRON_NETWORK=mainnet\n${line}`);
+      s.run(['install', ...PDOM], PROD);
+      if (upCount(s) > 0) assert.equal(composeCfg(s).services.web.environment.TRON_NETWORK, 'mainnet', 'install 启动了，但 web 实际拿到的不是 mainnet');
+    } finally { s.done(); }
+    // start：装好以后加这一行
+    s = prodInstalled();
+    try {
+      s.run(['stop'], PROD);
+      s.seed('.env', line);
+      const n0 = upCount(s);
+      s.clear('compose-config.json');
+      s.run(['start'], PROD);
+      if (upCount(s) > n0) assert.equal(composeCfg(s).services.web.environment.TRON_NETWORK, 'mainnet', 'start 启动了，但 web 实际拿到的不是 mainnet');
+    } finally { s.done(); }
+  });
+}
+
+test('生产：.env 里「export TEST_ADMIN_TOKEN_SHA256=…」→ start 不能带着它启动', { skip: noCompose }, () => {
+  const s = prodInstalled();
+  try {
+    s.run(['stop'], PROD);
+    s.seed('.env', `export TEST_ADMIN_TOKEN_SHA256=${'ef'.repeat(32)}\n`);
+    const n0 = upCount(s);
+    s.clear('compose-config.json');
+    s.run(['start'], PROD);
+    if (upCount(s) > n0) assert.ok(!composeCfg(s).services.web.environment.TEST_ADMIN_TOKEN_SHA256, 'start 启动了，web 实际拿到了 TEST_ADMIN_TOKEN_SHA256');
+  } finally { s.done(); }
+});
+
+const realip = (s) => s.file('state/nginx/realip.conf');
+
+test('真实 IP 默认关：装好以后 TOPUP_REAL_IP_HEADER 是 off（或空），realip.conf 不信任任何请求头', () => {
+  const s = prodInstalled();
+  try {
+    const h = kv(s.file('deploy.env'), 'TOPUP_REAL_IP_HEADER') || '';
+    assert.ok(h === '' || h === 'off', `默认关：${h}`);
+    assert.doesNotMatch(realip(s), /^\s*(set_real_ip_from|real_ip_header)\b/m);
+  } finally { s.done(); }
+});
+
+test('TOPUP_REAL_IP_FROM：/0、前缀太短、前缀超长、不合法的地址、和 Docker 默认网段重叠 → 拒绝，什么都不改', () => {
+  const s = prodInstalled();
+  try {
+    const before = { d: s.file('deploy.env'), c: realip(s) };
+    for (const v of [
+      '0.0.0.0/0', '::/0', '10.0.0.0/8', '10.0.0.0/15', '2001:db8::/32', '2001:db8::/47',
+      '203.0.113.0/33', '2001:db8::/129', '300.1.2.3', '203.0.113', '198.51.100.1.5', 'gggg::1', '203.0.113.0/',
+      '172.17.0.1', '172.18.0.0/16', '172.31.255.254', '172.16.0.0/12', '172.20.0.0/16',
+      '203.0.113.0/24,172.17.0.1', '203.0.113.0/24,0.0.0.0/0', '203.0.113.0/24,',
+    ]) {
+      const r = s.run(['set', 'TOPUP_REAL_IP_FROM', v], PROD);
+      assert.notEqual(r.code, 0, `${v} 要拒绝：${r.out}`);
+      assert.equal(s.file('deploy.env'), before.d, `${v}：deploy.env 没改`);
+      assert.equal(realip(s), before.c, `${v}：realip.conf 没改`);
+    }
+  } finally { s.done(); }
+});
+
+test('TOPUP_REAL_IP_FROM 合格的值能填（含 172.16.0.0/16 里的地址）；填完在 nginx 里 nginx -t、经 127.0.0.1:8080 查健康检查；两项都填了才写进 realip.conf', () => {
+  const s = prodInstalled();
+  try {
+    for (const v of ['198.51.100.7', '172.16.5.1', '2001:db8:1::/48', '2001:db8::1', '10.20.0.0/16', '203.0.113.0/24,198.51.100.7']) {
+      s.set('docker.log', ''); s.set('curl.log', '');
+      const r = s.run(['set', 'TOPUP_REAL_IP_FROM', v], PROD);
+      assert.equal(r.code, 0, `${v} 要能填：${r.out}`);
+      assert.equal(kv(s.file('deploy.env'), 'TOPUP_REAL_IP_FROM'), v);
+      assert.match(s.read('docker.log'), /nginx -t/, `${v}：填完跑了 nginx -t`);
+      assert.match(s.read('curl.log'), /127\.0\.0\.1:8080\/api\/health\//, `${v}：填完经 nginx 的端口查了健康检查`);
+    }
+    assert.equal(s.run(['set', 'TOPUP_REAL_IP_FROM', '203.0.113.0/24'], PROD).code, 0);
+    assert.equal(s.run(['set', 'TOPUP_REAL_IP_HEADER', 'X-Forwarded-For'], PROD).code, 0);
+    assert.match(realip(s), /^set_real_ip_from 203\.0\.113\.0\/24;$/m);
+    assert.match(realip(s), /^real_ip_header X-Forwarded-For;$/m);
+  } finally { s.done(); }
+});
+
+test('真实 IP：填完 nginx -t 失败或经 nginx 的健康检查失败 → 换回原来的值和 realip.conf，退出码不是 0', () => {
+  const s = prodInstalled();
+  try {
+    assert.equal(s.run(['set', 'TOPUP_REAL_IP_FROM', '203.0.113.0/24'], PROD).code, 0);
+    const ok1 = { d: s.file('deploy.env'), c: realip(s) };
+    for (const [fail, key, val] of [
+      ['nginx-t-fail', 'TOPUP_REAL_IP_HEADER', 'X-Forwarded-For'],
+      ['gw-health-fail', 'TOPUP_REAL_IP_HEADER', 'X-Real-IP'],
+      ['nginx-t-fail', 'TOPUP_REAL_IP_FROM', '198.51.100.7'],
+      ['gw-health-fail', 'TOPUP_REAL_IP_FROM', '198.51.100.8'],
+    ]) {
+      s.set(fail, '1');
+      const r = s.run(['set', key, val], PROD);
+      s.clear(fail);
+      assert.notEqual(r.code, 0, `${fail} + ${key}=${val}：要报失败：${r.out}`);
+      assert.equal(kv(s.file('deploy.env'), key), kv(ok1.d, key), `${fail}：${key} 换回原来的值`);
+      assert.equal(realip(s), ok1.c, `${fail}：realip.conf 换回原来的`);
+    }
+  } finally { s.done(); }
 });

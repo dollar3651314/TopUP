@@ -7,6 +7,7 @@
 //   - 第三个参数只认 production、staging；健康检查的 env 和参数不一致要报错
 //   - 等新版本上线的最长时间可以用 SMOKE_WAIT_S（秒）改短（测试用；默认值开发自定）
 //   - 地址不出现在输出里（地址放在仓库密钥里）
+//   - 第 2 轮：CSP 按真实的响应头名认（行首是 content-security-policy:，不算 content-security-policy-report-only，也不算别的响应头值里的这几个字）
 // 做法：本机起一个"像生产"的假服务器（各接口按 e2e/smoke-staging.sh 检查的样子返回），先跑一遍记下 ❌ 的行；
 // 再每次只改一处（测试环境标识、env、TRON 网络、提交号、原型标识），脚本必须多出至少一行 ❌、退出码不是 0。
 import test from 'node:test';
@@ -31,7 +32,11 @@ function fakeProd(over = {}) {
   const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     const p = u.pathname; const q = u.searchParams;
-    const h = { 'content-security-policy': "default-src 'self'", 'strict-transport-security': 'max-age=31536000', 'x-content-type-options': 'nosniff' };
+    const h = { 'strict-transport-security': 'max-age=31536000', 'x-content-type-options': 'nosniff' };
+    // CSP：默认是真正生效的 content-security-policy；csp: 'report-only' 只给只报告不拦截的那个；csp: 'mention' 没有 CSP，但别的响应头里写着这个名字
+    if (!o.csp) h['content-security-policy'] = "default-src 'self'";
+    else if (o.csp === 'report-only') h['content-security-policy-report-only'] = "default-src 'self'";
+    else if (o.csp === 'mention') h['x-qa-note'] = 'content-security-policy: none';
     const send = (code, body, type = 'text/html; charset=utf-8') => { res.writeHead(code, { ...h, 'content-type': type }); res.end(req.method === 'HEAD' ? undefined : body); };
     const json = (code, v) => send(code, JSON.stringify(v), 'application/json');
     if (p === '/api/health/') return json(200, health());
@@ -91,6 +96,9 @@ for (const [name, over] of [
   ['健康检查 env 是 staging', { env: 'staging' }],
   ['健康检查 TRON 是 nile（不是主网）', { tron: 'nile' }],
   ['提交号对不上（服务器还是旧版本）', { commit: 'def5678' }],
+  // 第 2 轮：CSP 要按真实的响应头名（行首、不是 report-only）认
+  ['只有 Content-Security-Policy-Report-Only（不拦截），没有真正的 CSP', { csp: 'report-only' }],
+  ['没有 CSP，只是别的响应头的值里写着 content-security-policy', { csp: 'mention' }],
 ]) {
   test(`生产：${name} → 多出 ❌、退出码不是 0、输出里没有地址`, { timeout: 180_000 }, async () => {
     const good = await goodRun();
