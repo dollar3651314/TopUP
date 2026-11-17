@@ -1,0 +1,10 @@
+# 每 5 分钟检查（deploy/kit/topup.sh watch），由 topup-watch.timer 触发
+[Unit]
+Description=TopUP 每 5 分钟检查
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/topup/deploy/kit/topup.sh watch
+TimeoutStartSec=5min

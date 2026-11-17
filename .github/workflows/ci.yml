@@ -1,0 +1,328 @@
+# 每个 PR 的自动检查：不通过的 PR 不能合并到 staging（测试环境）和 main（生产）。
+# 合并到 staging：image → staging-smoke（测试环境）；合并到 main：image-production → promote-production（管理员批准）→ production-smoke（生产）。
+# 不需要任何密钥：数据库和 Redis 用 GitHub 提供的容器，链上用 TronGrid 替身和本地 anvil，邮件用本地模拟 SMTP。
+# 分支保护只把汇总 job "ci-ok" 设为"必须通过"。
+# 系统固定 ubuntu-24.04：ubuntu-latest 已是 26.04，锁定的 Playwright 1.56 不支持在 26.04 上安装浏览器；
+# 固定系统版本不改测试依赖，比升级 Playwright 稳（升级要连带复核全部端到端用例）。
+name: ci
+on:
+  pull_request:
+    branches: [staging, main]
+  push:
+    branches: [staging, main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  # 单元测试：内嵌 Postgres 跑一遍，真实 Postgres 16 + Redis 7 再跑一遍；项目索引检查
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: 项目索引检查
+        run: node scripts/check-project-index.mjs
+      - name: 单元测试（内嵌 Postgres）
+        run: npm test
+      - name: 单元测试（真实 Postgres 16 + Redis 7，和服务器同一个驱动）
+        env:
+          TEST_DATABASE_URL: postgres://postgres:ci@127.0.0.1:5432/postgres
+          TEST_REDIS_URL: redis://127.0.0.1:6379/0
+        run: npm test
+
+  # 端到端测试：构建页面，在本地整套环境（和服务器同一份代码）上跑全部用例；收付款和 worker 用真实 Postgres
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            site/package-lock.json
+            e2e/package-lock.json
+      - run: npm ci
+      - name: 构建页面（先检查中英文案结构）
+        run: cd site && npm ci && npm run build
+      - name: 浏览器缓存
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4（v4.3.0）
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('e2e/package-lock.json') }}
+      # Playwright 1.56 在 Node 26 下解压浏览器会卡住（本地复现：Node 22 正常、Node 26 卡住），浏览器用 Node 22 安装，测试仍在 Node 26 上跑
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
+        with:
+          node-version: 22
+      - name: 安装测试浏览器（Node 22）
+        timeout-minutes: 15
+        run: cd e2e && npm ci && npx playwright install --with-deps chromium
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
+        with:
+          node-version: 26
+      - name: 端到端测试
+        env:
+          E2E_DATABASE_URL: postgres://postgres:ci@127.0.0.1:5432/postgres
+        run: cd e2e && npx playwright test
+      - name: 失败时保存截图和日志
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5（v5.0.0）
+        with:
+          name: e2e-results
+          path: |
+            e2e/test-results/
+            e2e/.tmp/*.log
+          retention-days: 7
+
+  # 智能合约 + 本地链端到端：原样源码核对（含逐字节对照上游）→ forge build → forge test（单元、模糊、不变量、CREATE2 向量）
+  # → 起 anvil，用编译产物部署合约，跑后端钱包的端到端（test/anvil/：分配地址 → 扫链入账 → 凑批 → 确认 → 归集）
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1（v1.9.2）
+        with:
+          version: v1.5.1
+      # 不只核对仓库里的 sha256 清单（清单和源码可以一起被改），还从 GitHub 拉上游固定提交逐字节比较
+      - name: 原样源码核对（sha256 清单 + 逐字节对照上游 BitGo 9566bcd、OpenZeppelin v5.0.0）
+        run: cd contracts && bash script/check-vendor.sh --upstream
+      - name: forge build
+        run: cd contracts && forge build
+      - name: forge test
+        run: cd contracts && forge test -vvv
+      # TRON 派生版合约（src/tron/）的单测：单独一个 profile（test-tron/），不影响上面以太坊版的编译和测试
+      - name: forge test（TRON 派生版合约，FOUNDRY_PROFILE=tron）
+        run: cd contracts && FOUNDRY_PROFILE=tron forge test -vvv
+      # 批量打款合约 BatchPayout（第 3 批）：单元、模糊（≥ 10,000 次）、不变量在 test-payout/；覆盖率行、函数、分支、语句都要 100%
+      - name: forge test（批量打款合约，FOUNDRY_PROFILE=payout）
+        run: cd contracts && FOUNDRY_PROFILE=payout forge test -vvv
+      - name: 覆盖率 100%（BatchPayout）
+        run: cd contracts && FOUNDRY_PROFILE=payout bash script/check-coverage.sh src/BatchPayout.sol
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: anvil 本地链端到端（test/anvil/）
+        # 批量打款的端到端还要 test-payout/ 里的测试代币（out-payout/）
+        env:
+          TOPUP_ANVIL_RPC: http://127.0.0.1:18545
+        run: |
+          (cd contracts && FOUNDRY_PROFILE=payout forge build)
+          anvil --port 18545 --silent &
+          for i in $(seq 1 30); do curl -sf -X POST -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId"}' "$TOPUP_ANVIL_RPC" >/dev/null && break; sleep 1; done
+          # 几个文件共用同一条 anvil 和同一个部署账户：一个一个跑，免得同时发交易抢同一个 nonce（replacement transaction underpriced）
+          node --test --test-concurrency=1 test/anvil/*.test.js
+
+  # TRON：用 TRON 官方编译器编译（编译器 sha256 写死）→ 起本机 TRON 私链（tronbox/tre，镜像按摘要固定）→ 跑 Nile 验证脚本的全部场景
+  # 私链账户是容器启动时自己生成的、只在这个容器里有效的测试账户，不是任何真实或测试网账户；不打印、不保存。
+  tron-local:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5（v5.0.0）
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: TRON 编译 + 离线地址计算
+        run: node scripts/tron-nile/verify.mjs --offline --report tron-offline-report.json
+      - name: 本机 TRON 私链上跑全部验证场景
+        run: |
+          docker run -d --name tre -p 9090:9090 tronbox/tre@sha256:f4332e11df12a9f360639a4546fd046593909630fda48af00b30410c144342f0 >/dev/null
+          for i in $(seq 1 90); do docker logs tre 2>&1 | grep -qE '^\(0\) [0-9a-f]{64}$' && curl -sf -X POST http://127.0.0.1:9090/wallet/getnowblock >/dev/null && break; sleep 2; done
+          TOPUP_NILE_PRIVATE_KEY="$(docker logs tre 2>&1 | grep -m1 -E '^\(0\) [0-9a-f]{64}$' | awk '{print $2}')" \
+            node scripts/tron-nile/verify.mjs --node http://127.0.0.1:9090 --report tron-local-report.json
+      # 后端 TRON 合约钱包端到端（test/tron-local/）：同一个私链，分配地址 → 转账 → 扫链入账 → 凑批 → 确认 → 归集进 parent
+      - name: 本机 TRON 私链上的钱包端到端（test/tron-local/）
+        run: |
+          TOPUP_TRON_LOCAL_NODE=http://127.0.0.1:9090 \
+          TOPUP_TRON_LOCAL_PRIVATE_KEY="$(docker logs tre 2>&1 | grep -m1 -E '^\(0\) [0-9a-f]{64}$' | awk '{print $2}')" \
+            node --test test/tron-local/*.test.js
+      - name: 保存报告
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5（v5.0.0）
+        with:
+          name: tron-local-report
+          path: tron-*-report.json
+          retention-days: 7
+
+  # 汇总：任何一个检查失败或被取消就失败
+  ci-ok:
+    needs: [unit, e2e, contracts, tron-local]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: 汇总结果
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "有检查失败或被取消"; exit 1
+          fi
+
+  # 合并到 staging 且上面的检查全部通过后：构建测试环境的镜像，推到 GitHub 镜像仓库（标签 = 完整提交号，并移动 staging 标签）。
+  # 测试服务器每分钟自己来拉（deploy/kit/topup.sh update），GitHub 不需要、也不能登录服务器。PR 上不运行。
+  image:
+    needs: [ci-ok]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - name: 构建并推送镜像（APP_ENV=staging）
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/topup"
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --build-arg APP_ENV=staging --build-arg GIT_COMMIT="$GITHUB_SHA" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$image:$GITHUB_SHA" -t "$image:staging" .
+          docker push -q "$image:$GITHUB_SHA"
+          docker push -q "$image:staging"
+          echo "已推送 $image:$GITHUB_SHA（staging 标签已移动）" >> "$GITHUB_STEP_SUMMARY"
+
+  # 镜像推送后：等测试服务器换成这个提交（健康检查返回的 commit），再跑测试环境冒烟检查（e2e/smoke.sh … staging）。
+  # 地址在仓库密钥 STAGING_URL（不写在仓库里、日志里自动遮盖）；没有配置时跳过。手动重跑用 staging-check.yml。
+  staging-smoke:
+    needs: [image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STAGING_URL: ${{ secrets.STAGING_URL }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - name: 测试环境检查
+        run: |
+          if [ -z "$STAGING_URL" ]; then echo "::warning::仓库密钥 STAGING_URL 还没有配置，跳过"; exit 0; fi
+          bash e2e/smoke.sh "$STAGING_URL" "${GITHUB_SHA::7}" staging
+
+  # ---------- 生产（合并到 main 后）：构建 → 管理员批准 → 移动 :production → 冒烟 ----------
+  # 生产镜像：合并到 main 且上面的检查全部通过后构建 APP_ENV=production 的镜像，只推 :prod-<提交号>。
+  # 这一步不影响生产：生产服务器只跟 :production 标签（deploy/kit/topup.sh update），这里不碰它，也不碰测试环境的标签。
+  image-production:
+    needs: [ci-ok]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    # 推送后的镜像摘要：promote-production 按摘要改 :production（标签被人挪过也不会推错镜像）
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - name: 构建并推送生产镜像（APP_ENV=production，标签 prod-<提交号>）
+        id: push
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/topup"
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --build-arg APP_ENV=production --build-arg GIT_COMMIT="$GITHUB_SHA" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.source="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$image:prod-$GITHUB_SHA" .
+          docker push -q "$image:prod-$GITHUB_SHA"
+          digest=$(docker buildx imagetools inspect "$image:prod-$GITHUB_SHA" --format '{{.Manifest.Digest}}')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::取不到镜像摘要"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "已推送 $image:prod-$GITHUB_SHA（$digest；还没有上生产：等 promote-production 批准）" >> "$GITHUB_STEP_SUMMARY"
+
+  # 上生产：GitHub 环境 production（Required reviewers = 管理员）批准后才运行。不重新构建：把 :production 指到刚才那个 :prod-<提交号>
+  # （镜像仓库里直接改标签，内容和上一步推的一模一样）。生产服务器每分钟自己来拉 :production，起不来自动换回上一个版本。
+  promote-production:
+    needs: [image-production]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # PRODUCTION_PROMOTE_GUARD 只放在 GitHub 环境 production 的环境密钥里（值随便，不打印）：环境没建好时 GitHub 会自动建一个
+      # 没有保护、没有这个密钥的同名环境，这里读不到就失败，不会不经批准就上生产
+      - name: 把 :production 指到刚推的镜像（按摘要，不重新构建）
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRODUCTION_PROMOTE_GUARD: ${{ secrets.PRODUCTION_PROMOTE_GUARD }}
+          DIGEST: ${{ needs.image-production.outputs.digest }}
+        run: |
+          [ -n "$PRODUCTION_PROMOTE_GUARD" ] || { echo "::error::GitHub 环境 production 里没有环境密钥 PRODUCTION_PROMOTE_GUARD（环境没建好？），不上生产"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::镜像摘要格式不对（要 sha256:[0-9a-f]{64}），不上生产"; exit 1; }
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/topup"
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create -t "$image:production" "$image@$DIGEST"
+          docker buildx imagetools inspect "$image:production"
+          echo "生产标签已指到 $image@$DIGEST（提交 $GITHUB_SHA）" >> "$GITHUB_STEP_SUMMARY"
+
+
+  # 移动 :production 之后：等生产服务器换成这个提交，再跑生产冒烟检查（e2e/smoke.sh … production）。
+  # 地址在仓库密钥 PRODUCTION_URL（不写在仓库里、日志里自动遮盖）；没有配置时跳过。
+  production-smoke:
+    needs: [promote-production]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5（v5.1.0）
+        with:
+          persist-credentials: false
+      - name: 生产检查
+        run: |
+          if [ -z "$PRODUCTION_URL" ]; then echo "::warning::仓库密钥 PRODUCTION_URL 还没有配置，跳过"; exit 0; fi
+          bash e2e/smoke.sh "$PRODUCTION_URL" "${GITHUB_SHA::7}" production
+

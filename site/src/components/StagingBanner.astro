@@ -1,0 +1,15 @@
+---
+// 测试环境的标识：和原型的黄色标识区分开，用蓝色
+import type { Lang } from '../lib/i18n';
+interface Props { lang: Lang }
+const { lang } = Astro.props;
+const text = lang === 'en'
+  ? 'Staging environment for acceptance testing. Uses separate test data; do not enter real client information.'
+  : '测试环境，用于验收。使用独立的测试数据，请不要填写真实客户资料。';
+---
+<div class="staging-banner" role="note" data-staging-banner>
+  <strong>测试环境 STAGING</strong> · {text}
+</div>
+<style>
+  .staging-banner { background: #1c7ed6; color: #fff; text-align: center; font-size: 0.875rem; padding: 6px 16px; font-weight: 500; }
+</style>

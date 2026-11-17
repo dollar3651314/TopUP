@@ -1,0 +1,17 @@
+---
+// 占位标志：品牌定了再换（工作名称 TopUP）
+interface Props { size?: number; wordmark?: boolean }
+const { size = 32, wordmark = true } = Astro.props;
+---
+<span class="logo">
+  <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+    <rect x="1" y="1" width="30" height="30" rx="8" fill="#12B886" />
+    <path d="M16 23V10M10 15l6-6 6 6" fill="none" stroke="#0B1F3A" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" />
+  </svg>
+  {wordmark && <span class="wordmark">Top<span>UP</span></span>}
+</span>
+<style>
+  .logo { display: inline-flex; align-items: center; gap: 10px; }
+  .wordmark { font-weight: 800; font-size: 1.3rem; letter-spacing: -0.02em; color: inherit; }
+  .wordmark span { color: #12b886; }
+</style>

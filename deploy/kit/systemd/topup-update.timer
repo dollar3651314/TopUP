@@ -1,0 +1,11 @@
+# 自动更新：每分钟看一次本环境的镜像标签（测试环境 :staging、生产 :production）有没有新版本
+[Unit]
+Description=TopUP 自动更新
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

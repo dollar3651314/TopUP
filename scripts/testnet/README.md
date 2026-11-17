@@ -1,0 +1,124 @@
+# 测试网合约部署（Sepolia、BSC 测试网、TRON Nile）
+
+测试环境要用的合约由 GitHub Actions 部署：`.github/workflows/testnet-deploy.yml` → `scripts/testnet/deploy.mjs`。部署账户的私钥只放在 GitHub 环境 `testnet` 的环境密钥里，每次运行都要管理员在 GitHub 上批准。部署出的地址（公开信息）写进运行摘要和产物 `testnet-deploy`，由管理员填进 `config/wallets.json` 的 `staging` 一节，开 PR、自己合并（这个流程不改 `config/wallets.json`）。
+
+```mermaid
+flowchart LR
+  A["管理员：环境 testnet<br/>填私钥、批准运行"] --> W["testnet-deploy 流程"]
+  W --> E["Sepolia、BSC 测试网<br/>forge 只模拟出交易 → 节点按链上规则模拟、定 gas<br/>→ 逐笔发出、核对回执"]
+  W --> T["Nile<br/>TRON 官方编译器 + deploy.mjs"]
+  E & T --> C["用服务器自己的代码核对<br/>（链上参数、充值地址算法）"]
+  C --> R["运行摘要 + 产物 testnet-deploy<br/>（wallets.json staging 一节）"]
+  R --> P["管理员填进 config/wallets.json<br/>开 PR、自己合并"]
+```
+
+## 1. 部署什么
+
+| 链 | 合约（按顺序） | 说明 |
+|---|---|---|
+| 以太坊 Sepolia、BSC 测试网 | BitGo `ForwarderV4`（实现合约）→ `ForwarderFactoryV4` → `SweepBatcher` → `transferOwnership(owner)` → 测试 USDT（可选）→ `BatchPayout` + `transferOwnership(owner)`（可选） | `contracts/script/DeployTestnet.s.sol`；和主网的 `Deploy.s.sol` 同样的顺序和部署后核对（`SweepCheck`）。两条链用同一个部署账户、同一个起始 nonce，地址相同 |
+| TRON Nile | `ForwarderTron` → `ForwarderFactoryTron` → `SweepBatcherTron` → `transferOwnership(owner)` → 测试 USDT（可选） | TRON 官方编译器 0.8.20（`scripts/tron-nile/compile.mjs`，sha256 写死） |
+
+- **测试 USDT**（`contracts/script/testnet/TestUSDT.sol`，`tUSDT`）：小数位数和主网 USDT 一样（Sepolia、Nile 6 位，BSC 测试网 18 位）；TRON 版的 `transfer` 成功也返回 `false`（像 TRON 主网 USDT）；谁都可以 `mint`（一次最多 1 亿个），部署时先给部署账户 1,000,000 个。Sepolia、BSC 测试网没有官方测试 USDT，所以默认部署；Nile 有官方测试 USDT（地址已在 `config/wallets.json`），不部署时 TRON 用它。
+- **BatchPayout**：只有填了"批量打款热钱包"、并且这个提交里有 `contracts/src/BatchPayout.sol`（第 3 批合并之后）才部署。
+- **只部署批量打款**（`TESTNET_ONLY_PAYOUT=1`，手动运行时勾选 only_payout）：归集合约已经部署过、只补 BatchPayout 时用。只发两笔：`BatchPayout(热钱包)` 创建 → `transferOwnership(owner)`；同样由 `evm-send.mjs` 整套预演、逐笔发出核对回执。上链后连链只读核对：`isPayer(热钱包)` 为真、链上代码哈希 = 服务器启动核对用的常量（`server/wallet/payout.js` 的 `BATCH_PAYOUT_CODE_HASH`，同一个算法）、`pendingOwner` = owner。只能是 eth、bsc（TRON 打款不走合约）；要填热钱包和 `EVM_PARENT`，不用发起账户；测试 USDT 不部署。结果里 `staging.evm.<链>` 只有 `hot`、`payout` 两项，其他字段不动。owner 调用 `acceptOwnership()` 之前，服务器启动核对会判"owner 不一致"、这条链的批量打款不开通。
+- **owner**：批量合约（和 BatchPayout）的所有者先交给 owner（默认 = parent），owner 要自己调用一次 `acceptOwnership()` 才生效。不接受不影响归集（parent、发起账户已经写在合约里），只影响以后增删发起账户。
+- 部署完的核对（全部通过才算成功）：Foundry 部署脚本里的字节码和参数核对；地址上有代码；**服务器自己的钱包层**（`server/wallet/`，和服务器启动时同一条路径）按要填进 `config/wallets.json` 的参数开通这条链，链上核对 parent / factory / implementation 结果 `ok`；用户 1 的充值地址按服务器的算法算出来 = 批量合约链上算出来的。
+- **ETH / BSC 的交易怎么发**（2026-11-14 改）：forge 只用来算地址、跑部署脚本里的核对、写出要发的交易，**不让 forge 广播**。原因：forge 1.5.1 用自己内置的 EVM 估 gas，不认识 Sepolia 2026-10-06 启用的新硬分叉（`anvil --hardfork amsterdam` 直接报 unimplemented），新规则下建合约贵很多——ForwarderV4 在 Sepolia 上节点估算要 14,028,265 gas，forge 只给了 2,561,629，第一次运行第一笔就耗尽 gas 失败。现在由 `evm-send.mjs` 发：
+  1. 发之前用节点的 `eth_simulateV1` 按链上规则把整套交易跑一遍（不上链）：有一笔会失败、超过单笔上限 16,777,216（2^24），或部署账户余额付不起"全部 gas limit × gas 价格"，就**一笔都不发**；节点不支持 `eth_simulateV1` 时只估第一笔。
+  2. 每笔发之前用节点的 `eth_estimateGas`（前一笔已上链后的状态）× 1.25 定 gas limit（不超过 2^24）；gas 价格 = max(`eth_gasPrice`, 2 × baseFee + 小费)，环境变量 `TESTNET_EVM_GAS_PRICE_GWEI` 填了就用它。
+  3. 每笔发出后等回执（最多 10 分钟）：status 不是 1、合约地址和 forge 算的不一样、10 分钟没上链，都**立即停**，错误里写清楚第几笔、用了多少 gas、交易链接、部署账户现在的 nonce；已经发出的交易也写进 `deployment.json`。
+  4. 全部上链后用 `contracts/script/VerifyDeployment.s.sol` 连链只读核对一遍（字节码、参数、发起账户、所有者、用户 1 的地址），再做下面的服务器钱包层核对。
+  - 2026-11-14 在 Sepolia 上按链上规则模拟整套 7 笔（含测试 USDT、BatchPayout）：gas 合计约 2,833 万（ForwarderV4 1,392 万、工厂 183 万、SweepBatcher 449 万、两次 transferOwnership 各 13 万、测试 USDT 378 万、BatchPayout 405 万），按 × 1.25 的 gas limit 合计约 3,479 万；gas 价格 1 gwei 时最多要约 0.035 ETH。
+- 发送部分自己也拒绝主网链 ID（1、56），不依赖前面的检查；"对齐 nonce"一次最多 10 笔；发送出错或节点返回的交易号不对时，这笔（本地算的交易号、nonce）也写进 `deployment.json`。
+- 安全措施：只连测试网（ETH / BSC 按链 ID，主网 1、56 直接拒绝；TRON 先查 0 号区块，只准 Nile）；parent 不能是部署账户；私钥只从环境变量读，不进命令行参数，forge 不开调用轨迹（失败时轨迹会把私钥打成十进制），输出里出现的私钥和节点地址一律遮盖；错误信息、`deployment.json`、`summary.md`、运行摘要写出前也整份过一遍同一张遮盖表（私钥十六进制和十进制、两个节点地址以及地址里 8 位以上的每一段、TronGrid key），节点地址格式不对时错误里只写"格式不对"、不带地址。
+
+## 2. 管理员在 GitHub 上配置（只做一次）
+
+仓库 Settings → Environments → New environment，名字 **`testnet`**：
+
+1. **Deployment protection rules**：勾选 **Required reviewers**，选自己（每次运行都要你批准）；**不要**勾 Prevent self-review（你自己点运行时也要能自己批准）。
+2. **Deployment branches and tags**：选 **Selected branches and tags**，加 `main`、`staging`、`testnet-run/**` 三条规则（只有这几个分支上的流程能用这个环境）。
+3. **Environment secrets**（值只有你填，智能体只核对名字）：
+
+| 名字 | 必填 | 内容 |
+|---|---|---|
+| `TOPUP_TESTNET_DEPLOYER_KEY` | 是 | 部署账户私钥（64 位十六进制，可以带 0x）。**新建一个只用于测试网的账户**，不要用任何主网账户；ETH、BSC、TRON 用同一把（同一个私钥在 MetaMask 里是 0x 地址，在 TronLink 里是 T 地址） |
+| `TESTNET_ETH_RPC_URL` | 否 | Sepolia 节点地址（例如 Alchemy 的 HTTPS 地址，可以带 key）；不填用公共节点 `ethereum-sepolia-rpc.publicnode.com` |
+| `TESTNET_BSC_RPC_URL` | 否 | BSC 测试网节点地址；不填用公共节点 `bsc-testnet-rpc.publicnode.com` |
+| `TRONGRID_API_KEY` | 否 | TronGrid API Key；不填可能被限流（脚本会退避重试） |
+
+4. **Environment variables**（公开地址，不是密钥；手动运行时页面上填了就用页面上的）：
+
+| 名字 | 内容 |
+|---|---|
+| `TESTNET_EVM_PARENT` | ETH / BSC 冷钱包 parent：你的**测试网**地址（测试网可以先用普通地址，主网必须是 Safe） |
+| `TESTNET_EVM_OPERATOR` | ETH / BSC 归集发起账户：测试服务器上 `sudo topup gen-operator` 显示的 0x 地址 |
+| `TESTNET_TRON_PARENT` | TRON 冷钱包 parent：你的 Nile 测试地址（T 开头） |
+| `TESTNET_TRON_OPERATOR` | TRON 归集发起账户：`sudo topup gen-operator` 显示的 T 地址 |
+| `TESTNET_PAYOUT_PAYER` | （第 3 批之后）批量打款热钱包地址；空着不部署 BatchPayout |
+| `TESTNET_ONLY_PAYOUT` | （可选）`1` = 推送触发时只部署 BatchPayout（同时把 `TESTNET_CHAINS` 设成 `eth`，`TESTNET_EVM_START_NONCE` 设成部署账户现在的 nonce） |
+| `TESTNET_CHAINS` | （可选）推送触发时部署哪几条链，默认 `eth,bsc,tron` |
+| `TESTNET_EVM_START_NONCE` | （可选）推送触发时 EVM 部署账户的起始 nonce，默认 `0` |
+| `TESTNET_EVM_ALIGN_NONCE` | （可选）`1` = 某条 EVM 链的 nonce 小于起始 nonce 时先给自己转 0 对齐 |
+| `TESTNET_EVM_GAS_PRICE_GWEI` | （可选）ETH / BSC 的 gas 价格（gwei）；不填按节点 |
+
+5. 给部署账户领测试币：Sepolia ETH、BSC 测试网 BNB（官方水龙头可能要求领币地址在主网有少量余额，未核实）、Nile TRX（https://nileex.io/join/getJoinPage）。TRON 整套在本机私链上实测约 187 万能量，按 Nile 当前的能量单价，脚本开始前会估算要多少 TRX，不够就不开始。
+
+## 3. 运行
+
+- **手动运行**（这个文件进了默认分支 `main` 之后）：Actions → testnet-deploy → Run workflow，选分支（`staging`）、填参数 → 你在运行页面点 **Review deployments → Approve**。
+- **推送触发**（不用等进 `main`）：推送到 `testnet-run/` 开头的分支（例如 `testnet-run/2026-11-15`），参数用上面的环境变量；同样要你批准。
+- 结果：运行页面的摘要里有要填进 `config/wallets.json` 的 `staging` 一节（JSON）和每笔交易的浏览器链接；产物 `testnet-deploy` 里有 `deployment.json`、`summary.md`（只有公开地址和交易号）。失败时也会写出已经部署了的部分。
+- **只部署批量打款**（推送触发）：环境 `testnet` 的变量设 `TESTNET_ONLY_PAYOUT=1`、`TESTNET_CHAINS=eth`、`TESTNET_PAYOUT_PAYER=<热钱包 0x 地址>`、`TESTNET_EVM_START_NONCE=<部署账户在 Sepolia 上现在的 nonce>`（`TESTNET_EVM_PARENT` 沿用），推送到 `testnet-run/` 分支、批准。部署完把变量 `TESTNET_ONLY_PAYOUT` 删掉或改成 `0`，以后推送才会照常部署整套。
+- 重新部署：EVM 部署账户的 nonce 已经不是 0，运行时把"起始 nonce"填成当前值（两条链要相同）；结果里的 `ver` 会自动加 1（换参数要加版本号）。
+- **两条 EVM 链 nonce 不一样时**（例如 Sepolia 第一次失败用掉了 nonce 0，现在是 1；BSC 测试网还是 0）：起始 nonce 填两条链里**较大**的那个（这里是 1），勾选"对齐 nonce"（推送触发时设环境变量 `TESTNET_EVM_ALIGN_NONCE=1`）。脚本发现某条链的 nonce 小于起始 nonce，先给自己转 0（只花一点手续费）把它推上去，再部署，两条链的地址就一样。nonce 已经大于起始 nonce 的链会报错（nonce 不能往回退），这时起始 nonce 改填更大的值，两条链都对齐到它。
+- 中途失败：错误里会写部署账户现在的 nonce。已经上链的合约不能接着用（后面的合约按 nonce 依次部署，地址连在一起），下次起始 nonce 填这个新值，整套重新部署；另一条链用"对齐 nonce"跟上。
+
+## 4. 本机演练（不需要任何真实账户）
+
+用 anvil（Foundry 自带）当 Sepolia、BSC 测试网，tronbox/tre 当 Nile；私钥用本机私链容器自己生成的测试账户。
+
+```bash
+npm ci && (cd contracts && forge build)
+anvil --port 18601 & anvil --port 18602 &
+docker run -d --name tre -p 9090:9090 tronbox/tre   # 等日志里出现 Available Accounts
+K=$(docker logs tre 2>&1 | grep -m1 -E '^\(0\) [0-9a-f]{64}$' | awk '{print $2}')
+# 在两个 anvil 上给这个账户转一点 ETH（cast send --private-key <anvil 0 号公开测试私钥> ... --value 10ether）
+# 想同时演练"起始 nonce 不是 0"和"对齐 nonce"：cast rpc anvil_setNonce <部署账户> 0x1 --rpc-url http://127.0.0.1:18601，再加 EVM_START_NONCE=1 EVM_ALIGN_NONCE=1
+# anvil 也可以 --fork-url 一个 Sepolia 公共节点（加 --chain-id 31337），但 anvil 1.5.1 用的还是旧规则，gas 数字和 Sepolia 不一样
+TOPUP_TESTNET_DEPLOYER_KEY=$K TESTNET_LOCAL=1 \
+  TESTNET_ETH_RPC_URL=http://127.0.0.1:18601 TESTNET_BSC_RPC_URL=http://127.0.0.1:18602 TESTNET_TRON_NODE=http://127.0.0.1:9090 \
+  EVM_PARENT=<0x 地址> EVM_OPERATOR=<0x 地址> TRON_PARENT=<T 地址> TRON_OPERATOR=<T 地址> \
+  node scripts/testnet/deploy.mjs
+```
+
+`TESTNET_LOCAL=1` 只允许本机地址（127.0.0.1 / localhost）上的链 ID 31337 和本机 TRON 私链；GitHub 上不设。
+
+## 5. 测试网充值（归集手续费对比验收用）
+
+验收"一个个归集 vs 一批归集的手续费"要每条链一批**新的**充值地址、每个先有 100 个测试 USDT。`.github/workflows/testnet-fund.yml` 代替人工一笔笔转账，管理员只需要在 GitHub 上批准两次。
+
+```mermaid
+flowchart LR
+  A["第 1 步 addresses<br/>环境 staging-e2e（批准）"] -->|"测试商户开放 API<br/>建单指定链 → 读客户地址"| L["清单：客户标识 + 充值地址<br/>（只有公开信息）"]
+  L --> B["第 2 步 fund<br/>环境 testnet（批准）"]
+  B -->|"部署账户 transfer 测试 USDT<br/>逐笔回执 + 核对余额"| R["运行摘要 + 产物<br/>客户标识、地址、交易号"]
+```
+
+- **第 1 步**（`scripts/testnet/fund-addresses.mjs`，环境 `staging-e2e`，用仓库密钥 `STAGING_URL` 和环境密钥 `STAGING_E2E_MERCHANT_KEY`、`STAGING_E2E_MERCHANT_SECRET`）：开放 API 里生成充值地址的入口是建单时指定链（`POST /api/v1/orders/`，先建客户、再生成地址、再建单），之后用 `GET /api/v1/customers/` 读这条链使用中的地址为准（测试商户没开订单模式时建单返回 403 `order_mode_disabled`，但地址已经生成）。客户标识 `fee-ac3-<链>-<运行号>-<序号>`，订单号同客户标识，Idempotency-Key 固定：重跑不会多建。
+- **第 2 步**（`scripts/testnet/fund-send.mjs`，环境 `testnet`，用 `TOPUP_TESTNET_DEPLOYER_KEY`、`TESTNET_ETH_RPC_URL`、`TRONGRID_API_KEY`）：部署账户（部署测试 USDT 时铸给它 1,000,000 个）给每个地址转 AMOUNT 个。以太坊走 `evm-send.mjs`（整套模拟、余额不够一笔不发、gas × 1.25、逐笔回执）；TRON 走 `scripts/tron-nile/tron-node.mjs`。每笔之后核对收款地址的代币余额正好增加 AMOUNT（TRON 测试 USDT 的 transfer 成功也返回 false，只看回执不够）；已经有 ≥ AMOUNT 余额的地址跳过（重跑第 2 步不会重复打）；一笔失败立即停。
+- **硬性限制**（`scripts/testnet/fund-lib.mjs`，单元测试 `test/testnet-fund.test.js`）：以太坊只准链 ID 11155111（主网 1、56 和其他链都拒绝），TRON 只准 Nile（0 号区块核对，本机私链也不准）；代币只准 staging 的测试 USDT（写死在脚本里，和 `config/wallets.json` 对照，主网 USDT 一律拒绝）；每条链最多 50 个地址、每个最多 1000 个；地址逐个核对格式（以太坊大小写混合要校验和对）、不重复、不是代币合约或部署账户。节点地址、私钥、TronGrid key、测试环境地址、商户 Secret 写出前一律遮盖。
+- **运行**：
+  - 手动（这个文件进了默认分支 `main` 之后）：Actions → testnet-fund → Run workflow，分支选 `staging`，填 `chains`（`eth,tron` / `eth` / `tron`）、`count`（默认 20）、`amount`（默认 100）。`addresses` 填了就跳过第 1 步、直接给这些地址打（只能选一条链，客户标识记成 `manual-01`…）。
+  - 推送触发（不用等进 `main`）：从最新的 `staging` 拉一个 `testnet-fund/<名字>` 分支推上去；参数用仓库变量 `TESTNET_FUND_CHAINS`、`TESTNET_FUND_COUNT`、`TESTNET_FUND_AMOUNT`，没设就是 `eth,tron`、20、100。**先要**在仓库 Settings → Environments 里给 `staging-e2e` 和 `testnet` 两个环境的 Deployment branches 各加一条 `testnet-fund/**`（现在一个只允许 `staging`、`e2e-run/**`，一个只允许 `main`、`staging`、`testnet-run/**`；不能借用这两个前缀，它们会同时触发验收用例或合约部署）。
+  - 每次运行管理员批准两次：先 `staging-e2e`（第 1 步），第 1 步完成后再 `testnet`（第 2 步）。
+  - **批准前必看**：批准一次 `testnet-fund/*` 分支上的运行，等于让这个分支上的**任何代码**拿到 `staging-e2e`（测试商户 Key、测试环境地址）或 `testnet`（部署账户私钥）的密钥——包括被改过的流程文件和脚本，上面的"硬性限制"也可能被改掉。所以：`testnet-fund/` 分支**只从最新的 `staging` 拉**、不在上面改任何代码；批准前先在 GitHub 上打开 `compare/staging...testnet-fund/<名字>`，确认**一个文件都没改**（有改动就不批准）。手动运行时分支选 `staging`，同理只批准 `staging` 上的运行。
+- **对共用的 staging 测试商户的副作用**（staging-e2e 的用例也用这个商户；已核对 `e2e/staging-e2e/` 里没有按客户数、订单数断言的用例，不会因此失败）：
+  - 每次运行每条链多 N 个客户（`eth,tron`、20 个就是 40 个），客户标识都是 `fee-ac3-` 开头，商户后台客户列表里能看到；不会自动删除。
+  - 测试商户**开了订单模式**时，每个客户还多一张金额 AMOUNT 的待付款订单（订单号 = 客户标识）；第 2 步打币后订单被匹配，商户配了回调地址的话会收到 `order.matched` 回调。没开订单模式时只有客户和地址，没有订单。
+  - 打了币的地址会进入归集：服务器的定时凑批会把它们凑进"待确认"的批次（要管理员确认才发交易），staging-e2e 的 E09 也会凑批后作废放回。做手续费对比时，先看运营后台的归集页有没有自动凑出来的批次，按验收步骤处理。
+  - 收款地址不能是 staging 的系统地址：`config/wallets.json` staging 一节里的热钱包、冷钱包、parent、payout、batcher、factory、implementation、usdt（两步都核对，`stagingSystemAddresses`）。
+- 两个 job 都用 `npm ci --ignore-scripts`（依赖里没有需要安装脚本的包，持有密钥的 job 不执行第三方安装脚本）。
+- **结果**：运行摘要里有两张表（第 1 步：客户标识、充值地址；第 2 步：客户标识、地址、交易链接、结果），产物 `testnet-fund-addresses`、`testnet-fund-result`（addresses.json / fund.json、.md），只有公开信息。
+- 费用：2026-11-16 查链上（未运行本流程）：部署账户 Sepolia 上约 0.047 ETH、999,900 测试 USDT；Nile 上约 290 TRX、989,900 测试 USDT。每条链 20 笔转账足够；TRON 开始前按节点对第一笔的能量估算 × 1.5 核对 TRX 够不够，不够一笔都不发。

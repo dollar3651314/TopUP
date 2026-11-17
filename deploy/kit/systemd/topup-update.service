@@ -1,0 +1,10 @@
+# 自动更新（deploy/kit/topup.sh update），由 topup-update.timer 触发
+[Unit]
+Description=TopUP 自动更新
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/topup/deploy/kit/topup.sh update
+TimeoutStartSec=15min

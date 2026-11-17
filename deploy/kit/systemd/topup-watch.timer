@@ -1,0 +1,11 @@
+# 每 5 分钟检查：每 5 分钟检查一次，状态变化时发邮件
+[Unit]
+Description=TopUP 每 5 分钟检查
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

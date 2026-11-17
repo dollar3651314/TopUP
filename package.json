@@ -1,0 +1,31 @@
+{
+  "name": "topup",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TopUP：稳定币收付款服务（web + worker）",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start:web": "node server/web.js",
+    "start:worker": "node server/worker.js",
+    "dev": "node server/web.js",
+    "check:index": "node scripts/check-project-index.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0",
+    "@scure/base": "^1.2.6",
+    "@scure/bip32": "^1.7.0",
+    "ioredis": "^5.8.2",
+    "nodemailer": "^10.0.11",
+    "postgres": "^3.4.9",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@scure/bip39": "^1.6.0"
+  }
+}
