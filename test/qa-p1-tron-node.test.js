@@ -291,7 +291,7 @@ test('广播重试发的是同一笔已签名交易（请求体逐字节相同�
   const n = scripted([{ status: 503 }, { status: 429 }, 200], { result: true, txid: 'ab'.repeat(32) });
   assert.equal(await gridWith(n.fetchImpl, f.sleep).broadcastHex(signed), 'ab'.repeat(32));
   assert.equal(n.calls.length, 3, '503、429 之后第 3 次成功');
-  assert.ok(n.calls.every((c) => c.path === '/wallet/broadcasthex'), `只调广播，不重新建交易：${n.calls.map((c) => c.path)}`);
+  assert.ok(n.calls.every((c) => c.path.endsWith('/wallet/broadcasthex')), `只调广播，不重新建交易：${n.calls.map((c) => c.path)}`);
   assert.equal(new Set(n.calls.map((c) => c.body)).size, 1, '每次发的请求体完全相同');
   assert.equal(JSON.parse(n.calls[0].body).transaction, signed);
 
@@ -420,7 +420,7 @@ for (const [label, mk] of [['以太坊', evmUncertain], ['TRON', tronUncertain]]
     await confirmSweeps(s.db, { providers: s.providers, notify: async (x) => { mails.push(x); }, now: s.sentAt + 17 * MIN });
     const after = await getBatch(s.db, s.id);
     assert.equal(after.status, 'failed', '节点追上后仍不认识：标失败');
-    assert.ok(after.items.every((i) => i.status === 'released' && i.reason === 'not_broadcast'), JSON.stringify(after.items));
+    assert.ok(after.items.every((i) => i.status === 'released' && i.reason === 'not_broadcast'), JSON.stringify(after.items, (k, v) => (typeof v === 'bigint' ? v.toString() : v)));
     await s.db.end?.();
   });
 }

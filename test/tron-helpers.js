@@ -262,7 +262,8 @@ export function fakeTronNode(state = {}) {
 
 /**
  * 不连外网的 TronGrid：把全局 fetch 换成替身，凡是 *.trongrid.io（以及 hosts 里另列的主机）的请求都在本机回答——
- * 0 号块（/wallet/getblockbynum {num:0}）按主机回创世块哈希（nile.trongrid.io = Nile、api.trongrid.io = 主网，hosts 可覆盖），其余回 {}；
+ * 0 号块（/wallet/getblockbynum {num:0}）按主机回创世块哈希（nile.trongrid.io = Nile、api.trongrid.io = 主网，hosts 可覆盖），
+ * TronGrid 的其余请求回 {}，hosts 里另列的非 TronGrid 主机其余请求照旧连不上；
  * 别的地址（例如测试自己在 127.0.0.1 开的假以太坊节点）照常走真的 fetch。返回 restore()。
  * 给走 createPayDeps 的测试用：K-4 之后测试环境要核对 TRON 节点真是 Nile，不能依赖外网上的 nile.trongrid.io。
  */
@@ -279,6 +280,8 @@ export function fakeTronGridNet(hosts = {}) {
     let body = {};
     try { body = JSON.parse(init.body || '{}'); } catch { body = {}; }
     if (u.pathname.endsWith('/wallet/getblockbynum') && Number(body.num) === 0) return Response.json({ blockID: g, block_header: { raw_data: { number: 0 } } });
+    // hosts 里另列的主机（例如测试里 TRON_NODE_URL 指的本机关着的端口）：只回答创世块，其余照旧连不上
+    if (!u.host.endsWith('.trongrid.io')) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
     return Response.json({});
   };
   return () => { globalThis.fetch = real; };
