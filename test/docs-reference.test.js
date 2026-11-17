@@ -47,6 +47,43 @@ test('开发者文档：每个接口都写进了文档，文档里的接口都�
   await db.end();
 });
 
+/**
+ * 单独的用例（按功能分开，后做的功能的接口不挡先做的）用的准备工作：一个商户、签名调用、按文档核对返回。
+ * 主用例只核对 CHECKED_SEPARATELY 以外的接口；这里列的接口由下面各自的用例核对。
+ */
+const CHECKED_SEPARATELY = new Set(['GET withdrawals/list/']);
+async function liveWorld() {
+  const db = await createTestDb(); await migrate(db);
+  await core.setMeta(db, 'xpub', XPUB);
+  const ops = createOps({ db, keys, payBase: 'https://pay.test' });
+  const m = await core.createMerchant(db, { id: 'md', name: 'Docs Ltd', feeIn: { ppm: 10_000, fixed: 0, min: 0 }, feeOut: { ppm: 0, fixed: 2 * U, min: 0 } });
+  const cred = await ops.regenerateSecret(m);
+  const api = createApiV1({ db, keys, ops, getIp: () => '203.0.113.10' });
+  await ops.setIpWhitelist(m, ['203.0.113.10']);
+  const call = async (method, path, body) => {
+    const raw = body ? JSON.stringify(body) : '';
+    const url = `https://api.test/api/v1/${path}`;
+    const ts = String(Math.floor(Date.now() / 1000));
+    const res = await api(new Request(url, { method, body: raw || undefined, headers: { 'content-type': 'application/json', 'x-topup-key': cred.api_key, 'x-topup-timestamp': ts, 'x-topup-signature': signRequest(cred.api_secret, ts, method, canonicalPath(url), raw), ...(method === 'POST' ? { 'idempotency-key': randomUUID() } : {}) } }));
+    const out = await res.json();
+    assert.equal(res.status, 200, `${method} ${path}：${JSON.stringify(out)}`);
+    return out;
+  };
+  const check = (method, path, out) => {
+    const ep = ENDPOINTS.find((e) => e.method === method && e.path === path);
+    assert.ok(ep, `文档里没有 ${method} ${path}`);
+    const fields = returnFields(ep);
+    if (ep.list) {
+      checkObject(`${method} ${path}`, LIST, out);
+      assert.ok(out.items.length > 0, `${method} ${path} 没有返回记录，检查不到字段`);
+      for (const it of out.items) checkObject(`${method} ${path} items[]`, fields, it);
+    } else checkObject(`${method} ${path}`, fields, out);
+    return out;
+  };
+  const c = await legacyTronCustomer(db, 'md', 'c1');
+  return { db, ops, m, call, check, address: c.address };
+}
+
 test('开发者文档：每个接口实际返回的字段、类型和文档一致；回调的内容也一致', async () => {
   const db = await createTestDb(); await migrate(db);
   await core.setMeta(db, 'xpub', XPUB);
@@ -118,7 +155,7 @@ test('开发者文档：每个接口实际返回的字段、类型和文档一�
   checkBatchItems('POST payouts/batch/', pb);
   checkObject('POST payouts/batch/ service', [['open', 'boolean'], ...(pb.service.open ? [] : [['next_open_at', 'time']])], pb.service);
   checkBatchItems('GET payouts/batch/', check('GET', 'payouts/batch/', await call('GET', `payouts/batch/?batch_no=${pb.batch_no}`)));
-  assert.deepEqual([...seen].sort(), ENDPOINTS.map((e) => `${e.method} ${e.path}`).sort(), '有接口没有被检查到');
+  assert.deepEqual([...seen].sort(), ENDPOINTS.map((e) => `${e.method} ${e.path}`).filter((k) => !CHECKED_SEPARATELY.has(k)).sort(), '有接口没有被检查到');
 
   // 回调：检查实际发出去的请求体（外层和每种事件的 data）
   const sent = [];
@@ -156,4 +193,18 @@ test('开发者文档：建单的 chain 参数和订单的 chain 字段写明可
     assert.match(f[2][0], new RegExp(`\\b${ch}\\b`), `订单的 chain 字段（英文）要写到 ${ch}：${f[2][0]}`);
     assert.match(f[2][1], new RegExp(`\\b${ch}\\b`), `订单的 chain 字段（中文）要写到 ${ch}：${f[2][1]}`);
   }
+});
+
+// v1.1 对账查询（单独一个用例）：GET withdrawals/list/、带 from / to 的 deposits/、ledger/ 返回的字段和文档一致
+test('开发者文档（对账查询）：withdrawals/list/ 和带时间段的 deposits/、ledger/ 返回的字段和文档一致', async () => {
+  const w = await liveWorld();
+  await core.recordDeposit(w.db, { txid: 'a'.repeat(64), logIndex: 0, block: 1, to: w.address, amount: 100 * U, time: new Date() });
+  await w.call('POST', 'withdrawals/', { kind: 'payout', customer_id: 'c1', to: TO, amount: '10', merchant_ref: 'R-1' });
+  const from = encodeURIComponent(new Date(Date.now() - 86_400_000).toISOString());
+  const list = w.check('GET', 'withdrawals/list/', await w.call('GET', `withdrawals/list/?from=${from}`));
+  assert.equal(list.items.length, 1);
+  w.check('GET', 'withdrawals/list/', await w.call('GET', 'withdrawals/list/'));
+  w.check('GET', 'deposits/', await w.call('GET', `deposits/?from=${from}`));
+  w.check('GET', 'ledger/', await w.call('GET', `ledger/?from=${from}`));
+  await w.db.end();
 });

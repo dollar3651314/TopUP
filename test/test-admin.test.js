@@ -21,8 +21,13 @@ import { loadConfig } from '../server/config.js';
 import { refuseConfig, createApp } from '../server/app.js';
 import { createWeb } from '../server/web.js';
 import { testAdminHash, refuseTestAdmin, TEST_ADMIN_ACTIONS, TEST_ADMIN_WRITES, TEST_ADMIN_HEADER, isTestAdmin, maskForTestAdmin, createTestnetCheck } from '../server/pay/test-admin.js';
+import { fakeTronGridNet } from './tron-helpers.js';
 
 const TOKEN = randomBytes(32).toString('hex');
+// TRON 节点用本机替身（tron-helpers.js 的 fakeTronGridNet）：走 createPayDeps 时不连外网的 nile.trongrid.io（K-4 起测试环境要核对节点真是 Nile）
+let restoreNet;
+test.before(() => { restoreNet = fakeTronGridNet(); });
+test.after(() => restoreNet?.());
 const HASH = createHash('sha256').update(TOKEN).digest('hex');
 const SECRET = 'test-app-secret-test-app-secret-0123456789';
 

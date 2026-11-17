@@ -403,6 +403,16 @@ export async function confirmSweeps(db, { providers = {}, notify, now } = {}) {
   } catch (e) { out.errors.push(e.message); }
   let sent = [];
   try { sent = await db.query(`select * from wallet_sweep_batches where status = 'sent' order by updated_at limit 20`); } catch (e) { out.errors.push(e.message); }
+  // 扫块记下的最新区块号（pay_meta 的 evm_scan_<链>.head）：节点落后于它时，"节点不认识这笔交易"不下结论（每条链读一次）
+  const scanHeads = new Map();
+  const scanHeadOf = async (chain) => {
+    if (!scanHeads.has(chain)) {
+      const m = await getMeta(db, `evm_scan_${chain}`, null).catch(() => null);
+      const h = Number(m?.head);
+      scanHeads.set(chain, m && m.head !== null && m.head !== undefined && Number.isFinite(h) ? h : null);
+    }
+    return scanHeads.get(chain);
+  };
   for (const b of sent) {
     try {
       const p = providers[b.provider];
@@ -413,7 +423,7 @@ export async function confirmSweeps(db, { providers = {}, notify, now } = {}) {
       const swept = new Set(), failed = new Map();
       for (const ref of b.tx_refs || []) {
         const r = typeof p.sweepOutcome === 'function'
-          ? await p.sweepOutcome(b.chain, ref, plain, { sentAt: b.updated_at, now: at(now).getTime() })
+          ? await p.sweepOutcome(b.chain, ref, plain, { sentAt: b.updated_at, now: at(now).getTime(), scanHead: await scanHeadOf(b.chain) })
           : await (async () => { const s = await p.txStatus(b.chain, ref); return { status: s, swept: s === 'confirmed' ? plain.map((i) => i.address) : [], failed: s === 'failed' ? plain.map((i) => ({ address: i.address, reason: 'tx_failed' })) : [] }; })();
         if (r.status === 'pending' || r.status === 'unknown') { status = 'wait'; break; }
         for (const a of r.swept) swept.add(a);
