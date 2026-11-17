@@ -8,6 +8,8 @@
 // - 欠款：有欠款时不能提币（core.assertNoDebt），之后的到账先还欠款（core.repayDebt）。
 import { PayError, postDebt, releaseDepositMatch, enqueueCallback, getMeta } from './core.js';
 import { fmtUsdt } from './money.js';
+import { toUnits } from '../wallet/units.js';
+import { TRANSFER_TOPIC } from '../wallet/adapters/evm.js';
 
 const MIN = 60_000, HOUR = 60 * MIN;
 /** 例行复核：入账后多久（第 1 次、第 2 次）。都要在 24 小时内 */
@@ -23,62 +25,100 @@ const usd = (u) => fmtUsdt(Number(u));
 const iso = (v) => (v ? new Date(v).toISOString() : null);
 const errCode = (e) => String(e?.code || 'error').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 40) || 'error';
 
+/** 抢到一笔到期的到账后，别的 worker 多久之内不会再抢它（复核一笔远用不了这么久；过了这个时间算这次没做完，别人可以接手） */
+export const CLAIM_MS = 15 * MIN;
+
 /**
  * worker 每轮调用：复核到期的到账。check({ id, chain, txid, logIndex, block, address, amount }, { confirm }) → true 还在 / false 没了；抛错 = 节点连不上或落后，不下结论。
- * confirm：查到"没了"之后的确认复核（适配器要用不落后的节点，落后就抛错）。
- * 返回 { checked, reversed, inconclusive }
+ * confirm：查到"没了"之后的确认复核（适配器要更严：用不落后的节点、两次回答一致，否则抛错）。
+ * 并发（worker 租约过期时可能有两个 worker 同时跑）：每一笔先原子地"抢"下来（把 recheck_next_at 推后 CLAIM_MS，只有到期的才抢得到），
+ *   之后的排期只在还是自己抢的那一次时才写回；冲正前在行锁里再核对一次"确实查到没了、隔够 10 分钟、之后没有查到还在"。
+ * 一笔出错只记日志，不影响其他笔。返回 { checked, reversed, inconclusive }
  */
-export async function recheckDeposits(db, { now = Date.now(), check, notify = null, limit = 200 } = {}) {
+export async function recheckDeposits(db, { now = Date.now(), check, notify = null, limit = 200, log: logger = console } = {}) {
   const at = new Date(Number(now));
   const nowMs = at.getTime();
-  const due = await db.query(`select id, chain, txid, log_index, block, address, amount, created_at, recheck_n, recheck_gone_at from deposits
+  const due = await db.query(`select id from deposits
     where result = 'credited' and recheck_next_at is not null and recheck_next_at <= $1 order by recheck_next_at, id limit $2`, [at, limit]);
   const out = { checked: 0, reversed: 0, inconclusive: 0 };
   const log = (id, result, detail = '') => db.query('insert into deposit_rechecks (deposit_id, checked_at, result, detail) values ($1, $2, $3, $4)', [id, at, result, detail]);
-  const setNext = (id, fields) => db.query(`update deposits set recheck_next_at = $2, recheck_n = $3, recheck_gone_at = $4 where id = $1 and result = 'credited'`,
-    [id, fields.next === null ? null : new Date(fields.next), fields.n, fields.goneAt === null ? null : new Date(fields.goneAt)]);
-  for (const d of due) {
-    const created = new Date(d.created_at).getTime();
-    const age = nowMs - created;
-    const confirming = Boolean(d.recheck_gone_at);
-    const n = Number(d.recheck_n) || 0;
-    // 过了窗口：不再复核（最后一次没下结论的，运营后台"复核没下结论的"列出）
-    if (age > (confirming ? CONFIRM_WINDOW_MS : RECHECK_WINDOW_MS)) { await setNext(d.id, { next: null, n, goneAt: d.recheck_gone_at }); continue; }
-    if (age < 0) continue;
-    let present;
+  for (const { id } of due) {
     try {
-      present = await check({ id: String(d.id), chain: d.chain, txid: d.txid, logIndex: Number(d.log_index), block: Number(d.block), address: d.address, amount: Number(d.amount) }, { confirm: confirming });
+      const claim = new Date(nowMs + CLAIM_MS);
+      const [d] = await db.query(`update deposits set recheck_next_at = $2 where id = $1 and result = 'credited' and recheck_next_at is not null and recheck_next_at <= $3
+        returning id, chain, txid, log_index, block, address, amount, created_at, recheck_n, recheck_gone_at`, [id, claim, at]);
+      if (!d) continue; // 别的 worker 已经抢走（或已冲正）
+      // 只在还是自己这次抢的时候写回排期（别的 worker 在抢的期限过后接手了，就以它为准）
+      const setNext = (fields) => db.query(`update deposits set recheck_next_at = $2, recheck_n = $3, recheck_gone_at = $4 where id = $1 and result = 'credited' and recheck_next_at = $5`,
+        [d.id, fields.next === null ? null : new Date(fields.next), fields.n, fields.goneAt === null ? null : new Date(fields.goneAt), claim]);
+      const created = new Date(d.created_at).getTime();
+      const age = nowMs - created;
+      const confirming = Boolean(d.recheck_gone_at);
+      const n = Number(d.recheck_n) || 0;
+      // 过了窗口：不再复核（最后一次没下结论的，运营后台"复核没下结论的"列出）
+      if (age > (confirming ? CONFIRM_WINDOW_MS : RECHECK_WINDOW_MS)) { await setNext({ next: null, n, goneAt: d.recheck_gone_at }); continue; }
+      if (age < 0) { await setNext({ next: created, n, goneAt: d.recheck_gone_at }); continue; }
+      let present;
+      try {
+        present = await check({ id: String(d.id), chain: d.chain, txid: d.txid, logIndex: Number(d.log_index), block: Number(d.block), address: d.address, amount: Number(d.amount) }, { confirm: confirming });
+      } catch (e) {
+        out.inconclusive++;
+        await log(d.id, 'error', errCode(e));
+        await setNext({ next: nowMs + RETRY_MS, n, goneAt: d.recheck_gone_at });
+        continue;
+      }
+      out.checked++;
+      if (present) {
+        await log(d.id, 'present');
+        const n2 = n + 1;
+        const next = n2 >= RECHECK_AT.length ? null : Math.max(created + RECHECK_AT[n2], nowMs + RETRY_MS);
+        await setNext({ next: next !== null && next - created > RECHECK_WINDOW_MS ? null : next, n: n2, goneAt: null });
+        continue;
+      }
+      await log(d.id, 'gone');
+      if (!confirming) { await setNext({ next: nowMs + CONFIRM_GAP_MS, n, goneAt: nowMs }); continue; }
+      const r = await reverseDeposit(db, d.id, { now: nowMs, notify, confirmedGone: true });
+      if (r.status === 'reversed') out.reversed++;
+      else if (r.status === 'not_confirmed') await setNext({ next: nowMs + RETRY_MS, n, goneAt: null }); // 核对不过（例如别的 worker 刚查到还在）：重新从头确认
     } catch (e) {
-      out.inconclusive++;
-      await log(d.id, 'error', errCode(e));
-      await setNext(d.id, { next: nowMs + RETRY_MS, n, goneAt: d.recheck_gone_at });
-      continue;
+      logger.error(`[reversal] recheck deposit ${id}: ${e.message}`);
     }
-    out.checked++;
-    if (present) {
-      await log(d.id, 'present');
-      const n2 = n + 1;
-      const next = n2 >= RECHECK_AT.length ? null : Math.max(created + RECHECK_AT[n2], nowMs + RETRY_MS);
-      await setNext(d.id, { next: next !== null && next - created > RECHECK_WINDOW_MS ? null : next, n: n2, goneAt: null });
-      continue;
-    }
-    await log(d.id, 'gone');
-    if (!confirming) { await setNext(d.id, { next: nowMs + CONFIRM_GAP_MS, n, goneAt: nowMs }); continue; }
-    const r = await reverseDeposit(db, d.id, { now: nowMs, notify });
-    if (r.status === 'reversed') out.reversed++;
   }
   return out;
 }
 
-/** 冲正一笔到账。同一笔第二次调用什么都不改，返回 already_reversed */
-export async function reverseDeposit(db, depositId, { now = Date.now(), notify = null } = {}) {
+/**
+ * 冲正前在行锁里核对"确实查到没了"：第一次查到没了的时间（recheck_gone_at）有值且已隔够 CONFIRM_GAP_MS，
+ * 之后的复核记录里没有"还在"，最新一条是"没了"。不满足返回原因，满足返回 null
+ */
+async function goneNotConfirmed(t, d, nowMs) {
+  if (!d.recheck_gone_at) return 'no_gone_mark';
+  const goneAt = new Date(d.recheck_gone_at);
+  if (nowMs - goneAt.getTime() < CONFIRM_GAP_MS) return 'gap_too_short';
+  const rows = await t.query(`select result from deposit_rechecks where deposit_id = $1 and checked_at >= $2 order by id desc`, [d.id, goneAt]);
+  if (!rows.length || rows[0].result !== 'gone') return 'latest_not_gone';
+  if (rows.some((x) => x.result === 'present')) return 'present_after_gone';
+  return null;
+}
+
+/**
+ * 冲正一笔到账。同一笔第二次调用什么都不改，返回 already_reversed。
+ * confirmedGone（复核调用时为 true）：在行锁里再核对一次确实查到没了（见 goneNotConfirmed），不满足什么都不改，返回 not_confirmed。
+ * 加锁顺序和入账一样：先客户行，再到账行（避免死锁）
+ */
+export async function reverseDeposit(db, depositId, { now = Date.now(), notify = null, confirmedGone = false } = {}) {
   const at = new Date(Number(now));
   const r = await db.tx(async (t) => {
+    const [peek] = await t.query('select merchant_id, customer_id from deposits where id = $1', [Number(depositId)]);
+    if (!peek) throw new PayError('not_found', 404);
+    await t.query('select 1 from customers where merchant_id = $1 and customer_id = $2 for update', [peek.merchant_id, peek.customer_id]);
     const [d] = await t.query('select * from deposits where id = $1 for update', [Number(depositId)]);
-    if (!d) throw new PayError('not_found', 404);
     if (d.result === 'reversed') return { status: 'already_reversed' };
     if (d.result !== 'credited') throw new PayError('invalid_state', 409);
-    await t.query('select 1 from customers where merchant_id = $1 and customer_id = $2 for update', [d.merchant_id, d.customer_id]);
+    if (confirmedGone) {
+      const why = await goneNotConfirmed(t, d, at.getTime());
+      if (why) { console.error(`[reversal] deposit ${d.id}: not reversed (${why})`); return { status: 'not_confirmed', why }; }
+    }
     const amount = Number(d.amount), fee = Number(d.fee), net = amount - fee;
     const [b] = await t.query('select available, debt from balances where merchant_id = $1 for update', [d.merchant_id]);
     const taken = Math.min(Number(b.available), net), debtAdded = net - taken;
@@ -121,34 +161,61 @@ export async function reverseDeposit(db, depositId, { now = Date.now(), notify =
 }
 
 /**
- * 正式的复核函数：按链问节点这笔转账还在不在。节点连不上、或者节点比我们扫链时看到的最新区块还旧（落后的节点可能还没有这个区块），一律抛错（不下结论）。
- * - 以太坊、BSC：同一个批量请求里取最新区块号和回执；回执里要有同一个日志序号、同一个收款地址的 USDT Transfer
- * - TRON：TronGrid 的已固化区块和交易结果（固化区块比到账所在区块旧就算落后）
- * 替身（本地、端到端测试）：看替身链上有没有这笔转账
+ * 正式的复核函数：按链问节点这笔转账还在不在。节点连不上、节点比我们扫链时看到的最新区块还旧（落后的节点可能还没有这个区块）、
+ * 或者回答说明不了"没了"（例如交易回到了交易池），一律抛错（不下结论，稍后再查）。
+ * - 以太坊、BSC：同一个批量请求里取最新区块号、回执和交易（同一台后端回答）。
+ *   回执里有同一个收款地址、同一金额的 USDT Transfer 就算还在（重组后换了区块或日志序号也算）；
+ *   回执没有但交易还在（回到交易池、等重新打包）→ 不下结论；回执和交易都没有、或交易执行失败 → 没了。
+ * - TRON：已固化区块和交易结果（/walletsolidity）。固化区块比到账所在区块旧就算落后。
+ *   确认复核（confirm）要两次回答一致：固化区块 → 交易结果 → 交易结果 → 固化区块，两次交易结果不一样、固化区块倒退都不下结论。
+ * 替身（本地、端到端测试）：看替身链上有没有这笔转账；TRON 同时看老 TronGrid 替身和合约钱包的替身（两种到账都在替身里）
  */
 export function createChainCheck({ db, tron, layer }) {
   const lagging = () => Object.assign(new Error('node_lagging'), { code: 'node_lagging' });
-  return async (x) => {
+  const unsure = (code) => Object.assign(new Error(code), { code });
+  const evmLogMatches = (l, ad, x) => {
+    if (l.removed || String(l.address).toLowerCase() !== String(ad.usdt).toLowerCase()) return false;
+    if (!Array.isArray(l.topics) || l.topics.length !== 3 || String(l.topics[0]).toLowerCase() !== TRANSFER_TOPIC) return false;
+    const to = String(x.address).toLowerCase().replace(/^0x/, '');
+    if (!String(l.topics[2] || '').toLowerCase().endsWith(to.padStart(40, '0'))) return false;
+    let raw;
+    try { raw = BigInt(l.data && l.data !== '0x' ? l.data : '0x0'); } catch { return false; }
+    return Number(toUnits(raw, ad.decimals || 6)) === Number(x.amount);
+  };
+  return async (x, { confirm = false } = {}) => {
     if (x.chain === 'eth' || x.chain === 'bsc') {
       const ad = layer?.adapters?.[x.chain];
-      if (!ad) throw Object.assign(new Error('chain_not_enabled'), { code: 'chain_not_enabled' });
+      if (!ad) throw unsure('chain_not_enabled');
       if (ad.fake) return ad.hasTransfer(x.txid, x.logIndex);
-      const { head, receipt } = await ad.txLookup(x.txid);
+      const { head, receipt, tx } = await ad.txLookup(x.txid);
       const scan = await getMeta(db, `evm_scan_${x.chain}`, null);
       if (!Number.isFinite(head) || head < x.block + (ad.confirmations || 0) || (Number.isFinite(Number(scan?.head)) && head < Number(scan.head))) throw lagging();
-      if (!receipt || Number(receipt.status) !== 1) return false;
-      if (!Array.isArray(receipt.logs)) return true;
-      const to = String(x.address).toLowerCase().replace(/^0x/, '');
-      return receipt.logs.some((l) => !l.removed && Number(l.logIndex) === x.logIndex && String(l.address).toLowerCase() === String(ad.usdt).toLowerCase()
-        && String(l.topics?.[2] || '').toLowerCase().endsWith(to));
+      if (!receipt) {
+        if (tx) throw unsure('tx_pending'); // 交易还在（交易池里），等它重新打包或消失
+        return false;
+      }
+      if (Number(receipt.status) !== 1) return false;
+      if (!Array.isArray(receipt.logs)) throw unsure('receipt_without_logs');
+      return receipt.logs.some((l) => evmLogMatches(l, ad, x));
     }
     if (x.chain === 'tron') {
-      if (typeof tron?.hasTransfer === 'function') return tron.hasTransfer(x.txid, x.logIndex);
-      const solid = await tron.solidBlock();
-      if (!(Number(solid?.number) >= x.block)) throw lagging();
-      const info = await tron.txInfo(x.txid);
-      return Boolean(info && info.ok);
+      const fakes = [tron, layer?.adapters?.tron].filter((f) => f && typeof f.hasTransfer === 'function');
+      if (fakes.length) return fakes.some((f) => f.hasTransfer(x.txid, x.logIndex));
+      const answer = async (solidFirst) => {
+        let solid, info;
+        if (solidFirst) { solid = await tron.solidBlock(); info = await tron.txInfo(x.txid); }
+        else { info = await tron.txInfo(x.txid); solid = await tron.solidBlock(); }
+        const n = Number(solid?.number);
+        if (!(n >= x.block)) throw lagging();
+        return { n, present: Boolean(info && info.ok) };
+      };
+      const first = await answer(true);
+      if (!confirm) return first.present;
+      const second = await answer(false);
+      if (second.n < first.n) throw lagging();
+      if (second.present !== first.present) throw unsure('node_inconsistent');
+      return first.present;
     }
-    throw Object.assign(new Error('unsupported_chain'), { code: 'unsupported_chain' });
+    throw unsure('unsupported_chain');
   };
 }

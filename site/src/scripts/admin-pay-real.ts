@@ -417,7 +417,7 @@ render.anomalies = async (p) => {
   parts.push(h('div', { class: 'stack-sm', 'data-recheck-inconclusive': '' }, h('h2', { class: 'h-sm' }, '复核没下结论的（不会冲正）'),
     h('p', { class: 'hint muted m0' }, '复核时节点连不上或比扫链进度落后，这次不算消失、不冲正；在复核时段内稍后自动再查，不用你做什么。'),
     table(['入账时间', '商户', '链', '交易哈希', '到账金额', '最后一次复核', '系统的处理'], rv.inconclusive.map((x: any) => [t(x.credited_at), x.merchant, chainName(x.chain), mono(x.txid.slice(0, 10) + '…', x.txid), usd(x.amount), t(x.last_checked_at),
-      h('span', { class: 'hint' }, x.last_result === 'gone' ? '查到没了，等至少 10 分钟后用不落后的节点再确认' : x.next_at ? '节点连不上，稍后自动再查' : '节点一直连不上，复核时段已过，不会冲正')]), '没有。')));
+      h('span', { class: 'hint' }, x.last_result === 'gone' && !x.next_at ? '查到没了，但复核时段已过、没确认完：不会自动冲正，请在区块浏览器人工核对这笔交易' : x.last_result === 'gone' ? '查到没了，等至少 10 分钟后用不落后的节点再确认' : x.next_at ? '节点连不上，稍后自动再查' : '节点一直连不上，复核时段已过，不会冲正')]), '没有。')));
   p.replaceChildren(...parts.filter(Boolean) as HTMLElement[]);
 };
 const chainName = (c: string) => ({ tron: 'TRON', eth: '以太坊', bsc: 'BSC' } as Record<string, string>)[c] || c;

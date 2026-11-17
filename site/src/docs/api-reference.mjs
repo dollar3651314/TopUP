@@ -85,7 +85,7 @@ export const OBJECTS = {
   LedgerEntry: [
     ['id', 'string', ['Entry ID; also the cursor for the next page', '记录编号，也用于翻页']],
     ['type', 'string', ['deposit, fee_in, freeze, unfreeze, withdraw, fee_out, reversal (a credited deposit disappeared from the chain and was taken back, collection fee refunded) or debt_repay (a new deposit repaid debt first)', 'deposit、fee_in、freeze、unfreeze、withdraw、fee_out、reversal（已入账的到账在链上消失，扣回入账金额、退回收款手续费）、debt_repay（新到账先还欠款）之一']],
-    ['amount', 'amount', ['Change: positive adds, negative subtracts (withdraw and fee_out change the frozen balance)', '变动金额：正数增加，负数减少（withdraw、fee_out 变动的是冻结余额）']],
+    ['amount', 'amount', ['Change: positive adds, negative subtracts (withdraw and fee_out change the frozen balance). For reversal, amount = −(from_available + to_debt), the whole credited amount taken back; the available balance only goes down by from_available and the rest becomes debt (see detail, available_after, debt_after)', '变动金额：正数增加，负数减少（withdraw、fee_out 变动的是冻结余额）。reversal 的 amount = −(from_available + to_debt)，即扣回的整笔入账金额；可用余额只减 from_available，其余记成欠款（看 detail、available_after、debt_after）']],
     ['available_after', 'amount', ['Available balance after this entry', '这条记录之后的可用余额']],
     ['frozen_after', 'amount', ['Frozen balance after this entry', '这条记录之后的冻结余额']],
     ['debt_after', 'amount', ['Debt after this entry (0.00 normally)', '这条记录之后的欠款（平时是 0.00）']],
