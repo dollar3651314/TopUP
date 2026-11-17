@@ -67,3 +67,71 @@ export function page(rows, limit) {
 }
 export const limitOf = (q) => Math.min(100, Math.max(1, Number(q.get('limit')) || 50));
 export const iso = (v) => (v ? new Date(v).toISOString() : null);
+
+// ---------- 对账查询的时间段（v1.1）：from、to 是带时区的 ISO 8601，区间 [from, to)，一次最多 31 天 ----------
+export const MAX_RANGE_DAYS = 31;
+const ISO_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?(Z|z|([+-])(\d{2}):?(\d{2}))$/;
+/**
+ * 解析一个带时区的 ISO 8601 时间。格式错、没带时区、日期不存在 → 422 invalid_param（field）。
+ * 返回 { us: 距 1970 的微秒数, sql: 统一成 UTC 的字符串（给数据库比较用，保留到微秒） }
+ */
+export function parseIsoTime(v, field) {
+  const m = ISO_RE.exec(String(v ?? '').trim());
+  const bad = () => new PayError('invalid_param', 422, field);
+  if (!m) throw bad();
+  const [y, mo, d, h, mi, s = 0] = m.slice(1, 7).map((x) => Number(x || 0));
+  const frac = (m[7] || '').padEnd(6, '0');
+  if (y < 1970 || mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || s > 59) throw bad();
+  if (new Date(Date.UTC(y, mo - 1, d)).getUTCDate() !== d) throw bad(); // 2 月 30 日之类
+  let off = 0;
+  if (m[9]) {
+    const oh = Number(m[10]), om = Number(m[11]);
+    if (oh > 23 || om > 59) throw bad();
+    off = (m[9] === '-' ? -1 : 1) * (oh * 60 + om) * 60_000;
+  }
+  const sec = Date.UTC(y, mo - 1, d, h, mi, s) - off; // 整秒（毫秒数）
+  if (!Number.isFinite(sec) || sec < 0) throw bad();
+  return { us: sec * 1000 + Number(frac), sql: `${new Date(sec).toISOString().slice(0, 19)}.${frac}Z` };
+}
+/**
+ * 查询参数里的时间段。from、to 都没带返回 null（旧调用，行为不变），除非 always（withdrawals/list 总按时间段查）。
+ * 只带一个时补另一个：to 不传 = 现在，from 不传 = to − 31 天。
+ * from 晚于 to → field from；超过 31 天 → field to。返回 { from, to }（数据库比较用的 UTC 字符串，保留到微秒）
+ */
+export function timeRange(q, nowMs, { always = false } = {}) {
+  const rawFrom = q.get('from'), rawTo = q.get('to');
+  const hasFrom = rawFrom !== null && rawFrom !== '';
+  const hasTo = rawTo !== null && rawTo !== '';
+  if (!hasFrom && !hasTo && !always) return null;
+  const to = hasTo ? parseIsoTime(rawTo, 'to') : parseIsoTime(new Date(nowMs).toISOString(), 'to');
+  const from = hasFrom ? parseIsoTime(rawFrom, 'from') : parseIsoTime(new Date(Math.floor(to.us / 1000) - MAX_RANGE_DAYS * 86_400_000).toISOString(), 'from');
+  if (from.us > to.us) throw new PayError('invalid_param', 422, 'from');
+  if (to.us - from.us > MAX_RANGE_DAYS * 86_400_000_000) throw new PayError('invalid_param', 422, 'to');
+  return { from: from.sql, to: to.sql };
+}
+/** 从早到晚翻页的游标：上一页最后一条的（时间，编号），时间保留到微秒；对外是不透明字符串 */
+export const encodeCursor = (t, id) => Buffer.from(JSON.stringify([t, String(id)])).toString('base64url');
+export function decodeCursor(c) {
+  try {
+    const [t, id] = JSON.parse(Buffer.from(String(c), 'base64url').toString('utf8'));
+    if (typeof t !== 'string' || typeof id !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(t)) throw new Error('bad');
+    return { t, id };
+  } catch { throw new PayError('invalid_param', 422, 'cursor'); }
+}
+/** select 里取出微秒精度的 UTC 时间字符串（游标用） */
+export const usText = (col) => `to_char(${col} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+/**
+ * 按时间段从早到晚翻一页（对账查询共用）：where 已限定商户等条件，vals 是它用到的参数。
+ * 排序（时间列, id），游标是上一页最后一条的（时间, id），所以翻页途中新进的记录不改变已翻过的页。
+ */
+export async function rangePage(db, { table, timeCol, idCast, where, vals, range, cursor, limit }) {
+  vals = [...vals];
+  const p = (v) => { vals.push(v); return `$${vals.length}`; };
+  if (range.from) where += ` and ${timeCol} >= ${p(range.from)}::timestamptz`;
+  where += ` and ${timeCol} < ${p(range.to)}::timestamptz`;
+  if (cursor) { const c = decodeCursor(cursor); where += ` and (${timeCol}, id) > (${p(c.t)}::timestamptz, ${p(c.id)}::${idCast})`; }
+  const rows = await db.query(`select *, ${usText(timeCol)} as cursor_t from ${table} where ${where} order by ${timeCol}, id limit ${p(limit + 1)}`, vals);
+  const more = rows.length > limit;
+  const items = more ? rows.slice(0, limit) : rows;
+  return { items, next_cursor: more ? encodeCursor(items.at(-1).cursor_t, items.at(-1).id) : null };
+}

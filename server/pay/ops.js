@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { encryptJson, decryptJson } from '../kyb/crypto.js';
 import * as core from './core.js';
 import { PayError, CUSTOMER_RE } from './core.js';
-import { parseAmount, iso, page, emailHash } from './common.js';
+import { parseAmount, iso, page, emailHash, rangePage } from './common.js';
 import { checkCallbackUrl } from './callbacks.js';
 import { addressFor } from '../wallet/addresses.js';
 import * as payout from './payout.js';
@@ -176,27 +176,40 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
       const [b] = await db.query('select available, frozen from balances where merchant_id = $1', [m.id]);
       return { available: b.available, frozen: b.frozen, currency: 'USDT' };
     },
-    async ledger(m, { cursor = null, limit = 50, customerId = '' }) {
-      const vals = [m.id, limit + 1];
+    // range（v1.1 对账查询）：{ from, to }，按 created_at 从早到晚、游标是（时间, id）；from、to 都没带（range 为 null）的旧调用照旧按 id 从新到旧
+    async ledger(m, { cursor = null, limit = 50, customerId = '', range = null }) {
+      const vals = [m.id];
       let where = 'merchant_id = $1';
-      if (cursor) { vals.push(Number(cursor)); where += ` and id < $${vals.length}`; }
       if (customerId) { vals.push(customerId); where += ` and customer_id = $${vals.length}`; }
-      const rows = await db.query(`select * from ledger where ${where} order by id desc limit $2`, vals);
-      const p = page(rows.map((r) => ({ ...r, cursor: r.id })), limit);
+      let p;
+      if (range) p = await rangePage(db, { table: 'ledger', timeCol: 'created_at', idCast: 'bigint', where, vals, range, cursor, limit });
+      else {
+        if (cursor) { vals.push(Number(cursor)); where += ` and id < $${vals.length}`; }
+        vals.push(limit + 1);
+        const rows = await db.query(`select * from ledger where ${where} order by id desc limit $${vals.length}`, vals);
+        p = page(rows.map((r) => ({ ...r, cursor: r.id })), limit);
+      }
       return { items: p.items.map((l) => ({ id: String(l.id), type: l.type, amount: l.amount, available_after: l.available_after, frozen_after: l.frozen_after, ref: l.ref, customer_id: l.customer_id, created_at: iso(l.created_at) })), next_cursor: p.next_cursor };
     },
-    async deposits(m, { cursor = null, limit = 50, customerId = '', matched = '' }) {
-      const vals = [m.id, limit + 1];
+    // range（v1.1 对账查询）按 TopUP 入账时间 created_at（不是链上付款时间 time）从早到晚；txid 精确匹配。from、to 都没带的旧调用照旧按 id 从新到旧
+    async deposits(m, { cursor = null, limit = 50, customerId = '', matched = '', txid = '', range = null }) {
+      const vals = [m.id];
       // 低于 1 USDT 的到账不入账、不结算给商户，商户（后台和开放 API）看不到，只在运营后台的"异常到账"里显示
       let where = "merchant_id = $1 and result = 'credited'";
-      if (cursor) { vals.push(Number(cursor)); where += ` and id < $${vals.length}`; }
       if (customerId) { vals.push(customerId); where += ` and customer_id = $${vals.length}`; }
+      if (txid) { vals.push(String(txid)); where += ` and txid = $${vals.length}`; }
       if (matched === 'false') where += ' and order_id is null';
       if (matched === 'true') where += ' and order_id is not null';
-      const rows = await db.query(`select * from deposits where ${where} order by id desc limit $2`, vals);
-      const p = page(rows.map((r) => ({ ...r, cursor: r.id })), limit);
+      let p;
+      if (range) p = await rangePage(db, { table: 'deposits', timeCol: 'created_at', idCast: 'bigint', where, vals, range, cursor, limit });
+      else {
+        if (cursor) { vals.push(Number(cursor)); where += ` and id < $${vals.length}`; }
+        vals.push(limit + 1);
+        const rows = await db.query(`select * from deposits where ${where} order by id desc limit $${vals.length}`, vals);
+        p = page(rows.map((r) => ({ ...r, cursor: r.id })), limit);
+      }
       return {
-        items: p.items.map((d) => ({ id: String(d.id), customer_id: d.customer_id, chain: d.chain, address: d.address, txid: d.txid, amount: d.amount, fee: d.fee, credited: d.result === 'credited' ? d.amount - d.fee : 0, result: d.result, order_no: d.order_id, matched_by: d.match_type, time: iso(d.time) })),
+        items: p.items.map((d) => ({ id: String(d.id), customer_id: d.customer_id, chain: d.chain, address: d.address, txid: d.txid, amount: d.amount, fee: d.fee, credited: d.result === 'credited' ? d.amount - d.fee : 0, result: d.result, order_no: d.order_id, matched_by: d.match_type, time: iso(d.time), credited_at: iso(d.created_at) })),
         next_cursor: p.next_cursor,
       };
     },
@@ -216,6 +229,25 @@ export function createOps({ db, keys, payBase = '', keyPrefix = 'topup_live_', w
       if (cursor) { vals.push(new Date(Number(cursor))); where += ` and created_at < $${vals.length}`; }
       const rows = await db.query(`select id, created_at from withdrawals where ${where} order by created_at desc limit $2`, vals);
       const p = page(rows.map((r) => ({ ...r, cursor: new Date(r.created_at).getTime() })), limit);
+      return { items: await Promise.all(p.items.map((w) => core.withdrawalView(db, w.id))), next_cursor: p.next_cursor };
+    },
+    /**
+     * v1.1 对账查询 GET withdrawals/list/：按 created_at 从早到晚（相同时间按提现号），range 必有（没带 from 时由调用方补成 to − 31 天）。
+     * status 是对外状态（approved 含内部的 signing），chain 是 eth / bsc / tron
+     */
+    async withdrawalList(m, { status = '', chain = '', range, cursor = null, limit = 50 }) {
+      const vals = [m.id];
+      let where = 'merchant_id = $1';
+      if (status) {
+        const inner = Object.keys(core.WD_PUBLIC).filter((k) => core.WD_PUBLIC[k] === status);
+        if (!inner.length) throw new PayError('invalid_param', 422, 'status');
+        vals.push(inner); where += ` and status = any($${vals.length}::text[])`;
+      }
+      if (chain) {
+        if (!CHAIN_ORDER.includes(chain)) throw new PayError('invalid_param', 422, 'chain');
+        vals.push(chain); where += ` and chain = $${vals.length}`;
+      }
+      const p = await rangePage(db, { table: 'withdrawals', timeCol: 'created_at', idCast: 'text', where, vals, range, cursor, limit });
       return { items: await Promise.all(p.items.map((w) => core.withdrawalView(db, w.id))), next_cursor: p.next_cursor };
     },
     cancelWithdrawal: (m, id) => core.cancelWithdrawal(db, m.id, String(id || '')),
