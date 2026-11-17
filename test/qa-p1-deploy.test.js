@@ -117,7 +117,7 @@ case "$1" in
 esac
 `;
 
-// 健康检查：compose up 过以后返回当前版本、环境、worker 刚跑过
+// 健康检查：compose up 过以后返回当前版本、环境、worker 刚跑过（worker.commit = 当前版本：新 worker 报到了；约定见 test/qa-p1-worker-heartbeat.test.js）
 const FAKE_CURL = String.raw`#!/usr/bin/env bash
 echo "$*" >> "$FAKE/curl.log"
 case "$*" in
@@ -128,7 +128,7 @@ case "$*" in
     tag=$(sed -n 's/^IMAGE_TAG=//p' "$TOPUP_DIR/state/image.env" 2> /dev/null)
     env=$(sed -n 's/^TOPUP_ENV=//p' "$TOPUP_DIR/deploy.env" | tail -1)
     net=$(sed -n 's/^TRON_NETWORK=//p' "$TOPUP_DIR/.env" | tail -1)
-    printf '{"ok":true,"env":"%s","commit":"%s","db":true,"storage":true,"secret":true,"blob":true,"mail":false,"mailMode":"none","pay":{"tron":"%s"},"worker":{"age_s":0,"ok":true},"wallet":{"chains":[]}}\n' "$env" "${"$"}{tag:0:7}" "$net"
+    printf '{"ok":true,"env":"%s","commit":"%s","db":true,"storage":true,"secret":true,"blob":true,"mail":false,"mailMode":"none","pay":{"tron":"%s"},"worker":{"age_s":0,"ok":true,"commit":"%s"},"wallet":{"chains":[]}}\n' "$env" "${"$"}{tag:0:7}" "$net" "${"$"}{tag:0:7}"
     exit 0 ;;
 esac
 exit 7
