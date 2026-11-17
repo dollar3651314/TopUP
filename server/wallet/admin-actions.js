@@ -9,6 +9,7 @@ import {
   nextSweepSlot, SWEEP_CHAINS, SWEEP_EXPIRE_HOURS, SWEEP_TIMES,
 } from './sweep.js';
 import { walletChainStatus } from './status.js';
+import { TronNodeError } from './adapters/tron.js';
 import { RENT_MAX_PRICE_SUN } from './energy.js';
 import { operatorGasStatus, native, NATIVE, LOW_GAS_BATCHES } from './operator-gas.js';
 
@@ -16,11 +17,16 @@ const TRON_TYPICAL_BATCH_ENERGY = 1_300_000; // 一批 20 个地址的典型能�
 
 const usdt = (u) => fmtUsdt(Number(u)).replace(/,/g, '');
 
-/** 访问节点出错换成给后台的 503（否则统一 500"服务器出错了"）：限流 / 节点繁忙（HTTP 429、503，重试后仍失败）→ node_busy；连不上、超时、其他 HTTP 错误 → rpc_unreachable */
+/**
+ * 访问节点出错换成给后台的错误码（否则统一 500"服务器出错了"）：限流 / 节点繁忙（HTTP 429、503，重试后仍失败）→ node_busy 503；
+ * 连不上、超时、其他 HTTP 错误、返回的不是 JSON → rpc_unreachable 503；TRON 节点回了 JSON 但带 Error（TronNodeError rpc_error）→ node_error 502。
+ * 返回的只有错误码，不带节点地址、Key、接口路径（这些只在原始错误信息里）
+ */
 export function nodeFailure(e) {
   if (e instanceof PayError) return e;
   if (e?.code === 'rpc_http' && [429, 503].includes(e.httpStatus)) return new PayError('node_busy', 503);
   if (['rpc_unreachable', 'rpc_http'].includes(e?.code) || e?.name === 'TimeoutError' || e?.name === 'AbortError') return new PayError('rpc_unreachable', 503);
+  if (e instanceof TronNodeError && e.code === 'rpc_error') return new PayError('node_error', 502);
   return e;
 }
 /** 发起账户的手续费币少于够付几批典型归集时告警（定义在 operator-gas.js，这里照旧导出） */

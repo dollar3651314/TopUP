@@ -13,7 +13,7 @@ import { signerOf } from './signing.js';
 import { deriveAddress, isValidAddress } from './tron.js';
 import { inviteMerchantUser } from './merchant-api.js';
 import { diskUsage } from './disk.js';
-import { walletAdminActions } from '../wallet/admin-actions.js';
+import { walletAdminActions, nodeFailure } from '../wallet/admin-actions.js';
 import { evmUnswept } from '../wallet/addresses.js';
 import { getSweepSettings } from '../wallet/sweep.js';
 import { payoutAdminActions } from './payout-admin.js';
@@ -26,6 +26,22 @@ const SIGN_CUTOFF_MS = 5 * 60 * 1000; // 交签名的截止：离原文过期不
 const VERIFY_TTL_MS = 5 * 60 * 1000; // 验证码通过后 5 分钟内必须提交签名
 const ENERGY_PER_SWEEP = 65_000; // 转 USDT 到已经有 USDT 的地址，大约需要的能量
 const USDT_FEE_LIMIT = 30 * TRX;
+const LEGACY_BUILD = new Set(['withdraw-plan', 'sweep-plan']); // 向老 TronGrid 建交易的动作
+
+/**
+ * 节点出错给后台的口径（K-13）：老 TronGrid 客户端（trongrid.js）的错也换成和合约钱包、以太坊 / BSC 一样的错误码——
+ * HTTP 429 / 503 → node_busy 503；连不上、超时、其他 HTTP 错误、返回的不是 JSON（json = true 的动作）→ rpc_unreachable 503；
+ * 节点回了 JSON 但没给结果（build_failed、balance_query_failed）→ node_error 502。返回里只有错误码，不带节点地址、Key、接口路径
+ */
+export function gridFailure(e, { json = false } = {}) {
+  if (e instanceof PayError) return e;
+  const http = e?.httpStatus ?? (/^trongrid \d{3}\b/.test(String(e?.message || '')) ? e.status : undefined);
+  if (http !== undefined && e?.code !== 'rpc_unreachable') return new PayError([429, 503].includes(Number(http)) ? 'node_busy' : 'rpc_unreachable', 503);
+  if (e instanceof TypeError && /fetch failed/i.test(e.message)) return new PayError('rpc_unreachable', 503);
+  if (json && e instanceof SyntaxError) return new PayError('rpc_unreachable', 503);
+  if (json && ['build_failed', 'balance_query_failed'].includes(e?.message)) return new PayError('node_error', 502);
+  return nodeFailure(e);
+}
 
 export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null, payoutSvc = null }) {
   const payoutActions = payoutAdminActions({ db, tron, wallets, layer, payoutSvc, verifyAdminCode, now });
@@ -165,16 +181,17 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const pick = new Set(p.batches[0].items.map((x) => x.id));
       const left = rows.length - pick.size;
       const total = Number(p.batches[0].total);
-      // 之前凑了没签的 TRON 批次作废（单回到已审核）；已经交了签名的（不是 planned）不动
-      for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) await voidTronBatch(x.id);
-      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: actor || 'admin' });
-      rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, coalesce(batch_line, 0), id', [[...pick]]);
+      // 先向节点把每笔交易建好，再凑批：建交易途中节点出错（429、连不上）不留下没签名的批次，单仍是已审核、没凑批，之前凑的也不作废
+      rows = rows.filter((w) => pick.has(w.id)); // 已按审核先后排好
       const steps = [];
       const seen = new Set();
       for (const w of rows) {
         const tx = await tron.buildUsdtTransfer({ from: hot, to: w.to_address, amount: w.amount, feeLimit: USDT_FEE_LIMIT });
         steps.push({ kind: 'withdraw', stage: 1, withdrawal_id: w.id, owner: hot, expect: { to: w.to_address, amount: w.amount }, ...withExpiry(tx, seen) });
       }
+      // 之前凑了没签的 TRON 批次作废（单回到已审核）；已经交了签名的（不是 planned）不动
+      for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) await voidTronBatch(x.id);
+      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: actor || 'admin' });
       const id = await saveBatch('withdraw', { steps, payout_batch: ptId });
       return { batch_id: id, payout_batch: ptId, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total, count: pick.size, left };
     },
@@ -473,9 +490,10 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
   }
 
   const handle = async function handle(request) {
+    let a = '';
     try {
       const url = new URL(request.url);
-      const a = url.searchParams.get('a') || '';
+      a = url.searchParams.get('a') || '';
       if (!actions[a]) return json(404, { error: { code: 'not_found' } });
       const isPost = request.method === 'POST';
       if (isPost && request.headers.get('x-topup-csrf') !== '1') return json(403, { error: { code: 'csrf' } });
@@ -484,8 +502,9 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       if (who?.testAdmin) return await asTestAdminCall(a, b, url.searchParams, isPost);
       return json(200, money(await actions[a](b, 'admin', url.searchParams)));
     } catch (e) {
-      if (e?.status === 401) return json(401, { error: { code: 'unauthorized' } });
-      return errorResponse(e);
+      if (e?.status === 401 && !/^trongrid /.test(String(e?.message || ''))) return json(401, { error: { code: 'unauthorized' } });
+      // 节点出错换成 node_busy / rpc_unreachable / node_error（K-13）；老 TRON 的"核对并签名"、归集出交易：返回不是 JSON、节点没给结果也算节点的问题
+      return errorResponse(gridFailure(e, { json: LEGACY_BUILD.has(a) }));
     }
   };
   handle.actions = Object.keys(actions); // 项目索引的测试用：检查每个动作都写进了《项目索引》
