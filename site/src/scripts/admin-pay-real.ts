@@ -64,7 +64,7 @@ async function show(tab: string) {
     p.dataset.shown = '';
     // 页面过期（部署后没刷新）：重试没用，按钮改成"刷新页面"
     const stale = (e as WErr).code === 'stale_page';
-    p.replaceChildren(h('div', { class: 'alert', 'data-load-error': '' }, errText(e), ' ', h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => (stale ? location.reload() : show(tab)) }, stale ? '刷新页面' : '重试')));
+    p.replaceChildren(h('div', { class: stale ? 'warn-box' : 'alert', 'data-load-error': '' }, errText(e), ' ', h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => (stale ? location.reload() : show(tab)) }, stale ? '刷新页面' : '重试')));
   } finally { clearTimeout(slow); }
   counts();
 }
@@ -234,7 +234,7 @@ function editMerchant(m: any) {
   const wallets = h('textarea', { rows: '3', class: 'mono-input', placeholder: 'eth 0x…\nbsc 0x…\ntron T…' }) as HTMLTextAreaElement;
   wallets.value = m.cashout_wallets.map((w: any) => (typeof w === 'string' ? `tron ${w}` : `${w.chain} ${w.address}`)).join('\n');
   const reEmail = h('input', { type: 'email', value: m.users[0]?.email || '' }) as HTMLInputElement;
-  dialog(m.name, h('div', { class: 'stack' }, h('dl', { class: 'kv m0' }, h('dt', {}, '商户编号'), h('dd', {}, h('span', { class: 'copy-row' }, mono(m.id), copyBtn(() => m.id, '复制', '已复制')))),
+  dialog(m.name, h('div', { class: 'stack' }, h('dl', { class: 'kv kv-tight m0' }, h('dt', {}, '商户编号'), h('dd', {}, h('span', { class: 'copy-row' }, mono(m.id), copyBtn(() => m.id, '复制', '已复制')))),
     h('label', { class: 'check-row' }, active, '启用（停用后商户不能登录，API 返回 403，已分配的地址照常监控入账）'),
     fin.box, fout.box, mode.box, field('em-w', '已登记的提现钱包（每行一个："链 地址"，链是 eth、bsc 或 tron；同一串 0x 地址要两条链都能提就写两行）', wallets),
     h('div', { class: 'inline-form' }, field('em-re', '重新发送设置密码的邮件', reEmail), h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: async () => {
