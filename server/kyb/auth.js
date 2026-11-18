@@ -19,12 +19,21 @@ export function verifyPassword(pw, stored) {
   return safeEqual(got.toString('base64url'), h);
 }
 
-/** 会话：base64url(JSON{exp,v}) + "." + HMAC。v 是会话版本号，退出登录时递增，旧 Cookie 全部失效 */
-export function makeSession(key, version, now = Date.now()) {
-  const body = Buffer.from(JSON.stringify({ exp: now + SESSION_TTL_MS, v: version })).toString('base64url');
+/** 管理员标识：每次（重新）初始化管理员都换一个（128 位随机），存在 topup:admin 的 sid 里 */
+export const newAdminSid = () => randomBytes(16).toString('base64url');
+
+/**
+ * 会话：base64url(JSON{exp,v,s}) + "." + HMAC。v 是会话版本号，退出登录时递增，旧 Cookie 全部失效；
+ * s 是签发时管理员的标识（sid），admin-reset 后重新初始化会换新标识，重置前的 Cookie 因此全部失效（版本号从 1 重来也不会复活）。
+ * 升级前初始化的管理员记录没有 sid：只认同样没有 s 的 Cookie（旧规则），退出登录或下次重新初始化时补上标识。
+ */
+export function makeSession(key, version, now = Date.now(), sid = undefined) {
+  const body = Buffer.from(JSON.stringify({ exp: now + SESSION_TTL_MS, v: version, ...(sid ? { s: sid } : {}) })).toString('base64url');
   return `${body}.${hmac(key, body)}`;
 }
-export function readSession(key, cookieHeader, version, now = Date.now()) {
+/** admin 是 topup:admin 的记录（{ version, sid }）；也可以只传版本号（等同于没有 sid 的记录） */
+export function readSession(key, cookieHeader, admin, now = Date.now()) {
+  const { version, sid } = typeof admin === 'object' && admin ? admin : { version: admin, sid: undefined };
   const m = /(?:^|;\s*)topup_admin=([^;]+)/.exec(cookieHeader || '');
   if (!m) return null;
   const [body, sig] = m[1].split('.');
@@ -32,6 +41,7 @@ export function readSession(key, cookieHeader, version, now = Date.now()) {
   try {
     const s = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
     if (s.exp <= now || s.v !== version) return null;
+    if ((s.s || '') !== (sid || '')) return null; // 管理员标识对不上：重置前签发的 Cookie
     return s;
   } catch { return null; }
 }

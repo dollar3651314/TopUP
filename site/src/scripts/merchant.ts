@@ -6,7 +6,7 @@ import { calcFee, describeFee, fmtUsdt, isTronAddress, parseUsdt, shortAddr } fr
 import { realData, protoData, units, ApiErr, MAX_ROWS, type List, type Amount, type Cust, type Dep, type OrderFull, type Wd, type Me, type ChainAddr } from './merchant-data';
 import * as Mock from './mock';
 import { isChecksumAddress } from '../../../server/wallet/evm-payout-codec.js';
-import { copyBtn, field, fieldErr, fmtTime, h, makeDialog, mono, qrDataUrl, stat, status, table, toast, tpl } from './ui';
+import { copyBtn, field, fieldErr, fmtTime, h, makeDialog, mono, put, qrDataUrl, stat, status, table, toast, tpl } from './ui';
 
 const root = document.getElementById('m-root')!;
 const lang = (root.dataset.lang || 'en') as 'en' | 'zh';
@@ -128,11 +128,14 @@ render.overview = async (p) => {
   const o = await D.overview();
   if (o.chains) enabledChains = o.chains;
   const on = me.order_mode.enabled;
-  p.replaceChildren(
+  put(p,
+    debtAlert(o.debt),
+    recentReversals(o.debt, o.recent_reversals),
     toolbar(c.overview.title, on ? h('button', { type: 'button', class: 'btn btn-primary', onclick: createOrder }, c.overview.newOrder) : null),
     h('div', { class: 'stats' },
       stat(c.overview.available, usd(o.available), 'USDT'),
       stat(c.overview.frozen, usd(o.frozen), tpl(c.overview.frozenSub, { n: o.pending_withdrawals })),
+      debtStat(o.debt),
       stat(c.overview.today, usd(o.today), tpl(c.overview.todaySub, { n: o.today_count, fee: usd(o.today_fees) })),
       on ? stat(c.overview.openOrders, String(o.open_orders), c.overview.openOrdersSub) : null,
       on ? stat(c.overview.unmatched, usd(o.unmatched), tpl(c.overview.unmatchedSub, { n: o.unmatched_count })) : null),
@@ -142,12 +145,60 @@ render.overview = async (p) => {
     depositTable(o.recent),
   );
 };
+// v1.1 欠款：到账被冲正、余额不够扣时记的欠款（还清前不能提币，之后的到账先还）
+function debtStat(debt: Amount | undefined): HTMLElement {
+  const owe = units(debt || '0') > 0;
+  const s = stat(c.overview.debt, usd(debt || '0'), owe ? c.overview.debtSub : c.overview.debtNone);
+  s.setAttribute('data-debt', '');
+  if (owe) s.classList.add('stat-bad');
+  return s;
+}
+function debtAlert(debt: Amount | undefined): HTMLElement | null {
+  if (!(units(debt || '0') > 0)) return null;
+  return h('section', { class: 'hero-todo hero-bad', 'data-debt-alert': '' },
+    h('div', { class: 'stack-sm' }, h('h2', { class: 'm0' }, tpl(c.overview.debtTitle, { amount: usd(debt!) })), h('p', { class: 'muted m0' }, c.overview.debtText)),
+    h('button', { type: 'button', class: 'btn btn-primary', 'data-goto-reversed': '', onclick: gotoReversed }, c.overview.debtGo));
+}
+/** 去交易页只看已冲正的到账 */
+const gotoReversed = () => { txTab = 'deposits'; onlyReversed = true; onlyUnmatched = false; go('transactions'); };
+/** 没有欠款、但最近 7 天有到账被冲正：概览提一句 */
+function recentReversals(debt: Amount | undefined, n: number | undefined): HTMLElement | null {
+  if (units(debt || '0') > 0 || !n) return null;
+  return h('div', { class: 'note-box row-actions spread', 'data-recent-reversals': String(n) }, h('span', {}, tpl(c.overview.recentReversals, { n })),
+    h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: gotoReversed }, c.overview.recentGo));
+}
+/** 冲正详情（原型 M2）：冲正时间、扣回多少（从可用余额扣的、记成欠款的）、订单解除匹配、已发回调 */
+function reversalDetail(d: Dep) {
+  const cr = c.dep.rev;
+  const x = d.reversal;
+  const net = x ? x.net : d.credited;
+  const kv = (rows: [string, string | HTMLElement][]) => h('dl', { class: 'kv' }, ...rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
+  const body = h('div', { class: 'stack', 'data-reversal-detail': d.id },
+    h('p', { class: 'muted m0' }, cr.lead),
+    kv([
+      [cr.time, t(x?.reversed_at || d.reversed_at || d.time)],
+      [c.dep.cols.customer, mono(d.customer_id)],
+      [cr.tx, h('div', { class: 'stack-sm' }, h('span', {}, chainTag(d.chain || 'tron')), mono(d.txid))],
+      [cr.amount, `${usd(d.amount)} USDT`],
+      [cr.net, h('b', {}, `${usd(net)} USDT`)],
+      ...(x ? [[cr.taken, `${usd(x.taken)} USDT`], [cr.debt, units(x.debt_added) > 0 ? h('b', { class: 'bad' }, `${usd(x.debt_added)} USDT`) : cr.noDebt]] as [string, string | HTMLElement][] : []),
+      [cr.order, x?.order_no ? tpl(cr.orderReleased, { order: x.order_no }) : cr.noOrder],
+    ]),
+    x && units(x.debt_added) > 0 ? h('p', { class: 'alert m0' }, cr.debtNote) : null,
+    h('p', { class: 'info-box m0', 'data-reversal-callback': '' }, cr.callback));
+  dialog(cr.title, body, c.common.close, null, false, true);
+}
 function depResult(d: Dep): HTMLElement {
+  if (d.result === 'reversed') { const s = status('needs_info', c.dep.result.reversed); s.setAttribute('data-reversed', ''); if (d.reversed_at) s.title = t(d.reversed_at); return s; }
+  // 入账时先还了欠款（v1.1）：橙色
+  if (d.result === 'credited' && !d.confirmations && units(d.repaid_debt || '0') > 0) {
+    const s = status('submitted', c.dep.result.repaid); s.setAttribute('data-repaid-debt', ''); s.title = tpl(c.dep.repaidNote, { amount: usd(d.repaid_debt!) }); return s;
+  }
   if (d.confirmations) return status('submitted', tpl(c.dep.result.confirming, { n: d.confirmations }));
   if (d.result === 'below_min') return status('expired', c.dep.result.below_min);
   return status('approved', c.dep.result.credited);
 }
-const depOrder = (d: Dep) => (d.result !== 'credited' || d.confirmations ? '—' : d.order_no ? mono(d.order_no) : me.order_mode.enabled ? status('in_progress', c.dep.unmatched) : '—');
+const depOrder = (d: Dep) => (d.result === 'reversed' && d.reversal?.order_no ? sub(mono(d.reversal.order_no), c.dep.orderReleased) : d.result !== 'credited' || d.confirmations ? '—' : d.order_no ? mono(d.order_no) : me.order_mode.enabled ? status('in_progress', c.dep.unmatched) : '—');
 /** 表格里的一格：主要内容 + 下面一行小字（走查：列太多时在 1280 宽的屏幕上放不下，相关的两列合成一格） */
 const sub = (main: string | HTMLElement, note: string | HTMLElement | null) => h('span', { class: 'cell-2' }, main, note ? h('span', { class: 'hint muted' }, note) : null);
 /** 长列表先显示 50 条，"显示更多"再往下显示；没有取完时提示导出 */
@@ -156,11 +207,19 @@ function depositTable(rows: List<Dep>, full = false): HTMLElement {
   const cc = c.dep.cols;
   const cols = full ? [cc.time, cc.customer, `${cc.address} · ${cc.txid}`, cc.amount, `${cc.credited} · ${cc.fee}`, cc.match, cc.status] : [cc.time, cc.customer, cc.amount, cc.credited, cc.match, cc.status];
   return table(cols, rows.map((d) => {
-    const credited = d.result === 'credited' && !d.confirmations ? usd(d.credited) : '—';
+    // 冲正过的：原来的入账金额划掉（原型 M2）
+    const credited = d.result === 'reversed' ? h('s', { class: 'muted', 'data-struck': '' }, usd(d.reversal ? d.reversal.net : d.credited)) : d.result === 'credited' && !d.confirmations ? usd(d.credited) : '—';
     return full
       ? [t(d.time), custLink(d.customer_id), sub(mono(shortAddr(d.address), d.address), mono(d.txid.slice(0, 10) + '…', d.txid)), usd(d.amount), sub(credited, units(d.fee) ? `${cc.fee} ${usd(d.fee)}` : null), depOrder(d), depResult(d)]
       : [t(d.time), custLink(d.customer_id), usd(d.amount), credited, depOrder(d), depResult(d)];
-  }), c.common.none, full ? { page: pg(rows) } : {});
+  }), c.common.none, {
+    ...(full ? { page: pg(rows) } : {}),
+    // 冲正过的一行点开看详情（别的行不能点）
+    ...(rows.some((d) => d.result === 'reversed') ? {
+      onRow: (i: number) => { if (rows[i].result === 'reversed') reversalDetail(rows[i]); },
+      rowAttrs: (i: number) => (rows[i].result === 'reversed' ? { class: 'clickable', 'data-reversed-row': rows[i].id } : { class: 'no-hover' }),
+    } : {}),
+  });
 }
 
 // ---------- 客户 ----------
@@ -409,7 +468,7 @@ async function createOrder() {
 }
 
 // ---------- 交易 ----------
-let txTab: 'deposits' | 'ledger' = 'deposits', onlyUnmatched = false, txCust = '';
+let txTab: 'deposits' | 'ledger' = 'deposits', onlyUnmatched = false, onlyReversed = false, txCust = '';
 render.transactions = async (p) => {
   const ct = c.tx;
   const tabs = h('div', { class: 'filters', role: 'tablist' },
@@ -418,18 +477,25 @@ render.transactions = async (p) => {
   const cust = h('input', { type: 'search', class: 'input-sm', placeholder: c.orders.filterCustomer, value: txCust }) as HTMLInputElement;
   cust.addEventListener('change', () => { txCust = cust.value.trim(); render.transactions(p); });
   const um = h('input', { type: 'checkbox', checked: onlyUnmatched }) as HTMLInputElement;
-  um.addEventListener('change', () => { onlyUnmatched = um.checked; render.transactions(p); });
+  um.addEventListener('change', () => { onlyUnmatched = um.checked; if (um.checked) onlyReversed = false; render.transactions(p); });
+  const rv = h('input', { type: 'checkbox', id: 'tx-only-reversed', checked: onlyReversed }) as HTMLInputElement;
+  rv.addEventListener('change', () => { onlyReversed = rv.checked; if (rv.checked) onlyUnmatched = false; render.transactions(p); });
   const lc = ct.ledgerCols;
   let content: HTMLElement;
-  if (txTab === 'deposits') content = depositTable(await D.deposits(txCust, onlyUnmatched), true);
+  if (txTab === 'deposits') {
+    const all = await D.deposits(txCust, onlyUnmatched);
+    if (!onlyReversed) content = depositTable(all, true);
+    else { const rows = Object.assign(all.filter((d) => d.result === 'reversed'), { truncated: (all as List<Dep>).truncated }); content = rows.length ? depositTable(rows, true) : h('p', { class: 'muted' }, ct.noneReversed); }
+  }
   else {
     const rows = await D.ledger(txCust);
     content = h('div', { class: 'stack' }, h('p', { class: 'hint muted m0' }, ct.ledgerNote),
-      table([lc.time, lc.type, c.dep.cols.customer, lc.amount, lc.balance, lc.ref], rows.map((l) => [t(l.created_at), ct.ledgerTypes[l.type], l.customer_id ? mono(l.customer_id) : '—',
-        h('span', { class: units(l.amount) < 0 ? 'neg' : 'pos' }, (units(l.amount) > 0 ? '+' : '') + usd(l.amount)), usd(l.available_after), mono(l.ref)]), c.common.none, { page: pg(rows) }));
+      table([lc.time, lc.type, c.dep.cols.customer, lc.amount, lc.balance, ct.debtCol, lc.ref], rows.map((l) => [t(l.created_at), ct.ledgerTypes[l.type] || l.type, l.customer_id ? mono(l.customer_id) : '—',
+        h('span', { class: units(l.amount) < 0 ? 'neg' : 'pos' }, (units(l.amount) > 0 ? '+' : '') + usd(l.amount)), usd(l.available_after), units(l.debt_after || '0') > 0 ? h('b', { class: 'bad' }, usd(l.debt_after!)) : usd(l.debt_after || '0'), mono(l.ref)]), c.common.none, { page: pg(rows) }));
   }
   const exp = D.exportUrl(txTab);
   p.replaceChildren(toolbar(ct.title, cust, txTab === 'deposits' && me.order_mode.enabled ? h('label', { class: 'inline-label' }, um, c.dep.filterUnmatched) : null,
+    txTab === 'deposits' ? h('label', { class: 'inline-label' }, rv, ct.onlyReversed) : null,
     exp ? h('a', { class: 'btn btn-outline', href: exp, download: '' }, c.common.export) : h('button', { type: 'button', class: 'btn btn-outline', onclick: () => say(c.common.exported) }, c.common.export)), tabs, content);
 };
 
@@ -479,10 +545,12 @@ render.withdraw = async (p) => {
     payTo.placeholder = ch === 'tron' ? 'T…' : '0x…';
   };
   chainSel.addEventListener('change', onChange); kindCash.addEventListener('change', onChange); kindPayout.addEventListener('change', onChange);
-  const submit = h('button', { class: 'btn btn-primary', type: 'submit' }, cw.submit) as HTMLButtonElement;
-  const form = h('form', { class: 'card form-card wd-form', novalidate: true },
+  const owe = units(ov.debt || '0') > 0;
+  const submit = h('button', { class: 'btn btn-primary', type: 'submit', 'data-mw-submit': '', disabled: owe }, cw.submit) as HTMLButtonElement;
+  // 有欠款时整个表单（包括输入框）都不能填：用 fieldset disabled
+  const form = h('form', { class: 'card wd-form', novalidate: true }, h('fieldset', { class: 'form-card wd-fieldset', disabled: owe, 'data-wd-fieldset': '' },
     h('div', { class: 'f' }, h('span', { class: 'lbl' }, cw.kind), h('div', { class: 'choices' }, h('label', {}, kindCash, cw.kindCashout), h('label', {}, kindPayout, cw.kindPayout))),
-    field('mw-chain', cw.chain, chainSel, tpl(cw.chainFee, { fee: `${describeFee(me.fee_out, lang)}` })), toField, noReg, payField, custField, field('mw-amt', cw.amount, amt), summary, field('mw-code', cw.code, code), submit);
+    field('mw-chain', cw.chain, chainSel, tpl(cw.chainFee, { fee: `${describeFee(me.fee_out, lang)}` })), toField, noReg, payField, custField, field('mw-amt', cw.amount, amt), summary, field('mw-code', cw.code, code), submit));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const cash = kindCash.checked, ch = chainSel.value;
@@ -495,7 +563,7 @@ render.withdraw = async (p) => {
     const f = a ? calcFee(a, me.fee_out) : 0;
     bad = fieldErr(amt, !a ? cw.errAmount : a + f > available ? cw.errInsufficient : null) || bad;
     bad = fieldErr(code, /^\d{6}$/.test(code.value.trim()) ? null : cw.errCode) || bad;
-    if (bad) return;
+    if (bad || owe) return;
     submit.disabled = true;
     try {
       const w = await D.withdraw({ kind: cash ? 'cashout' : 'payout', chain: ch, to: cash ? toSel.value : payTo.value.trim(), amount: amt.value.replace(/[,\s]/g, ''), customer_id: !cash && cid ? cid : undefined, code: code.value.trim() });
@@ -504,13 +572,15 @@ render.withdraw = async (p) => {
     } catch (err) {
       const k = (err as ApiErr).code;
       fieldErr(k === 'bad_code' ? code : k === 'invalid_address' || k === 'address_not_registered' ? (cash ? toSel : payTo) : amt, errText(err));
-    } finally { submit.disabled = false; }
+    } finally { submit.disabled = owe; }
   });
   onChange(); upd();
   const cc = cw.cols;
-  p.replaceChildren(
+  put(p,
     toolbar(cw.title),
     h('div', { class: 'note-box', 'data-sla': '' }, cw.note),
+    owe ? h('div', { class: 'alert debt-block row-actions spread', 'data-debt-block': '' }, h('span', {}, tpl(cw.debtBlock, { amount: usd(ov.debt!) })),
+      h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-goto-reversed': '', onclick: gotoReversed }, c.overview.debtGo)) : null,
     h('div', { class: 'wd-grid' }, h('div', {}, h('h2', { class: 'h-sm' }, cw.new), form),
       h('div', { class: 'stats stats-col' }, stat(c.overview.available, usd(ov.available), cw.balanceNote), stat(c.overview.frozen, usd(ov.frozen), 'USDT'))),
     h('h2', { class: 'h-sm' }, cw.history),

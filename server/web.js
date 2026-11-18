@@ -37,6 +37,19 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
   const appPromise = createApp(config, { getIp });
   appPromise.catch((err) => console.error(`[web] init failed: ${err.missing ? err.message : err.code || err.message}`));
   const reason = (err) => (config.appEnv === 'production' ? undefined : err.missing ? 'not_configured' : initReason(err));
+  // 页面过期（K-3）：admin 页构建时记下提交号（#admin-root 的 data-build），调 /api/wallet/ 时带 X-TopUP-Build；和这个服务器正在提供的 admin 页的构建号不同
+  // → 409 stale_page（部署后没刷新的旧页面），在登录检查之前判断。请求头没带（旧页面、脚本）或服务器没有构建号（本地开发）时不判断。
+  // 构建号优先读自己目录里 admin 页的 data-build（和浏览器刷新后拿到的是同一个文件；镜像只改 ENV 里的提交号重打时，页面和服务器仍一致，不会每个请求都 409），
+  // 读不到或是空的（单元测试、本地构建）才用环境变量里的提交号
+  const hexOf = (v) => String(v || '').replace(/[^0-9a-f]/gi, '').toLowerCase(); // 和页面构建时同样的写法（site/src/pages/admin/index.astro）
+  const pageBuild = (() => {
+    try { return hexOf(readFileSync(join(site, 'admin', 'index.html'), 'utf8').match(/id="admin-root"[^>]*data-build="([^"]*)"/)?.[1]); } catch { return ''; }
+  })();
+  const build = pageBuild || hexOf(process.env.GIT_COMMIT);
+  const stalePage = (request) => {
+    const b = hexOf(request.headers.get('x-topup-build'));
+    return Boolean(build && b && b !== build);
+  };
   const app = async () => appPromise;
   const pay = async () => (await appPromise).pay;
 
@@ -67,13 +80,16 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
     const mailMode = c.resendApiKey ? 'resend' : c.smtp.host ? 'smtp' : 'none';
     const payInfo = { tron: c.tronNetwork, trongridKey: Boolean(c.tronApiKey) };
     // worker 最近一次扫链距今的秒数（超过 5 分钟说明 worker 没在运行）；只用来告警，不影响 ok
+    // commit：worker 心跳里它自己的提交号（不是 web 的）；还没有心跳、或旧版本 worker 写的心跳里没有 → null。
+    // 收付款没初始化成功（查不了心跳）时不给 commit 这一项（这时 ok = false、没有 wallet，部署工具照样判没活）
     let worker = { age_s: null, ok: false };
     let ready = false;
     try {
       const d = await pay(); ready = true;
       const [r] = await d.db.query(`select value from pay_meta where key = 'tick_last'`);
       const age = r ? Math.round((Date.now() - Date.parse(r.value.at)) / 1000) : null;
-      worker = { age_s: age, ok: age !== null && age <= 300 };
+      const wc = r && typeof r.value.commit === 'string' && r.value.commit ? r.value.commit : null;
+      worker = { age_s: age, ok: age !== null && age <= 300, commit: wc };
     } catch (err) { if (ready) worker.error = 'query_failed'; else if (reason(err)) payInfo.reason = reason(err); }
     // 钱包（ETH、BSC 每条链的扫块、合约地址配没配齐，只给是否）：单独显示，不进整体 ok
     let wallet = null;
@@ -120,6 +136,12 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
       return Response.json(ad.block(body.address, body.blocked !== false));
     }
     if (path === '/__fake/tick/') return Response.json(await d.tick());
+    // v1.1 冲正复核：gone 里的交易算没了，unreachable 时一律当节点连不上；now 不传为现在
+    if (path === '/__fake/recheck/') {
+      const gone = new Set(Array.isArray(body.gone) ? body.gone.map(String) : []);
+      const check = async (x) => { if (body.unreachable) throw Object.assign(new Error('unreachable'), { code: 'ECONNREFUSED' }); return !gone.has(x.txid); };
+      return Response.json(await d.recheck({ check, now: body.now ? Number(body.now) : Date.now() }));
+    }
     if (path === '/__fake/daily/') return Response.json(await d.daily());
     if (path === '/__fake/sql/' && process.env.FAKE_SQL === '1') return Response.json(await d.db.query(body.sql, body.params || []));
     return null;
@@ -135,7 +157,7 @@ export function createWeb(config, { site = resolve(process.env.SITE_DIR || join(
     if (path.startsWith('/api/v1/')) return payRoute('v1', request);
     if (path === '/api/merchant/') return payRoute('merchant', request);
     if (path === '/api/pay/') return payRoute('pay', request);
-    if (path === '/api/wallet/') return payRoute('wallet', request);
+    if (path === '/api/wallet/') return stalePage(request) ? json(409, { error: { code: 'stale_page', message: 'The page is out of date, reload it' } }) : payRoute('wallet', request);
     if (path === '/api/health/') return health();
     // 只在本地、使用 TronGrid 替身时存在：端到端测试用它"模拟"链上发生的事、代替 worker 立即跑一次任务
     if (path.startsWith('/__fake/') && config.fakeTron) { const r = await fake(path, request); if (r) return r; }

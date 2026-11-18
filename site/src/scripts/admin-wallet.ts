@@ -1,7 +1,7 @@
 // 运营后台的合约钱包部分（正式模式）：归集（ETH、BSC）、钱包提供方、系统状态里每条链的卡片、概览的"待处理"。
 // 接口：/api/wallet/?a=wallet-*（server/wallet/admin-actions.js）。页面只显示服务器给的结果，钱只能进冷钱包（写死在合约里）。
 import { fmtUsdt, parseUsdt, shortAddr } from '../lib/money';
-import { copyBtn, field, fieldErr, fmtTime, h, mono, stat, status, table } from './ui';
+import { copyBtn, field, fieldErr, fmtTime, h, mono, put, stat, status, table } from './ui';
 
 type Call = (a: string, body?: unknown, qs?: string) => Promise<any>;
 type Dialog = (t: string, content: Node, okText: string, onOk: (() => boolean | void | Promise<boolean | void>) | null, danger?: boolean, hideOk?: boolean) => void;
@@ -29,6 +29,7 @@ const ERR: Record<string, string> = {
   wallet_not_configured: '钱包还没有配置好，看"系统状态"。', invalid_param: '有一项填得不对，请检查标红的地方。',
   node_busy: '节点繁忙（请求太多被限流），这次没有执行、钱没动；请过一两分钟稍后再试。',
   rpc_unreachable: '节点暂时连不上，这次没有执行、钱没动；请稍后再试。',
+  node_error: '链上节点回了错误，这次没有执行、钱没动；请稍后再试，一直这样看"系统状态"。',
 };
 const err = (ui: WalletUi, e: any) => ERR[e?.code] || ui.errText(e);
 /** TRON 批次的能量一行：租到多少、花多少 TRX / 租失败已改烧 TRX */
@@ -376,7 +377,7 @@ export async function renderRoutes(ui: WalletUi, p: HTMLElement) {
   const r = await ui.call('wallet-routes');
   const canSwitch = (c: any) => r.providers.some((x: any) => x.enabled && x.id !== c.provider);
   const count = (c: any, st: string) => c.addresses.filter((a: any) => a.status === st).reduce((s: number, a: any) => s + a.address_count, 0);
-  p.replaceChildren(
+  put(p,
     h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, '钱包提供方'), h('span', { class: 'muted' }, '谁来管收款地址里的钱 · 按链整体切换')),
     hero('ok', '现在没事要做', '以太坊、BSC 都用合约钱包。只有在要换一家托管方（例如 Cobo）时才来这里；换之前要先开账号、实测。'),
     h('h2', { class: 'h-sm' }, '每条链现在用谁'),

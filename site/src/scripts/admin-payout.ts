@@ -4,7 +4,7 @@
 import wallets from '../../../config/wallets.json';
 import { checkPayoutTx, checkApproveTx, decodeUnsignedLegacyTx, decodePayCall, signUnsigned, addressOfKeyBytes } from '../../../server/wallet/evm-payout-codec.js';
 import { fmtUsdt, parseUsdt, shortAddr } from '../lib/money';
-import { copyBtn, field, fieldErr, fmtTime, h, mono, secretInput, status, table } from './ui';
+import { copyBtn, field, fieldErr, fmtTime, h, mono, put, secretInput, status, table } from './ui';
 import { CHAIN_NAME, STD, chainTag, gasText, hero, type WalletUi } from './admin-wallet';
 
 const root = document.getElementById('admin-root')!;
@@ -27,6 +27,8 @@ const u = (v: unknown) => parseUsdt(String(v ?? '0')) ?? 0;
 const usd = (v: unknown) => fmtUsdt(u(v));
 const rawOf = (chain: string, usdtText: unknown) => BigInt(u(usdtText)) * 10n ** BigInt(DECIMALS[chain] - 6);
 const fromRaw = (chain: string, raw: bigint) => fmtUsdt(Number(raw / 10n ** BigInt(DECIMALS[chain] - 6)));
+/** 商户：名称下面一行小字显示商户编号（m_ 开头，和商户后台、API 里的一致；同名商户也分得清） */
+const merchantCell = (x: any) => (x.merchant_id ? h('span', { class: 'cell-2' }, x.merchant, h('span', { class: 'hint muted mono', 'data-merchant-id': '' }, x.merchant_id)) : x.merchant);
 const minsOf = (iso: string) => Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
 const waitText = (m: number) => (m < 60 ? `${m} 分钟` : `${Math.floor(m / 60)} 小时 ${m % 60} 分`);
 const waitAttr = (m: number) => (m > 60 ? 'late' : m > 30 ? 'warn' : 'ok');
@@ -37,7 +39,9 @@ const HOLD: Record<string, string> = { transfer_failed: '收款地址转不了�
 /** 单的内部状态 → 中文（批次详情里用） */
 const WST: Record<string, string> = { pending: '待审核', approved: '已审核，等凑批', signing: '已凑批，等签名', broadcast: '已广播，等链上确认', completed: '已完成', rejected: '已驳回', cancelled: '商户已取消', failed: '失败，已退回' };
 const PERR: Record<string, string> = {
-  exceeds_per_item_limit: '这笔超过单笔上限：只能驳回，或者先改上限。', exceeds_daily_limit: '今天（东八区）通过的合计会超过每天上限：明天再审，或者先改上限。', reason_required: '有不勾的笔，要填驳回原因。',
+  exceeds_per_item_limit: '这笔超过单笔上限：只能驳回，或者先改上限。', exceeds_merchant_daily_limit: '这个商户今天（东八区）通过的合计会超过每个商户每天上限：明天再审，或者先改上限。',
+  exceeds_daily_limit: '全平台今天（东八区）通过的合计会超过全平台每天上限：明天再审，或者先改上限。', reason_required: '有不勾的笔，要填驳回原因。',
+  debt_outstanding: '这个商户有欠款，还清前不能通过：可以驳回。',
   wrong_signer: '签名人不是这条链的热钱包，服务器没广播。', broadcast_rejected: '节点拒绝了这笔交易：这一批已回到"已审核"，钱没动，可以重新凑批签名。', allowance_in_progress: '正在改授权额度，两笔签完之前这条链的打款暂停。',
   broadcast_unreachable: '节点暂时连不上，这一笔没算签完：稍后用同一个窗口再签一次同一笔（同一笔交易，不会重复）。', rpc_unreachable: '节点暂时连不上（以太坊 / BSC 节点），稍后再试。', estimate_reverted: '节点试算这一批会失败（合约回滚），没出交易：检查热钱包余额、授权额度和收款地址后再试。',
   too_many_bad_items: '这一轮有多笔收款地址转不了，已逐笔挂起；请先处理挂起的，再凑批。', exceeds_hot_max: '新额度不能超过热钱包上限：先改上限，或者调低额度。',
@@ -46,8 +50,19 @@ const PERR: Record<string, string> = {
   fee_too_high: '现在的网络费超过上限，先不签，稍后再试。', chain_not_enabled: '这条链还没开通批量打款（config/wallets.json 没写热钱包和 BatchPayout）。', not_applicable: 'TRON 打款不走合约，不用授权额度。',
 };
 /** 上限之间的约束（服务器 updatePayoutLimits 的 rows[0].rule） */
-const LIMIT_RULE: Record<string, string> = { per_item_le_per_batch: '单笔上限不能大于每批上限：调低单笔，或先调高每批', per_batch_le_per_day: '每批上限不能大于每天上限：调低每批，或先调高每天', hot_low_le_hot_max: '提醒线不能高于热钱包上限：调低提醒线，或先调高热钱包上限' };
+const LIMIT_RULE: Record<string, string> = { per_item_le_per_batch: '单笔上限不能大于每批上限：调低单笔，或先调高每批', per_batch_le_per_day: '每批上限不能大于全平台每天上限：调低每批，或先调高全平台每天',
+  per_merchant_day_le_per_day: '每个商户每天上限不能大于全平台每天上限：调低商户每天，或先调高全平台每天', hot_low_le_hot_max: '提醒线不能高于热钱包上限：调低提醒线，或先调高热钱包上限' };
 const errOf = (ui: WalletUi, e: any) => PERR[e?.code] || ui.errText(e);
+/**
+ * 服务器给每笔待审核的 limit_check（按"现在单独审这一笔"算）→ 页面行上的 data-limit-check 和"上限检查"一格。
+ * 商户有欠款时服务器给 debt_outstanding（还清前不能通过，不算超上限）；不认识的值原样放进 data-limit-check、按"不能通过"显示
+ */
+const LIMIT_ATTR: Record<string, string> = { ok: 'ok', exceeds_merchant_daily_limit: 'merchant', exceeds_daily_limit: 'platform', exceeds_per_item_limit: 'per_item', debt_outstanding: 'debt' };
+const LIMIT_TEXT: Record<string, string> = { ok: '✓ 没超', exceeds_merchant_daily_limit: '超商户每天上限', exceeds_daily_limit: '超全平台每天上限', exceeds_per_item_limit: '超单笔上限', debt_outstanding: '商户有欠款' };
+const OVER_LIMIT = ['exceeds_merchant_daily_limit', 'exceeds_daily_limit', 'exceeds_per_item_limit'];
+const limitCell = (c: string) => h('span', { class: c === 'ok' ? 'muted' : 'bad' }, LIMIT_TEXT[c] || c || '—');
+/** 今天（东八区）这个商户已通过多少（打款审核页的 merchants_today） */
+const merchantToday = (r: any, mid: string) => u((r.merchants_today || []).find((m: any) => m.merchant_id === mid)?.approved);
 const kv = (rows: [string, Node | string][]) => h('dl', { class: 'kv kv-tight' }, ...rows.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]));
 const steps4 = (names: string[], on: number) => h('ol', { class: 'stepper-4' }, ...names.map((x, i) => h('li', { 'data-sign-step': String(i + 1), class: i < on ? 'done' : i === on ? 'on' : '' }, x)));
 const okBtn = () => document.querySelector<HTMLButtonElement>('[data-pdialog-ok]');
@@ -71,18 +86,25 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
     ? hero(minsOf(oldest.created_at) > 60 ? 'bad' : 'warn', `${r.pending_count} 笔打款等你审，最早一笔已等 ${waitText(minsOf(oldest.created_at))}`, '对外承诺：东八区 8:00–23:00 内 1 小时处理。每一笔都要你看过才能付。', { label: '去审最早的一笔', onClick: () => open(oldest) })
     : hero('ok', '现在没事要做', '有新的打款申请时会发邮件给你（1 分钟内的合并成一封）。对外承诺：东八区 8:00–23:00 内 1 小时处理。');
   top.querySelector('button')?.setAttribute('data-payout-oldest', '');
-  const pend = table(['单号', '商户', '类型 · 来源', '链', '收款地址', '金额 USDT', '等了多久', ''], rows.map((x: any) => {
+  // 上限检查：单笔看自己的 limit_check，商户批量看里面最先超的一笔
+  const checkOf = (x: any): string => (x.group ? (x.items.find((i: any) => i.limit_check && i.limit_check !== 'ok')?.limit_check || 'ok') : x.limit_check || 'ok');
+  const overN = [...r.singles, ...r.groups.flatMap((g: any) => g.items)].filter((i: any) => OVER_LIMIT.includes(i.limit_check)).length;
+  const debtN = [...r.singles, ...r.groups.flatMap((g: any) => g.items)].filter((i: any) => i.limit_check === 'debt_outstanding').length;
+  const pend = table(['单号', '商户', '类型 · 来源', '链', '收款地址', '金额 USDT', '上限检查', '等了多久', ''], rows.map((x: any) => {
     const m = minsOf(x.created_at);
     const wait = h('span', { class: m > 60 ? 'wait-late' : m > 30 ? 'wait-warn' : '' }, `等了 ${waitText(m)}`);
     if (x.group) {
       const chains = [...new Set(x.items.map((i: any) => i.chain))] as string[];
-      return [mono(x.batch_no), x.merchant, `商户批量 · ${x.source === 'api' ? 'API' : '后台上传'}`, h('span', { class: 'row-actions' }, ...chains.map(chainTag)), `${x.count} 笔`, h('b', {}, usd(x.total)), wait,
+      const n = x.items.filter((i: any) => i.limit_check && i.limit_check !== 'ok').length;
+      return [mono(x.batch_no), merchantCell(x), `商户批量 · ${x.source === 'api' ? 'API' : '后台上传'}`, h('span', { class: 'row-actions' }, ...chains.map(chainTag)), `${x.count} 笔`, h('b', {}, usd(x.total)),
+        n ? h('span', { class: 'bad' }, `${n} 笔单独审就超限（${LIMIT_TEXT[checkOf(x)]}）`) : limitCell('ok'), wait,
         h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: (e: Event) => { e.stopPropagation(); open(x); } }, '逐行审')];
     }
-    return [mono(x.id), x.merchant, `${x.kind === 'payout' ? '代付' : '提币'} · ${x.source === 'api' ? 'API' : '后台'}`, chainTag(x.chain), h('span', { class: 'cell-2' }, mono(shortAddr(x.to), x.to),
-      h('span', { class: 'hint muted' }, x.registered ? '✓ 登记的提币地址' : x.first_time ? '代付：第一次给这个地址付' : '代付：付过这个地址')), h('b', {}, usd(x.amount)), wait,
+    return [mono(x.id), merchantCell(x), `${x.kind === 'payout' ? '代付' : '提币'} · ${x.source === 'api' ? 'API' : '后台'}`, chainTag(x.chain), h('span', { class: 'cell-2' }, mono(shortAddr(x.to), x.to),
+      h('span', { class: 'hint muted' }, x.registered ? '✓ 登记的提币地址' : x.first_time ? '代付：第一次给这个地址付' : '代付：付过这个地址')), h('b', {}, usd(x.amount)), limitCell(checkOf(x)), wait,
       h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: (e: Event) => { e.stopPropagation(); open(x); } }, '去审这笔')];
-  }), '现在没有等你审的打款。', { onRow: (i) => open(rows[i]), rowAttrs: (i) => (rows[i].group ? { 'data-payout-group': rows[i].batch_no, 'data-wait': waitAttr(minsOf(rows[i].created_at)) } : { 'data-payout-row': rows[i].id, 'data-wait': waitAttr(minsOf(rows[i].created_at)) }) });
+  }), '现在没有等你审的打款。', { onRow: (i) => open(rows[i]), rowAttrs: (i) => ({ ...(rows[i].group ? { 'data-payout-group': rows[i].batch_no } : { 'data-payout-row': rows[i].id }), 'data-wait': waitAttr(minsOf(rows[i].created_at)),
+    'data-limit-check': LIMIT_ATTR[checkOf(rows[i])] || checkOf(rows[i]), ...(checkOf(rows[i]) !== 'ok' ? { class: 'row-over' } : {}) }) });
 
   const batches = r.batches as any[];
   const cards = r.cards.map((c: any) => planCard(ui, c, legacyTron, batches.filter((b) => b.chain === c.chain && b.status === 'planned')));
@@ -91,7 +113,7 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
   // 已审核、还没凑进批次的单：可以驳回（退冻结、回调）；挂起的（收款地址转不了）排最前、标红
   const appr = (r.approved || []) as any[];
   const held = appr.filter((x) => x.hold).length;
-  const approvedT = table(['单号', '商户', '链', '收款地址', '金额 USDT', '情况', ''], appr.map((x) => [mono(x.id), x.merchant, chainTag(x.chain), mono(shortAddr(x.to), x.to), usd(x.amount),
+  const approvedT = table(['单号', '商户', '链', '收款地址', '金额 USDT', '情况', ''], appr.map((x) => [mono(x.id), merchantCell(x), chainTag(x.chain), mono(shortAddr(x.to), x.to), usd(x.amount),
     x.hold ? h('span', { class: 'bad' }, `已挂起：${HOLD[x.hold] || x.hold}`) : h('span', { class: 'muted' }, x.batch_no ? `批量 ${x.batch_no} · 等凑批` : '等凑批'),
     h('span', { class: 'row-actions' },
       x.hold ? h('button', { type: 'button', class: 'btn btn-primary btn-sm', 'data-unhold': x.id, onclick: (e: Event) => { e.stopPropagation(); unhold(ui, x); } }, '解除挂起') : null,
@@ -100,19 +122,49 @@ export async function renderPayoutReview(ui: WalletUi, p: HTMLElement, legacyTro
   const L = r.limits;
   const limits = h('section', { class: 'card stack', 'data-payout-limits': '' },
     kv([['单笔', `≤ ${usd(L.perItem)} USDT（超过的只能驳回，或先改上限）`], ['每批', `≤ ${usd(L.perBatch)} USDT；以太坊、BSC 每笔交易 ≤ 100 笔，TRON ≤ 20 笔（Nile 实测后再定）`],
-      ['每天', `≤ ${usd(L.perDay)} USDT（东八区自然日）· 今天已通过 ${usd(r.today_approved)}`], ['热钱包', `每条链 ≤ ${usd(L.hotMax)} USDT，低于 ${usd(L.hotLow)} 提醒补款；授权额度不超过热钱包上限`]]),
+      ['全平台每天', `≤ ${usd(L.perDay)} USDT（东八区自然日，所有商户合计）· 今天已通过 ${usd(r.today_approved)}`],
+      ['每个商户每天', `≤ ${usd(L.perMerchantDay)} USDT（东八区自然日，对所有商户一起生效）；一笔要同时不超过这个商户和全平台今天的余量`], ['热钱包', `每条链 ≤ ${usd(L.hotMax)} USDT，低于 ${usd(L.hotLow)} 提醒补款；授权额度不超过热钱包上限`]]),
     h('p', { class: 'hint muted m0' }, '每批实际付多少取"每批上限、热钱包余额、授权额度"三者最小，超了系统自动拆成几批。'),
-    h('div', {}, h('button', { type: 'button', class: 'btn btn-outline', 'data-edit-limits': '', onclick: () => editLimits(ui, L) }, '改上限')));
-  p.replaceChildren(
+    h('div', {}, h('button', { type: 'button', class: 'btn btn-outline', 'data-edit-limits': '', onclick: () => editLimits(ui, L, r.today_approved) }, '改上限')));
+  put(p,
     h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, '打款审核'), h('span', { class: 'muted' }, '提币、代付、批量打款都在这里逐笔审，审完按链凑批签名')),
     top,
-    h('h2', { class: 'h-sm' }, `等你审（${r.pending_count} 笔）`), h('p', { class: 'hint muted m0' }, '按等了多久排，最早的在最上面；超 30 分钟标橙、超 1 小时标红。'), pend,
+    todayCard(ui, r),
+    h('h2', { class: 'h-sm' }, `等你审（${r.pending_count} 笔）`),
+    overN ? h('p', { class: 'warn-box m0', 'data-over-count': String(overN) }, `其中 ${overN} 笔超了今天的上限（单独审也过不了）：明天 0 点（东八区）重置后再审、驳回，或者先改上限。`) : null,
+    debtN ? h('p', { class: 'alert m0', 'data-debt-count': String(debtN) }, `其中 ${debtN} 笔商户有欠款（到账被冲正、余额不够扣），还清前不能通过：可以驳回，或者等商户之后的到账还清欠款再审。`) : null,
+    h('p', { class: 'hint muted m0' }, '按等了多久排，最早的在最上面；超 30 分钟标橙、超 1 小时标红。'), pend,
     h('h2', { class: 'h-sm' }, '已审核待签名（按链凑批）'), h('div', { class: 'plan-grid' }, ...cards),
     h('p', { class: 'hint muted' }, '签名在你的浏览器里做：页面先把要签的交易解码，逐笔和审核通过的收款人、金额对一遍，对不上就不签；热钱包私钥只在页面内存里用一次，不上服务器。'),
     h('details', { class: 'card', 'data-approved-list': '', ...(held ? { open: true } : {}) }, h('summary', {}, `已审核待凑批的单（${appr.length} 笔${held ? `，其中 ${held} 笔已挂起` : ''}）· 点一行可${held ? '解除挂起或' : ''}驳回`), approvedT),
     h('h2', { class: 'h-sm' }, '签名批次'), recs,
     h('h2', { class: 'h-sm' }, '上限（后台可改：原因 + 动态码 + 审计）'), limits,
   );
+}
+
+/** 今天已通过（东八区 0 点重置）：全平台一行 + 今天有已通过或有待审核的商户各一行（已通过 / 上限、还能过多少） */
+function todayCard(ui: WalletUi, r: any): HTMLElement {
+  const L = r.limits;
+  const pLeft = Math.max(0, u(L.perDay) - u(r.today_approved));
+  // 用满（= 上限）变橙、超过（上限改到低于今天已通过）变红：data-meter="full" / "over"
+  const meter = (v: number, max: number) => h('meter', { class: 'meter-row', min: '0', max: String(max || 1), value: String(Math.min(v, max || 1)),
+    ...(max > 0 && v > max ? { 'data-meter': 'over' } : max > 0 && v >= max ? { 'data-meter': 'full' } : {}) });
+  const mrows = ((r.merchants_today || []) as any[]).map((m) => {
+    const used = u(m.approved), mLeft = Math.max(0, u(L.perMerchantDay) - used), left = Math.min(mLeft, pLeft);
+    return h('div', { class: 'stack-sm', 'data-today-merchant': m.merchant_id },
+      h('div', { class: 'row-actions spread' }, h('span', {}, h('b', {}, m.merchant || m.merchant_id), h('span', { class: 'hint muted' }, ` ${m.merchant_id}`)),
+        h('span', {}, `${fmtUsdt(used)} / ${usd(L.perMerchantDay)} USDT · `, h('span', { class: left ? '' : 'bad' }, `还能过 ${fmtUsdt(left)}`), left < mLeft ? h('span', { class: 'hint muted' }, '（受全平台限制）') : null)),
+      meter(used, u(L.perMerchantDay)));
+  });
+  return h('section', { class: 'card stack-sm', 'data-today-card': '' },
+    h('div', { class: 'row-actions spread' }, h('h2', { class: 'h-sm m0' }, '今天已通过（东八区，0 点重置）'),
+      h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => editLimits(ui, L, r.today_approved) }, '改上限')),
+    h('div', { class: 'stack-sm', 'data-today-platform': '' },
+      h('div', { class: 'row-actions spread' }, h('b', {}, '全平台'),
+        h('span', {}, `${usd(r.today_approved)} / ${usd(L.perDay)} USDT · `, h('span', { class: pLeft ? '' : 'bad' }, `还能过 ${fmtUsdt(pLeft)}`))),
+      meter(u(r.today_approved), u(L.perDay))),
+    mrows.length ? h('div', { class: 'stack-sm' }, h('p', { class: 'hint muted m0' }, `每个商户每天 ≤ ${usd(L.perMerchantDay)} USDT（对所有商户一起生效）；一笔要同时不超过这个商户和全平台今天的余量。`), ...mrows)
+      : h('p', { class: 'hint muted m0' }, '今天还没有通过的打款。'));
 }
 
 function batchState(b: any): HTMLElement {
@@ -191,7 +243,7 @@ function batchDetail(ui: WalletUi, b: any, legacyTron: TronSign) {
           h('span', { class: 'hint muted', id: `vc-why-${d.id}`, 'data-void-why': '' }, '现在不能作废：热钱包的这个 nonce 还没被用掉，这笔随时可能上链，系统在用原来签好的交易重发'))
         : null;
     ui.dialog(`签名批次 ${b.id}`, h('div', { class: 'stack' }, kv([['链', chainTag(d.chain)], ['状态', batchState(d)], ['交易', d.tx_hash ? mono(d.tx_hash) : '—']]), acts,
-      table(['单号', '商户', '收款地址', '金额', '状态'], d.withdrawals.map((w: any) => [mono(w.id), w.merchant, mono(shortAddr(w.to), w.to), usd(w.amount),
+      table(['单号', '商户', '收款地址', '金额', '状态'], d.withdrawals.map((w: any) => [mono(w.id), merchantCell(w), mono(shortAddr(w.to), w.to), usd(w.amount),
         h('span', { class: w.hold ? 'bad' : '' }, `${WST[w.status] || w.status}${w.hold ? `，已挂起：${HOLD[w.hold] || w.hold}` : ''}${w.reason ? ` · ${w.reason}` : ''}`)]), '—')), '关闭', null, false, true);
   }).catch((e) => ui.say(errOf(ui, e)));
 }
@@ -230,7 +282,7 @@ function voidBatch(ui: WalletUi, b: any) {
 }
 /** 点整行（手机上按钮可能要横着滑才看得到）：弹出这一笔的操作 */
 function approvedActions(ui: WalletUi, x: any) {
-  ui.dialog(`已审核 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', x.merchant], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['情况', x.hold ? `已挂起：${HOLD[x.hold] || x.hold}` : '等凑批']]),
+  ui.dialog(`已审核 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', merchantCell(x)], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['情况', x.hold ? `已挂起：${HOLD[x.hold] || x.hold}` : '等凑批']]),
     h('div', { class: 'row-actions' },
       x.hold ? h('button', { type: 'button', class: 'btn btn-primary btn-sm', onclick: () => unhold(ui, x) }, '解除挂起') : null,
       h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => rejectApproved(ui, x) }, '驳回这笔'))), '关闭', null, false, true);
@@ -238,7 +290,7 @@ function approvedActions(ui: WalletUi, x: any) {
 /** 解除挂起：确认收款地址没问题（例如代币已解除拉黑）后，回到普通的已审核，下一轮照常凑批 */
 function unhold(ui: WalletUi, x: any) {
   const msg = h('div');
-  ui.dialog(`解除挂起 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', x.merchant], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['挂起原因', HOLD[x.hold] || x.hold]]),
+  ui.dialog(`解除挂起 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', merchantCell(x)], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`], ['挂起原因', HOLD[x.hold] || x.hold]]),
     h('p', { class: 'hint muted m0' }, '确认这个收款地址现在能收款后再解除。解除后回到已审核，下一轮凑批照常付；如果还是转不了，会再被挂起。记审计。'), msg), '解除挂起', async () => {
     try { await ui.call('payout-unhold', { id: x.id }); } catch (e) { msg.replaceChildren(h('p', { class: 'alert m0' }, errOf(ui, e))); return false; }
     ui.say(`已解除挂起 ${x.id}，下一轮凑批照常付`); ui.rerender(); return true;
@@ -249,7 +301,7 @@ function rejectApproved(ui: WalletUi, x: any) {
   const reason = h('textarea', { rows: '2' }) as HTMLTextAreaElement;
   if (x.hold) reason.value = HOLD[x.hold] || '';
   const msg = h('div');
-  ui.dialog(`驳回 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', x.merchant], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`]]),
+  ui.dialog(`驳回 ${x.id}`, h('div', { class: 'stack' }, kv([['商户', merchantCell(x)], ['链', chainTag(x.chain)], ['收款地址', mono(x.to)], ['金额', `${usd(x.amount)} USDT`]]),
     x.hold ? h('p', { class: 'warn-box m0' }, `这笔已挂起：${HOLD[x.hold] || x.hold}。驳回后冻结的金额退回商户，商户会收到回调。`) : h('p', { class: 'hint muted m0' }, '这笔已经审核通过、还没付。驳回后冻结的金额退回商户，商户会收到回调。'),
     field('ra-reason', '驳回原因（商户能看到）', reason), msg), '驳回这笔', async () => {
     if (fieldErr(reason, reason.value.trim() ? null : '请填写驳回原因')) return false;
@@ -266,12 +318,31 @@ function reviewOne(ui: WalletUi, x: any, r: any) {
   const rej = h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-payout-reject': '', onclick: () => { rejecting = true; reasonBox.hidden = false; rej.hidden = true; const b = okBtn(); if (b) { b.textContent = '驳回这笔'; b.className = 'btn btn-danger'; b.disabled = false; } reason.focus(); } }, '驳回这笔');
   const L = r.limits;
   const over = u(x.amount) > u(L.perItem);
+  // 三行检查（现在单独审这一笔）：单笔 / 每批、这个商户今天、全平台今天
+  const amt = u(x.amount), mUsed = merchantToday(r, x.merchant_id), pUsed = u(r.today_approved);
+  const mOver = mUsed + amt > u(L.perMerchantDay), pOver = pUsed + amt > u(L.perDay);
+  const line = (bad: boolean, text: string, attr: string) => h('li', { class: bad ? 'bad' : 'ok', 'data-check-line': attr }, `${bad ? '✗' : '✓'} ${text}`);
+  const checks = h('ul', { class: 'stack-sm m0', 'data-limit-lines': '' },
+    line(over, `单笔 ${usd(x.amount)} ≤ ${usd(L.perItem)}（每批 ≤ ${usd(L.perBatch)}，凑批时自动拆）`, 'item'),
+    line(mOver, `这个商户今天已通过 ${fmtUsdt(mUsed)}，加这笔 ${fmtUsdt(mUsed + amt)} / ${usd(L.perMerchantDay)}`, 'merchant'),
+    line(pOver, `全平台今天已通过 ${fmtUsdt(pUsed)}，加这笔 ${fmtUsdt(pUsed + amt)} / ${usd(L.perDay)}`, 'platform'));
+  const daily = !over && (mOver || pOver);
+  // 商户有欠款（服务器的 limit_check）：还清前不能通过，可以驳回
+  const debt = x.limit_check === 'debt_outstanding';
+  if (debt) checks.append(h('li', { class: 'bad', 'data-check-line': 'debt' }, '✗ 商户有欠款，还清前不能通过（可以驳回）'));
   const body = h('div', { class: 'stack' },
-    kv([['单号', mono(x.id)], ['商户', x.merchant], ['类型', `${x.kind === 'payout' ? '代付' : '提币（商户提现）'} · ${x.source === 'api' ? 'API' : '后台'}`], ['链', chainTag(x.chain)],
+    kv([['单号', mono(x.id)], ['商户', merchantCell(x)], ['类型', `${x.kind === 'payout' ? '代付' : '提币（商户提现）'} · ${x.source === 'api' ? 'API' : '后台'}`], ['链', chainTag(x.chain)],
       ['收款地址', h('span', { class: 'stack-sm' }, mono(x.to), h('span', { class: x.registered ? 'ok' : 'hint' }, x.registered ? '✓ 登记地址：商户在这条链登记过的提币地址' : x.first_time ? '代付：第一次给这个地址付（代付没有白名单，靠你审核）' : '代付：以前付过这个地址'))],
       ['金额', h('b', {}, `${usd(x.amount)} USDT`)], ['手续费', `${usd(x.fee)} USDT（已和金额一起冻结）`],
-      ['上限检查', h('span', { class: over ? 'bad' : '' }, `${over ? '✗' : '✓'} 单笔 ≤ ${usd(L.perItem)} · 今天已通过 ${usd(r.today_approved)} / ${usd(L.perDay)}`)]]),
+      ['上限检查', checks]]),
     over ? h('p', { class: 'alert m0', 'data-over-limit': '' }, `这笔超过单笔上限（${usd(L.perItem)} USDT），不能通过：驳回，或者先改上限再审。`) : null,
+    // v1.1：商户有欠款（到账被冲正、余额不够扣）时不能通过，红框说明（和超上限同一个样子）
+    debt ? h('p', { class: 'alert m0', 'data-debt-hold': '' }, `${x.merchant} 有欠款 ${usd(x.merchant_debt)} USDT，还清前不能通过：之后的到账会先还欠款，还清后再审；也可以驳回。`) : null,
+    daily ? h('div', { class: 'alert stack-sm m0', 'data-over-limit': mOver ? 'merchant' : 'platform' },
+      h('span', {}, mOver
+        ? `这个商户今天已通过 ${fmtUsdt(mUsed)} USDT，再过这笔就超过每个商户每天上限（${usd(L.perMerchantDay)}）`
+        : `全平台今天已通过 ${fmtUsdt(pUsed)} USDT，再过这笔就超过全平台每天上限（${usd(L.perDay)}）`, '，现在不能通过：明天 0 点（东八区）重置后再审、驳回，或者先改上限。'),
+      h('div', {}, h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-goto-limits': '', onclick: () => editLimits(ui, L, r.today_approved) }, '去改上限'))) : null,
     msg, rej, reasonBox);
   ui.dialog(`审核 ${x.id}`, body, '通过', async () => {
     if (rejecting) {
@@ -285,8 +356,8 @@ function reviewOne(ui: WalletUi, x: any, r: any) {
     } catch (e) { msg.replaceChildren(h('p', { class: 'alert m0' }, errOf(ui, e))); return false; }
     ui.say(`已通过 ${x.id}，等按链凑批签名`); ui.rerender(); return true;
   });
-  // 超过单笔上限：不能点"通过"（服务器也会拒），只能驳回
-  const ok = okBtn(); if (ok && over) ok.disabled = true;
+  // 超过单笔上限、这个商户或全平台今天的上限：不能点"通过"（服务器也会拒），只能驳回或先改上限
+  const ok = okBtn(); if (ok && (over || daily || debt)) ok.disabled = true;
 }
 
 function reviewGroup(ui: WalletUi, g: any, r: any) {
@@ -295,11 +366,25 @@ function reviewGroup(ui: WalletUi, g: any, r: any) {
   const overOf = (i: any) => u(i.amount) > u(r.limits.perItem);
   // 超过单笔上限的行：标红、默认不勾（勾上服务器也会拒，整批审核不生效）
   const boxes = g.items.map((i: any) => h('input', { type: 'checkbox', class: 'check', checked: !overOf(i), 'data-review-item': i.id, 'aria-label': `通过 ${i.id}` }) as HTMLInputElement);
+  // 勾上的合计和这个商户、全平台今天的余量：超了"通过"灰掉（服务器也会整个审核不生效）
+  const L = r.limits;
+  const mLeft = Math.max(0, u(L.perMerchantDay) - merchantToday(r, g.merchant_id)), pLeft = Math.max(0, u(L.perDay) - u(r.today_approved));
+  const sum = h('p', { class: 'm0', 'data-group-sum': '' });
+  const recount = () => {
+    const tot = g.items.reduce((a: number, i: any, k: number) => a + (boxes[k].checked ? u(i.amount) : 0), 0);
+    const why = tot > mLeft ? `超过这个商户今天的余量（还能过 ${fmtUsdt(mLeft)}）` : tot > pLeft ? `超过全平台今天的余量（还能过 ${fmtUsdt(pLeft)}）` : '';
+    sum.className = why ? 'alert m0' : 'hint muted m0';
+    sum.replaceChildren(`勾上的合计 ${fmtUsdt(tot)} USDT · 这个商户今天还能过 ${fmtUsdt(mLeft)} · 全平台今天还能过 ${fmtUsdt(pLeft)}${why ? `：${why}，少勾几笔再通过，或者先改上限` : ''}`);
+    const ok = okBtn(); if (ok) ok.disabled = Boolean(why);
+  };
+  boxes.forEach((b: HTMLInputElement) => b.addEventListener('change', recount));
   const body = h('div', { class: 'stack' },
-    h('p', { class: 'm0' }, `${g.merchant} 的批量打款 ${g.batch_no}：${g.count} 笔，合计 ${usd(g.total)} USDT。勾上的通过，不勾的驳回（驳回的退冻结、逐笔发回调，其余照付）。`),
+    h('p', { class: 'm0' }, `${g.merchant}${g.merchant_id ? `（${g.merchant_id}）` : ''}的批量打款 ${g.batch_no}：${g.count} 笔，合计 ${usd(g.total)} USDT。勾上的通过，不勾的驳回（驳回的退冻结、逐笔发回调，其余照付）。`),
+    g.items.some((i: any) => i.limit_check === 'debt_outstanding') ? h('p', { class: 'alert m0', 'data-debt-hold': '' }, '商户有欠款，还清前不能通过：这次只能全部不勾（驳回），或者等之后的到账还清欠款再审。') : null,
     table(['通过', '单号', '链', '收款地址', '金额', '检查'], g.items.map((i: any, k: number) => [boxes[k], mono(i.id), chainTag(i.chain), mono(shortAddr(i.to), i.to), usd(i.amount),
-      overOf(i) ? h('span', { class: 'bad' }, '超过单笔上限，只能驳回') : i.first_time ? h('span', { class: 'hint' }, '第一次给这个地址付') : '✓']), '—', { rowAttrs: (k) => (overOf(g.items[k]) ? { class: 'row-over', 'data-over-limit': g.items[k].id } : {}) }),
-    field('pr-reason', '驳回原因（有不勾的要填，商户能看到）', reason), msg);
+      overOf(i) ? h('span', { class: 'bad' }, '超过单笔上限，只能驳回') : i.limit_check && i.limit_check !== 'ok' ? h('span', { class: 'bad' }, `单独审这笔就${LIMIT_TEXT[i.limit_check]}`) : i.first_time ? h('span', { class: 'hint' }, '第一次给这个地址付') : '✓']), '—',
+      { rowAttrs: (k) => ({ 'data-limit-check': LIMIT_ATTR[g.items[k].limit_check || 'ok'] || g.items[k].limit_check, ...(overOf(g.items[k]) ? { class: 'row-over', 'data-over-limit': g.items[k].id } : {}) }) }),
+    sum, field('pr-reason', '驳回原因（有不勾的要填，商户能看到）', reason), msg);
   ui.dialog(`逐行审 ${g.batch_no}`, body, '通过勾选的、驳回其余', async () => {
     const approve = g.items.filter((_: any, k: number) => boxes[k].checked).map((i: any) => i.id);
     if (approve.length < g.items.length && fieldErr(reason, reason.value.trim() ? null : '有不勾的笔，要填驳回原因')) return false;
@@ -307,28 +392,54 @@ function reviewGroup(ui: WalletUi, g: any, r: any) {
     catch (e: any) { msg.replaceChildren(h('p', { class: 'alert m0' }, errOf(ui, e))); return false; }
     ui.say(`已审完 ${g.batch_no}：通过 ${approve.length} 笔，驳回 ${g.items.length - approve.length} 笔`); ui.rerender(); return true;
   });
+  recount();
 }
 
-function editLimits(ui: WalletUi, L: any) {
-  const names: [string, string][] = [['perItem', '单笔上限'], ['perBatch', '每批上限'], ['perDay', '每天上限（东八区）'], ['hotMax', '热钱包上限'], ['hotLow', '热钱包低于多少提醒']];
+function editLimits(ui: WalletUi, L: any, todayApproved?: unknown) {
+  const names: [string, string][] = [['perItem', '单笔上限'], ['perBatch', '每批上限'], ['perDay', '全平台每天上限（东八区，所有商户合计）'], ['perMerchantDay', '每个商户每天上限（东八区）'], ['hotMax', '热钱包上限'], ['hotLow', '热钱包低于多少提醒']];
+  const hints: Record<string, string> = { perMerchantDay: '对所有商户一起生效，不能大于全平台每天上限；一笔要同时不超过这个商户和全平台今天的余量。' };
   const ins = Object.fromEntries(names.map(([k]) => [k, h('input', { inputmode: 'decimal', value: usd(L[k]).replace(/,/g, '') }) as HTMLInputElement]));
   const reason = h('input', { maxlength: '200' }) as HTMLInputElement;
   const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6' }) as HTMLInputElement;
-  ui.dialog('改上限', h('div', { class: 'stack' }, ...names.map(([k, l]) => field(`pl-${k}`, `${l}（USDT）`, ins[k])), field('pl-reason', '原因（记进审计）', reason), field('pl-code', '验证器动态码（6 位）', code)), '保存', async () => {
+  // 全平台每天改到低于今天已通过：照样能保存，只提醒（黄字）
+  const today = u(todayApproved);
+  const warn = h('p', { class: 'warn m0', 'data-limit-warn': '', 'aria-live': 'polite' }) as HTMLElement;
+  const rewarn = () => {
+    const d = parseUsdt(ins.perDay.value.replace(/,/g, ''));
+    const low = d !== null && d > 0 && d < today;
+    warn.hidden = !low;
+    warn.textContent = low ? `全平台每天上限低于今天已通过的 ${fmtUsdt(today)} USDT：可以保存，今天剩下的单都会留在待审核，明天 0 点（东八区）重置。` : '';
+  };
+  ins.perDay.addEventListener('input', rewarn);
+  rewarn();
+  // 检查几个上限：金额本身，再看几个上限之间的关系（和服务器同一套规则），出错的写在那一格下面。
+  // 点过一次"保存"后，改任何一格都重新检查一遍：改对了错字就消失（例如把全平台每天调大后，每个商户每天那格的错字跟着消失）
+  const checkLimits = (): boolean => {
     let bad = false;
-    for (const [k] of names) bad = fieldErr(ins[k], parseUsdt(ins[k].value) ? null : '请输入大于 0 的金额') || bad;
+    for (const [k] of names) bad = fieldErr(ins[k], parseUsdt(ins[k].value.replace(/,/g, '')) ? null : '请输入大于 0 的金额') || bad;
+    if (bad) return false;
+    const v = Object.fromEntries(names.map(([k]) => [k, parseUsdt(ins[k].value.replace(/,/g, '')) ?? 0]));
+    let ok = true;
+    for (const [k, r] of [['perItem', 'per_item_le_per_batch'], ['perBatch', 'per_batch_le_per_day'], ['perMerchantDay', 'per_merchant_day_le_per_day'], ['hotLow', 'hot_low_le_hot_max']] as const) {
+      const broken = r === 'per_item_le_per_batch' ? v.perItem > v.perBatch : r === 'per_batch_le_per_day' ? v.perBatch > v.perDay : r === 'per_merchant_day_le_per_day' ? v.perMerchantDay > v.perDay : v.hotLow > v.hotMax;
+      if (broken && ok) { fieldErr(ins[k], LIMIT_RULE[r]); ok = false; }
+    }
+    return ok;
+  };
+  let tried = false;
+  for (const [k] of names) ins[k].addEventListener('input', () => { if (tried) checkLimits(); });
+  // "全平台每天上限低于今天已通过"的黄字紧跟在全平台每天上限那一格下面
+  const fields = names.flatMap(([k, l]) => { const f = field(`pl-${k}`, `${l}（USDT）`, ins[k], hints[k]); return k === 'perDay' ? [f, warn] : [f]; });
+  ui.dialog('改上限', h('div', { class: 'stack' }, ...fields, field('pl-reason', '原因（记进审计）', reason), field('pl-code', '验证器动态码（6 位）', code)), '保存', async () => {
+    tried = true;
+    let bad = !checkLimits();
     bad = fieldErr(reason, reason.value.trim() ? null : '请写原因') || bad;
     bad = fieldErr(code, /^\d{6}$/.test(code.value.trim()) ? null : '请输入 6 位动态码') || bad;
     if (bad) return false;
-    // 几个上限之间的关系，保存前就指出是哪一条不满足（和服务器同一套规则）
-    const v = Object.fromEntries(names.map(([k]) => [k, parseUsdt(ins[k].value) ?? 0]));
-    for (const [k, r] of [['perItem', 'per_item_le_per_batch'], ['perBatch', 'per_batch_le_per_day'], ['hotLow', 'hot_low_le_hot_max']] as const) {
-      const broken = r === 'per_item_le_per_batch' ? v.perItem > v.perBatch : r === 'per_batch_le_per_day' ? v.perBatch > v.perDay : v.hotLow > v.hotMax;
-      if (broken) { fieldErr(ins[k], LIMIT_RULE[r]); return false; }
-    }
-    try { await ui.call('payout-limits-save', { values: Object.fromEntries(names.map(([k]) => [k, ins[k].value.replace(/,/g, '')])), reason: reason.value.trim(), code: code.value.trim() }); }
+    let res: any;
+    try { res = await ui.call('payout-limits-save', { values: Object.fromEntries(names.map(([k]) => [k, ins[k].value.replace(/,/g, '')])), reason: reason.value.trim(), code: code.value.trim() }); }
     catch (e: any) { const f = e?.field && ins[e.field] ? ins[e.field] : e?.code === 'bad_code' ? code : reason; fieldErr(f, e?.code === 'invalid_param' ? LIMIT_RULE[e?.rows?.[0]?.rule] || '请输入大于 0 的金额，最多 6 位小数' : errOf(ui, e)); return false; }
-    ui.say('上限已改，审计已记录'); ui.rerender(); return true;
+    ui.say(res?.warnings?.includes('per_day_below_today_approved') ? '上限已改，审计已记录。全平台每天上限低于今天已通过：今天剩下的单都会留在待审核' : '上限已改，审计已记录'); ui.rerender(); return true;
   });
 }
 

@@ -6,8 +6,9 @@
 //     确认作废、开通商户（会给任意邮箱发信）都不在里面。要动态码的动作（改打款上限）对测试管理员免动态码。
 //   - 审计：业务动作的 actor 记成 test-admin；另外每个 POST 再记一条 test_admin.request（动作名、成功或错误码）。
 //   - 生产（APP_ENV=production）配了 TEST_ADMIN_TOKEN_SHA256：web、worker 拒绝启动（server/app.js 的 refuseConfig）；本地忽略。
-//   - 只在测试网开：APP_ENV=staging 且 TRON_NETWORK=nile；配了以太坊 / BSC 节点的，节点的链 ID 要在测试网白名单里（TESTNET_CHAIN_IDS），查不到时这次不认（server/pay/deps.js）。
-//     TRON 节点本身是不是 Nile 没有另外核对（只看 TRON_NETWORK）。
+//   - 只在测试网开：APP_ENV=staging 且 TRON_NETWORK=nile；配了以太坊 / BSC 节点的，节点的链 ID 要在测试网白名单里（TESTNET_CHAIN_IDS）；
+//     TRON 节点（老 TronGrid 客户端、TRON 合约钱包的节点）按创世块核对，必须是 Nile（TRON_GENESIS.nile）；查不到时这次不认（server/pay/deps.js）。
+//   - 生产反过来：TRON 节点的创世块不是主网 → 拒绝启动（checkTronMainnet；连不上不拒绝）。
 //   - 开户和商户资料：商户列表（merchants，含联系人邮箱和待开通的开户申请）、客户列表和客户详情（customers、customer，含客户姓名）不在白名单；
 //     其余返回里的商户名（merchant）、名称（name，链名除外）、邮箱（email）、公司名（company）一律打码成"首字 + ***"（maskForTestAdmin）；
 //     任何字段里邮箱形式的内容（例如商户拿邮箱当客户编号、驳回原因里写了邮箱）也打码成"首字***"（不留 @）。
@@ -88,17 +89,36 @@ export function testMerchantIpBypass(config) {
   return testnetEnv(config) && id ? id : '';
 }
 
+/**
+ * TRON 主网、Nile 测试网的创世块（0 号块）blockID（小写十六进制；2026-11-17 向 api.trongrid.io、nile.trongrid.io 实测）。
+ * 节点自己报的网络名不可信：配错节点地址（例如 TRON_NODE_URL 指到主网）时只有创世块能说明连的是哪条链
+ */
+export const TRON_GENESIS = Object.freeze({
+  mainnet: '00000000000000001ebf88508a03865c71d452e25f4d51194196a1d22b6653dc',
+  nile: '0000000000000000d698d4192c56cb6be724a558448e2684802de4d6cd8690dc',
+});
+
 /** 认可的以太坊 / BSC 测试网链 ID：Sepolia、Holesky、Hoodi、BSC 测试网。配的节点不在里面（主网或别的链）就不认测试管理员 */
 export const TESTNET_CHAIN_IDS = Object.freeze([11155111, 17000, 560048, 97]);
 /**
- * 核对配了的以太坊 / BSC 节点都是认可的测试网（白名单，不是"不是主网"）。都核对过返回 true；不在白名单返回 false 并记住；
- * 节点查不到返回 false（这次不认），下次再查。adapters：{ eth?, bsc? }，每个有 chainId()
+ * 核对配了的节点都是认可的测试网（白名单，不是"不是主网"）。都核对过返回 true；不在白名单返回 false 并记住（要重启）；
+ * 节点查不到返回 false（这次不认），下次再查。
+ * adapters：{ eth?, bsc?, grid?, tron? }。有 genesisBlockId() 的当作 TRON 节点，创世块必须是 Nile；有 chainId() 的按以太坊 / BSC 测试网白名单
  */
 export function createTestnetCheck(adapters = {}) {
   let result = null;
   return async () => {
     if (result !== null) return result;
     for (const a of Object.values(adapters)) {
+      if (a && typeof a.genesisBlockId === 'function') {
+        let g;
+        try { g = String(await a.genesisBlockId()).toLowerCase(); } catch (e) {
+          if (e?.code !== 'genesis_invalid') return false; // 查不到：这次不认，下次再查
+          g = 'invalid'; // 节点答了，但答的不是创世块：和"不是 Nile"一样记住
+        }
+        if (g !== TRON_GENESIS.nile) { result = false; console.error('[test-admin] TRON node is not Nile, test-only switches (test admin, merchant IP bypass) disabled'); return false; }
+        continue;
+      }
       if (!a || typeof a.chainId !== 'function') continue;
       let id;
       try { id = Number(await a.chainId()); } catch { return false; }
@@ -108,6 +128,33 @@ export function createTestnetCheck(adapters = {}) {
     result = true;
     return true;
   };
+}
+
+/**
+ * 生产启动时核对 TRON 节点（nodes：{ 名字: 有 genesisBlockId() 的客户端 }）：创世块不是主网、或节点答了但答的不是创世块（genesis_invalid）
+ * → 抛错（code tron_node_not_mainnet，说明里只有名字，没有节点地址和 Key）；连不上、繁忙、超时（timeoutMs，默认 10 秒）→ 不拒绝
+ * （返回 { 名字: 'unreachable' }）。TRON 合约钱包的适配器在生产带 expectGenesis：之后第一次问到节点前自己再核对，不是主网就锁住并告警。
+ * 返回每个节点的结果：'mainnet' / 'unreachable'
+ */
+export async function checkTronMainnet(nodes = {}, { timeoutMs = 10_000 } = {}) {
+  const out = {};
+  const bad = [];
+  await Promise.all(Object.entries(nodes).map(async ([name, n]) => {
+    if (!n || typeof n.genesisBlockId !== 'function') return;
+    let timer;
+    const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timeout')), timeoutMs); timer.unref?.(); });
+    let g;
+    try { g = String(await Promise.race([n.genesisBlockId(), timeout])).toLowerCase(); } catch (e) {
+      if (e?.code === 'genesis_invalid') { out[name] = 'invalid'; bad.push(`${name}=invalid`); return; }
+      out[name] = 'unreachable'; return;
+    } finally { clearTimeout(timer); }
+    if (g === TRON_GENESIS.mainnet) out[name] = 'mainnet';
+    else { out[name] = g === TRON_GENESIS.nile ? 'nile' : 'other'; bad.push(`${name}=${out[name]}`); }
+  }));
+  if (bad.length) {
+    throw Object.assign(new Error(`生产环境的 TRON 节点不是主网（${bad.sort().join('、')}）：检查 .env 的 TRON_NETWORK、TRON_NODE_URL，改好再启动`), { code: 'tron_node_not_mainnet' });
+  }
+  return out;
 }
 
 /** 生产配了测试管理员变量：返回拒绝启动的说明（只有变量名，没有值）；否则 null */

@@ -201,7 +201,8 @@ test('开放 API POST /payouts/batch/：IP 白名单、Idempotency-Key 重试返
   assert.equal(r2.body.batch_no, r1.body.batch_no, '同一个 Key 重试不重复建批');
   const [{ n }] = await s.db.query(`select count(*)::int n from withdrawals where merchant_id = 'ma'`);
   assert.equal(n, 2);
-  const bad = await s.call(s.cred, 'POST', 'payouts/batch/', { items: [items[0], { chain: 'bsc', to: TRON_A, amount: '1' }, { chain: 'eth', to: evm(), amount: '-1' }] });
+  // 第 0 行是好行：换一个没用过的单号（单号同一商户永久唯一，再用 A-1 这一行也会报 duplicate_merchant_ref）
+  const bad = await s.call(s.cred, 'POST', 'payouts/batch/', { items: [{ ...items[0], merchant_ref: 'A-2' }, { chain: 'bsc', to: TRON_A, amount: '1' }, { chain: 'eth', to: evm(), amount: '-1' }] });
   assert.equal(bad.status, 422);
   assert.equal(bad.body.error.code, 'invalid_rows');
   assert.deepEqual(bad.body.error.rows.map((x) => [x.index, x.code]), [[1, 'invalid_address'], [2, 'invalid_amount']]);

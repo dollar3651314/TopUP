@@ -13,7 +13,7 @@ import { signerOf } from './signing.js';
 import { deriveAddress, isValidAddress } from './tron.js';
 import { inviteMerchantUser } from './merchant-api.js';
 import { diskUsage } from './disk.js';
-import { walletAdminActions } from '../wallet/admin-actions.js';
+import { walletAdminActions, nodeFailure } from '../wallet/admin-actions.js';
 import { evmUnswept } from '../wallet/addresses.js';
 import { getSweepSettings } from '../wallet/sweep.js';
 import { payoutAdminActions } from './payout-admin.js';
@@ -27,7 +27,28 @@ const VERIFY_TTL_MS = 5 * 60 * 1000; // 验证码通过后 5 分钟内必须提�
 const ENERGY_PER_SWEEP = 65_000; // 转 USDT 到已经有 USDT 的地址，大约需要的能量
 const USDT_FEE_LIMIT = 30 * TRX;
 
-export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null, payoutSvc = null }) {
+/**
+ * 老 TronGrid 客户端（server/pay/trongrid.js）抛出的错打上 node = true：nodeFailure 只把带这个标记的 TypeError / SyntaxError / 超时等
+ * 换成节点错误码（K-13），别处来的同类错误（发邮件失败、数据坏了）照旧 500。方法同步返回的照旧同步返回
+ */
+export function nodeClient(client) {
+  if (!client) return client;
+  const tag = (e) => { if (e && typeof e === 'object') { try { e.node = true; } catch { /* 冻结的对象不打标记 */ } } throw e; };
+  return new Proxy(client, {
+    get(t, k) {
+      const v = Reflect.get(t, k);
+      if (typeof v !== 'function') return v;
+      return (...args) => {
+        let r;
+        try { r = v.apply(t, args); } catch (e) { tag(e); }
+        return r && typeof r.then === 'function' ? r.catch(tag) : r;
+      };
+    },
+  });
+}
+
+export function createWalletApi({ db, tron: rawTron, keys, wallets, requireAdmin, verifyAdminCode, send, origin = '', listApproved = async () => [], pendingKyb = async () => 0, notify, runDaily = null, diskPath = null, now = () => Date.now(), layer = null, payoutSvc = null }) {
+  const tron = nodeClient(rawTron); // 老 TronGrid 客户端的错打上 node 标记（nodeFailure 只换节点的错）
   const payoutActions = payoutAdminActions({ db, tron, wallets, layer, payoutSvc, verifyAdminCode, now });
   const hot = wallets.hot, cold = wallets.cold;
   const need = (cond, code, status = 422, field) => { if (!cond) throw new PayError(code, status, field); };
@@ -61,11 +82,17 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     need(statuses.includes(b.status), 'invalid_state', 409);
     return b;
   }
-  /** 广播一组已签名的步骤；返回失败的原因（没有失败返回 null） */
+  /**
+   * 广播一组已签名的步骤；返回失败的原因（没有失败返回 null）。
+   * 节点回 DUP_TRANSACTION_ERROR（同一份已签名交易节点已经有了，例如 503 重试前其实已经收到）：按已广播处理，记下本地算的交易号（和打款一样）
+   */
   async function broadcastSteps(steps) {
     for (const s of steps) {
       try { s.txid = await tron.broadcastHex(encodeSigned(s.rawHex, s.signature)); s.status = 'broadcast'; }
-      catch (e) { s.status = 'failed'; s.error = e.message; return e.message; }
+      catch (e) {
+        if (e?.code === 'DUP_TRANSACTION_ERROR' || /DUP_TRANSACTION/i.test(String(e?.message))) { s.txid = s.txID; s.status = 'broadcast'; delete s.error; continue; }
+        s.status = 'failed'; s.error = e.message; return e.message;
+      }
     }
     return null;
   }
@@ -165,16 +192,17 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const pick = new Set(p.batches[0].items.map((x) => x.id));
       const left = rows.length - pick.size;
       const total = Number(p.batches[0].total);
-      // 之前凑了没签的 TRON 批次作废（单回到已审核）；已经交了签名的（不是 planned）不动
-      for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) await voidTronBatch(x.id);
-      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: actor || 'admin' });
-      rows = await db.query('select * from withdrawals where id = any($1::text[]) order by approved_at, created_at, coalesce(batch_line, 0), id', [[...pick]]);
+      // 先向节点把每笔交易建好，再凑批：建交易途中节点出错（429、连不上）不留下没签名的批次，单仍是已审核、没凑批，之前凑的也不作废
+      rows = rows.filter((w) => pick.has(w.id)); // 已按审核先后排好
       const steps = [];
       const seen = new Set();
       for (const w of rows) {
         const tx = await tron.buildUsdtTransfer({ from: hot, to: w.to_address, amount: w.amount, feeLimit: USDT_FEE_LIMIT });
         steps.push({ kind: 'withdraw', stage: 1, withdrawal_id: w.id, owner: hot, expect: { to: w.to_address, amount: w.amount }, ...withExpiry(tx, seen) });
       }
+      // 之前凑了没签的 TRON 批次作废（单回到已审核）；已经交了签名的（不是 planned）不动
+      for (const x of await db.query(`select id from payout_tx_batches where chain = 'tron' and status = 'planned'`)) await voidTronBatch(x.id);
+      const ptId = await createPayoutTxBatch(db, { chain: 'tron', ids: [...pick], actor: actor || 'admin' });
       const id = await saveBatch('withdraw', { steps, payout_batch: ptId });
       return { batch_id: id, payout_batch: ptId, steps: steps.map(({ kind, stage, withdrawal_id, rawHex, txID, expect }) => ({ kind, stage, withdrawal_id, rawHex, txID, expect })), total, count: pick.size, left };
     },
@@ -310,6 +338,36 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const rows = await db.query(`select a.*, m.name merchant from anomalies a left join merchants m on m.id = a.merchant_id order by a.created_at desc limit 200`);
       return { items: rows.map((a) => ({ id: String(a.id), type: a.type, merchant: a.merchant, customer_id: a.customer_id, address: a.address, amount: a.amount, ref: a.ref, handled: a.handled, created_at: iso(a.created_at) })) };
     },
+    /**
+     * v1.1 冲正：每笔冲正（异常到账 reversal 一行 + 到账的冲正明细 + 回调送达情况 + 复核记录）和"复核没下结论的"（还是 credited、最后一次复核出错或没确认完）
+     */
+    async reversals() {
+      const rows = await db.query(`select a.id anomaly_id, a.handled, d.id, d.chain, d.txid, d.log_index, d.address, d.merchant_id, m.name merchant, d.customer_id, d.amount, d.fee, d.time, d.created_at credited_at,
+          d.reversed_at, d.reversal, b.debt merchant_debt
+        from anomalies a join deposits d on a.ref = d.chain || ':' || d.txid || ':' || d.log_index join merchants m on m.id = d.merchant_id join balances b on b.merchant_id = d.merchant_id
+        where a.type = 'reversal' and d.result = 'reversed' order by d.reversed_at desc limit 200`);
+      const ids = rows.map((r) => Number(r.id));
+      const checks = ids.length ? await db.query(`select deposit_id, checked_at, result from deposit_rechecks where deposit_id = any($1::bigint[]) order by checked_at, id`, [ids]) : [];
+      const cbs = rows.length ? await db.query(`select status, attempts, last_code, payload->'data'->>'txid' txid, created_at from callbacks where event = 'deposit.reversed' and payload->'data'->>'txid' = any($1::text[]) order by created_at`, [rows.map((r) => r.txid)]) : [];
+      const items = rows.map((r) => {
+        const x = r.reversal || {};
+        const cb = cbs.filter((c) => c.txid === r.txid).at(-1);
+        return {
+          id: r.anomaly_id ? String(r.anomaly_id) : null, handled: r.handled, deposit_id: String(r.id), chain: r.chain, txid: r.txid, address: r.address, merchant_id: r.merchant_id, merchant: r.merchant, customer_id: r.customer_id,
+          amount: Number(r.amount), fee: Number(r.fee), net: Number(x.net ?? Number(r.amount) - Number(r.fee)), taken: Number(x.taken ?? 0), debt_added: Number(x.debt_added ?? 0), merchant_debt: Number(r.merchant_debt),
+          order_no: x.order_no || null, time: iso(r.time), credited_at: iso(r.credited_at), reversed_at: iso(r.reversed_at),
+          callback: cb ? { status: cb.status, attempts: cb.attempts, last_code: cb.last_code } : null,
+          rechecks: checks.filter((c) => Number(c.deposit_id) === Number(r.id)).map((c) => ({ at: iso(c.checked_at), result: c.result })),
+        };
+      });
+      // 复核没下结论的：还是已入账、最后一次复核出错（节点连不上 / 落后）或者查到没了还没确认；最近 7 天入账的
+      const unsure = await db.query(`select d.id, d.chain, d.txid, d.amount, d.merchant_id, m.name merchant, d.customer_id, d.created_at, r.checked_at, r.result, r.detail, d.recheck_next_at
+        from deposits d join merchants m on m.id = d.merchant_id
+        join lateral (select checked_at, result, detail from deposit_rechecks x where x.deposit_id = d.id order by checked_at desc, id desc limit 1) r on true
+        where d.result = 'credited' and d.created_at > now() - interval '7 days' and r.result in ('error', 'gone') order by r.checked_at desc limit 200`);
+      return { items, inconclusive: unsure.map((u) => ({ deposit_id: String(u.id), chain: u.chain, txid: u.txid, amount: Number(u.amount), merchant: u.merchant, customer_id: u.customer_id, credited_at: iso(u.created_at),
+        last_checked_at: iso(u.checked_at), last_result: u.result, reason: u.detail || null, next_at: iso(u.recheck_next_at) })) };
+    },
     async 'anomaly-handle'(b, actor) { await db.query('update anomalies set handled = true where id = $1', [Number(b.id)]); await audit(db, actor, 'anomaly.handled', String(b.id)); return { ok: true }; },
     /** 立即运行每日任务（对账、其他代币检查、提醒）：worker 没跑或需要补跑时手动运行 */
     async 'recon-run'(b, actor) {
@@ -321,7 +379,9 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
     async recon() {
       const rows = await db.query('select * from recon order by day desc limit 30');
       // 商户收款合计按账本（ledger 的 deposit 记录）计算，客户合计按客户表：两边来自不同的记录，对不上才说明有问题
-      const per = await db.query(`select m.id, m.name, coalesce((select sum(amount) from ledger l where l.merchant_id = m.id and l.type = 'deposit'), 0)::bigint deposits,
+      // 冲正过的到账（v1.1）客户合计已经扣回，商户这边也减掉
+      const per = await db.query(`select m.id, m.name, coalesce((select sum(amount) from ledger l where l.merchant_id = m.id and l.type = 'deposit'), 0)::bigint
+        - coalesce((select sum(amount) from deposits d where d.merchant_id = m.id and d.result = 'reversed'), 0)::bigint deposits,
         coalesce((select sum(total) from customers c where c.merchant_id = m.id), 0)::bigint customers from merchants m order by m.created_at`);
       return { days: rows.map((r) => ({ day: iso(r.day).slice(0, 10), balances: r.balances, chain: r.chain, fees: r.fees, diff: r.diff, detail: r.detail })), merchants: per.map((p) => ({ id: p.id, name: p.name, deposits_total: p.deposits, customers_total: p.customers, ok: p.deposits === p.customers })) };
     },
@@ -336,8 +396,8 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const one = async (sql, p = []) => (await db.query(sql, p))[0];
       const DAY0 = `(date_trunc('day', now() at time zone 'Asia/Shanghai') at time zone 'Asia/Shanghai')`; // 东八区的今天 0 点
       const col = await one(`select coalesce(sum(amount), 0)::bigint v, count(*)::int n from deposits where result = 'credited'`);
-      const bal = await one('select coalesce(sum(available), 0)::bigint available, coalesce(sum(frozen), 0)::bigint frozen from balances');
-      const fin = await one(`select coalesce(-sum(amount), 0)::bigint v from ledger where type = 'fee_in'`);
+      const bal = await one('select coalesce(sum(available), 0)::bigint - coalesce(sum(debt), 0)::bigint available, coalesce(sum(frozen), 0)::bigint frozen from balances'); // 欠款（v1.1）从应付里减掉
+      const fin = await one(`select coalesce(-sum(amount), 0)::bigint - coalesce((select sum(fee) from deposits where result = 'reversed'), 0)::bigint v from ledger where type = 'fee_in'`);
       const fout = await one(`select coalesce(-sum(amount), 0)::bigint v from ledger where type = 'fee_out'`);
       const dust = await one(`select coalesce(sum(amount), 0)::bigint v from deposits where result = 'below_min'`);
       const uns = await one('select coalesce(sum(onchain), 0)::bigint v, count(*) filter (where onchain > 0)::int n from customers');
@@ -403,7 +463,7 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       const tronParent = layer?.providers?.contract?.scheme?.('tron')?.parent;
       const coldChains = evmChains.filter((ch) => !(ch === 'tron' && tronParent && tronParent === cold));
       const evmCold = Object.fromEntries(await Promise.all(coldChains.map(async (ch) => [ch, await within((async () => Number(await layer.providers.contract.balance(ch, { vault: 'cold' })))())])));
-      const [bal] = await db.query('select coalesce(sum(available + frozen), 0)::bigint owed from balances');
+      const [bal] = await db.query('select coalesce(sum(available + frozen - debt), 0)::bigint owed from balances');
       const [uns] = await db.query('select coalesce(sum(onchain), 0)::bigint v from customers');
       const evmUns = await evmUnswept(db, { chains: ['eth', 'bsc', ...(evmChains.includes('tron') ? ['tron'] : [])] });
       const unsAll = Number(uns.v) + Object.values(evmUns).reduce((a, x) => a + Number(x.total), 0);
@@ -473,9 +533,10 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
   }
 
   const handle = async function handle(request) {
+    let a = '';
     try {
       const url = new URL(request.url);
-      const a = url.searchParams.get('a') || '';
+      a = url.searchParams.get('a') || '';
       if (!actions[a]) return json(404, { error: { code: 'not_found' } });
       const isPost = request.method === 'POST';
       if (isPost && request.headers.get('x-topup-csrf') !== '1') return json(403, { error: { code: 'csrf' } });
@@ -484,8 +545,9 @@ export function createWalletApi({ db, tron, keys, wallets, requireAdmin, verifyA
       if (who?.testAdmin) return await asTestAdminCall(a, b, url.searchParams, isPost);
       return json(200, money(await actions[a](b, 'admin', url.searchParams)));
     } catch (e) {
-      if (e?.status === 401) return json(401, { error: { code: 'unauthorized' } });
-      return errorResponse(e);
+      if (e?.status === 401 && !/^trongrid /.test(String(e?.message || ''))) return json(401, { error: { code: 'unauthorized' } });
+      // 节点出错换成 node_busy / rpc_unreachable / node_error（K-13）；老 TRON 的"核对并签名"、归集出交易：返回不是 JSON、节点没给结果也算节点的问题
+      return errorResponse(nodeFailure(e));
     }
   };
   handle.actions = Object.keys(actions); // 项目索引的测试用：检查每个动作都写进了《项目索引》

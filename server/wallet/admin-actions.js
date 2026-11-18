@@ -9,6 +9,7 @@ import {
   nextSweepSlot, SWEEP_CHAINS, SWEEP_EXPIRE_HOURS, SWEEP_TIMES,
 } from './sweep.js';
 import { walletChainStatus } from './status.js';
+import { TronNodeError } from './adapters/tron.js';
 import { RENT_MAX_PRICE_SUN } from './energy.js';
 import { operatorGasStatus, native, NATIVE, LOW_GAS_BATCHES } from './operator-gas.js';
 
@@ -16,12 +17,33 @@ const TRON_TYPICAL_BATCH_ENERGY = 1_300_000; // 一批 20 个地址的典型能�
 
 const usdt = (u) => fmtUsdt(Number(u)).replace(/,/g, '');
 
-/** 访问节点出错换成给后台的 503（否则统一 500"服务器出错了"）：限流 / 节点繁忙（HTTP 429、503，重试后仍失败）→ node_busy；连不上、超时、其他 HTTP 错误 → rpc_unreachable */
+/**
+ * 访问节点出错换成给后台的错误码（否则统一 500"服务器出错了"）：限流 / 节点繁忙（HTTP 429、503，重试后仍失败）→ node_busy 503；
+ * 连不上、超时、其他 HTTP 错误、返回的不是 JSON → rpc_unreachable 503；TRON 节点回了 JSON 但带 Error（TronNodeError rpc_error）→ node_error 502。
+ * 只换能证明来自节点客户端的错：rpc_unreachable / rpc_http（只有 TRON 适配器、以太坊 / BSC 的 RPC 客户端用这两个 code）、TronNodeError、
+ * 带 node = true 标记的（老 TronGrid 客户端的错，在 wallet-api.js 的 nodeClient 里打标记）。其他的错（发邮件失败、数据坏了等）原样返回，照旧 500 + 服务器日志。
+ * 返回的只有错误码，不带节点地址、Key、接口路径；原始错误信息（含接口路径）写进服务器日志
+ */
 export function nodeFailure(e) {
-  if (e instanceof PayError) return e;
-  if (e?.code === 'rpc_http' && [429, 503].includes(e.httpStatus)) return new PayError('node_busy', 503);
-  if (['rpc_unreachable', 'rpc_http'].includes(e?.code) || e?.name === 'TimeoutError' || e?.name === 'AbortError') return new PayError('rpc_unreachable', 503);
-  return e;
+  const out = nodeCode(e);
+  if (!out) return e;
+  const [code, status] = out;
+  const log = code === 'node_error' ? console.error : console.warn;
+  log(`[wallet] 节点出错 → ${code}：${String(e?.message || e).slice(0, 300)}${e?.cause?.code ? ` (${e.cause.code})` : ''}`);
+  return new PayError(code, status);
+}
+function nodeCode(e) {
+  if (!e || e instanceof PayError) return null;
+  if (e.code === 'rpc_http' && [429, 503].includes(e.httpStatus)) return ['node_busy', 503];
+  if (['rpc_unreachable', 'rpc_http'].includes(e.code)) return ['rpc_unreachable', 503];
+  if (e instanceof TronNodeError && e.code === 'rpc_error') return ['node_error', 502];
+  if (e.node !== true) return null;
+  // 老 TronGrid 客户端（server/pay/trongrid.js）现在的写法：HTTP 错误是 Error("trongrid <状态码> <路径>") 带 .status；
+  // 连不上是 fetch 抛的 TypeError、超时是 TimeoutError / AbortError；返回不是 JSON 是 res.json() 抛的 SyntaxError
+  if (Number.isInteger(e.status) && /^trongrid \d{3}\b/.test(String(e.message || ''))) return [[429, 503].includes(e.status) ? 'node_busy' : 'rpc_unreachable', 503];
+  if (e instanceof TypeError || e instanceof SyntaxError || e.name === 'TimeoutError' || e.name === 'AbortError') return ['rpc_unreachable', 503];
+  if (['build_failed', 'balance_query_failed'].includes(e.message)) return ['node_error', 502]; // 节点回了 JSON 但没给结果
+  return null;
 }
 /** 发起账户的手续费币少于够付几批典型归集时告警（定义在 operator-gas.js，这里照旧导出） */
 export { native, LOW_GAS_BATCHES };
@@ -149,7 +171,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
           row.operator = await operatorGas(chain); // 发起账户的手续费币（归集页的卡片）
           // 估算（按数据库：到账合计 − 已归集），真正凑批时向链上查余额
           const [est] = await db.query(`with a as (
-              select ca.address, coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address)), 0)
+              select ca.address, coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address) and d.result <> 'reversed'), 0)
                 - coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept'), 0) v
               from customer_addresses ca where ca.chain = $1 and ca.provider = 'contract')
             select count(*) filter (where v > 0)::int n, coalesce(sum(v) filter (where v > 0), 0)::bigint total,
@@ -170,7 +192,7 @@ export function walletAdminActions({ db, layer, verifyAdminCode, notify, origin 
       const chain = q?.get('chain') || 'eth';
       if (!SWEEP_CHAINS.includes(chain)) throw new PayError('invalid_param', 422, 'chain');
       const rows = await db.query(`select ca.address, ca.status, ca.customer_id, m.name merchant,
-          coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address)), 0)
+          coalesce((select sum(d.amount) from deposits d where d.chain = ca.chain and lower(d.address) = lower(ca.address) and d.result <> 'reversed'), 0)
           - coalesce((select sum(i.amount) from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept'), 0) v,
           (select i.batch_id from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status in ('pending', 'sent') limit 1) in_batch_id,
           exists (select 1 from wallet_sweep_items i where i.chain = ca.chain and lower(i.address) = lower(ca.address) and i.status = 'swept') swept_before

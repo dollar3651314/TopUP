@@ -20,6 +20,8 @@ export function createFakeTronAdapter({ usdt, confirmations = 0 }) {
       return { chain: 'tron', txid: e.txid, block: e.block, to: e.to, amount: String(amount) };
     },
     async head() { return block + confirmations; },
+    /** 冲正复核（server/pay/reversal.js）：替身链上有没有这笔转账（替身每笔交易只有一个转账，日志序号是 0） */
+    hasTransfer(txid, logIndex = 0) { return Number(logIndex) === 0 && list.some((e) => e.txid === txid); },
     async transfers({ cursor, addresses = [] }) {
       const start = cursor === null || cursor === undefined || cursor === '' ? 0 : Number(cursor);
       const want = new Set(addresses.map(hex20));

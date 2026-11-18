@@ -3,6 +3,8 @@
 FROM node:26-bookworm-slim AS site
 ARG APP_ENV=production
 ARG SITE_URL=
+# 页面构建时记下提交号（admin 页 #admin-root 的 data-build），部署后没刷新的旧页面调接口时服务器回 409 stale_page
+ARG GIT_COMMIT=
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY site/package.json site/package-lock.json ./site/
@@ -11,7 +13,7 @@ RUN npm ci --no-audit --no-fund && cd site && npm ci --no-audit --no-fund
 COPY server ./server
 COPY config ./config
 COPY site ./site
-RUN cd site && APP_ENV=$APP_ENV SITE_URL=$SITE_URL npm run build
+RUN cd site && APP_ENV=$APP_ENV SITE_URL=$SITE_URL GIT_COMMIT=$GIT_COMMIT npm run build
 
 FROM node:26-bookworm-slim
 ARG APP_ENV=production

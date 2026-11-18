@@ -101,7 +101,7 @@ export const withdrawals: Withdrawal[] = EMPTY ? [] : [
 ];
 
 // ---------- 账本 ----------
-export type LedgerType = 'deposit' | 'fee_in' | 'freeze' | 'unfreeze' | 'withdraw' | 'fee_out';
+export type LedgerType = 'deposit' | 'fee_in' | 'freeze' | 'unfreeze' | 'withdraw' | 'fee_out' | 'reversal' | 'debt_repay';
 export interface Ledger { time: string; type: LedgerType; amount: number; balance: number; ref: string; customer?: string }
 export const ledger: Ledger[] = (() => {
   if (EMPTY) return [];

@@ -11,6 +11,17 @@ import { encodeSigned, strictFields as sharedStrictFields } from '../../pay/txco
 import { keccakHex } from '../evm-tx.js';
 import { logAddr, nodeMessage } from '../adapters/tron.js';
 
+/**
+ * 下"节点不认识这笔交易"的结论前：这次用的节点的最新区块号不低于扫块记下的（scanHead，pay_meta 的 evm_scan_<链>.head）。
+ * 没有记录时照旧（true）；节点落后或查不到最新区块号返回 false（这一轮不算数）
+ */
+export async function nodeCaughtUp(adapter, scanHead) {
+  const seen = Number(scanHead);
+  if (scanHead === null || scanHead === undefined || !Number.isFinite(seen)) return true;
+  const h = await adapter.head().catch(() => null);
+  return h !== null && Number(h) >= seen;
+}
+
 const topic = (sig) => keccakHex(Buffer.from(sig)).slice(2);
 const SWEPT_TOPIC = topic('Swept(bytes32,address,bool)');
 const SWEEP_FAILED_TOPIC = topic('SweepFailed(bytes32,address,bytes)');
@@ -197,10 +208,11 @@ export function createTronOps({ need, operator, renter, rentMaxEnergy = null, lo
   }
 
   /** 归集交易的结果：只认批量合约发出的 Swept / SweepFailed 事件，逐个地址判断 */
-  async function sweepOutcome(txRef, items, { sentAt = null, now = Date.now(), droppedAfterMs }) {
+  async function sweepOutcome(txRef, items, { sentAt = null, now = Date.now(), droppedAfterMs, scanHead = null }) {
     const { adapter, scheme } = need();
     const status = await adapter.txStatus(txRef);
-    if (status === 'pending' && sentAt && now - new Date(sentAt).getTime() > droppedAfterMs) {
+    // 节点落后（最新区块号低于扫块记下的）时"不认识"不算数，这一轮照常等（nodeCaughtUp）
+    if (status === 'pending' && sentAt && now - new Date(sentAt).getTime() > droppedAfterMs && await nodeCaughtUp(adapter, scanHead)) {
       const known = await adapter.txKnown(txRef).catch(() => null);
       if (known === false) return { status: 'failed', swept: [], failed: items.map((i) => ({ address: i.address, reason: 'not_broadcast' })) };
     }
