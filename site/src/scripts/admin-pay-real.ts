@@ -187,7 +187,7 @@ function signDialog(job: SignJob) {
 // ============ 商户 ============
 render.overview = async (p) => {
   const go = (tab: string, chain?: string) => { if (chain) pickSweepChain(chain); root.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.click(); };
-  mountOverview(p, {
+  const ov = mountOverview(p, {
     db: async () => {
       try { return await call('overview'); } catch (e) {
         // 收付款还没有配置（例如只用开户功能的环境）：概览退回"开户申请"
@@ -199,7 +199,8 @@ render.overview = async (p) => {
   }, go);
   // 第 1 批：最上面加"待处理"（按等了多久排，出错的排最前）；读取失败时显示"待处理读取失败 + 重试"，不显示"现在没事要做"
   const todo = await walletTodo(wui('p-overview')).catch(() => h('div', { class: 'alert', 'data-todo-error': '' }, '待处理读取失败。 ', h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => show('p-overview') }, '重试')));
-  const head = p.querySelector('.toolbar'); if (head) head.after(todo); else p.prepend(todo);
+  // 交给概览放在标题栏下面：之后资金数据回来重画、点"刷新"都会保留。这次加载已经作废（同一面板又打开了一次）时不插入
+  ov.setTop(todo);
 };
 render.routes = (p) => renderRoutes(wui('p-routes'), p);
 render.merchants = async (p) => {
