@@ -681,6 +681,40 @@ test.describe('TC-W 钱包第 1 批页面（以太坊、BSC）', () => {
     await admin.unroute(isWallet('wallet-sweep'), { behavior: 'wait' });
   });
 
+  // 偶发失败查出的问题（TC-W14 在 CI 偶发"找不到待处理"）：概览先画资金（两批数据各回来一次就整页重画一次），"待处理"另外读、读完插进页面；
+  // "待处理"先读完、资金数据后回来时，整页重画把"待处理"冲掉，页面上就没有"待处理"了。这里把资金的两个接口卡住，等"待处理"的接口都回来了再放行，
+  // 每次都是这个先后顺序（不靠运行快慢）；再点"刷新"（只重读资金）同样检查一遍
+  test('TC-W14B 概览"待处理"不会被资金数据冲掉：待处理先读完、资金两批后回来，或者点"刷新"之后，待处理还在、只有一份', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const hold = async (r: any) => { await gate; await r.continue().catch(() => {}); };
+    await admin.route(isWallet('overview'), hold);
+    await admin.route(isWallet('overview-chain'), hold);
+    await admin.route(isWallet('wallet-chains'), patchJson((j) => {
+      for (const c of j.chains) if (c.chain === 'eth') Object.assign(c, { status: 'onchain_mismatch', ok: false, config_error: 'onchain_mismatch', onchain_fields: ['parent'] });
+    }));
+    // "待处理"读的接口（打开概览时最先读的就是这几个；侧栏角标在概览画完后才读）
+    const todoApis = ['wallet-sweep', 'wallet-chains', 'withdrawals', 'wallet-sweep-batches'].map((a) => admin.waitForResponse((res) => isWallet(a)(new URL(res.url()))));
+    await admin.goto('/admin/');
+    await expect(admin.locator('[data-view="app"]')).toBeVisible();
+    await Promise.all((await Promise.all(todoApis)).map((res) => res.finished()));
+    release();
+    const p = admin.locator('[data-panel="p-overview"]');
+    const todo = p.locator('[data-todo]');
+    await expect(p.locator('[data-ov-refresh]')).toBeEnabled(); // 资金两批都回来了
+    await expect(todo).toContainText('以太坊：合约参数和链上不一致，已停用');
+    await expect(todo).toHaveCount(1);
+    // 点"刷新"：资金重读、整页重画后，待处理还在
+    await p.locator('[data-ov-refresh]').click();
+    await expect(p.locator('[data-ov-refresh]')).toBeEnabled();
+    await expect(todo).toContainText('以太坊：合约参数和链上不一致，已停用');
+    await expect(todo).toHaveCount(1);
+    // 侧栏角标还在读 wallet-chains：等在途的拦截处理完才撤，不把没处理完的请求留给下一条用例
+    await admin.unroute(isWallet('overview'), { behavior: 'wait' });
+    await admin.unroute(isWallet('overview-chain'), { behavior: 'wait' });
+    await admin.unroute(isWallet('wallet-chains'), { behavior: 'wait' });
+  });
+
   test('TC-W15 概览资金按链拆开：BSC 冷钱包查不到时 BSC 那行冷钱包和合计显示"—"，平台资产、利润显示"—"；TRON、以太坊那行照常有数', async () => {
     await adminTab('p-overview');
     let byChain = false;
