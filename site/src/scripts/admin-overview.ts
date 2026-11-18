@@ -37,15 +37,31 @@ function merge(d: OverviewData, x: Partial<OverviewData>): OverviewData {
   return { ...d, ...x, funds: { ...d.funds, ...x.funds }, todo: { ...d.todo, ...x.todo }, sweep: { ...d.sweep, ...x.sweep } };
 }
 
+/** 每个面板当前有效的那次 mountOverview（再次加载同一面板时，旧的那次作废：不再重画、不再插入待处理） */
+const current = new WeakMap<HTMLElement, object>();
+export interface OverviewHandle {
+  /** 再读一次资金数据（"刷新"按钮） */
+  refresh: () => void;
+  /** 放进最上面（标题栏下面）的内容，例如"待处理"。之后每次重画都会保留；旧的那次调用时不做任何事，返回 false */
+  setTop: (el: Node | null) => boolean;
+  /** 这次加载是否还是这个面板当前有效的那次 */
+  alive: () => boolean;
+}
+
 /**
  * 加载并显示概览。load.db / load.chain 各返回一批数据；go(tab) 跳到对应页面。
- * 返回的函数可以再次调用来刷新。
+ * 同一个面板再次调用时，之前那次作废（晚回来的数据不再重画）。
  */
-export function mountOverview(p: HTMLElement, load: Record<Part, () => Promise<Partial<OverviewData>>>, go: (tab: string, chain?: string) => void) {
+export function mountOverview(p: HTMLElement, load: Record<Part, () => Promise<Partial<OverviewData>>>, go: (tab: string, chain?: string) => void): OverviewHandle {
+  const me = {};
+  current.set(p, me);
+  const alive = () => current.get(p) === me;
   let data = empty();
   let run = 0;
+  let top: Node | null = null;
   const state: Record<Part, PartState> = { db: 'loading', chain: 'loading' };
   const refresh = () => {
+    if (!alive()) return;
     const my = ++run;
     data = empty(); state.db = state.chain = 'loading';
     draw();
@@ -58,15 +74,16 @@ export function mountOverview(p: HTMLElement, load: Record<Part, () => Promise<P
         .finally(() => clearTimeout(timer));
     }
   };
-  const draw = () => renderOverview(p, data, state, go, refresh);
+  const draw = () => { if (alive()) renderOverview(p, data, state, go, refresh, top); };
+  const setTop = (el: Node | null) => { if (!alive()) return false; top = el; draw(); return true; };
   refresh();
-  return refresh;
+  return { refresh, setTop, alive };
 }
 
 const CHAINS = ['tron', 'eth', 'bsc'];
 const CHAIN_NAME: Record<string, string> = { eth: '以太坊', bsc: 'BSC', tron: 'TRON' };
 const chainTag = (c: string) => h('span', { class: `chain-tag c-${c}` }, CHAIN_NAME[c] || c);
-function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, PartState>, go: (tab: string, chain?: string) => void, refresh: () => void) {
+function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, PartState>, go: (tab: string, chain?: string) => void, refresh: () => void, top: Node | null) {
   const f = d.funds, t = d.todo, s = d.sweep, sys = d.system;
   const link = (label: string, tab: string, n: Num, sub = '') => h('button', { type: 'button', class: `todo-item${n ? ' todo-on' : ''}`, onclick: () => go(tab) }, h('span', { class: 'todo-n' }, num(n)), h('span', {}, label, sub ? h('span', { class: 'muted' }, ` · ${sub}`) : null));
   const hot = units(f.hot_usdt), cold = units(f.cold_usdt), owed = units(f.owed_total);
@@ -83,6 +100,8 @@ function renderOverview(p: HTMLElement, d: OverviewData, state: Record<Part, Par
     h('div', { class: 'toolbar' }, h('h1', { class: 'm0' }, '概览'), h('div', { class: 'tool-actions' },
       statusLine ? h('span', { class: 'muted', 'data-ov-status': '' }, statusLine) : null,
       h('button', { type: 'button', class: 'btn btn-outline btn-sm', 'data-ov-refresh': '', disabled: loading, onclick: refresh }, loading ? '加载中…' : '刷新'))),
+    // 标题栏下面的内容（运营后台是"待处理"）：整页重画时一起放回去，不会被冲掉
+    ...(top ? [top] : []),
     h('p', { class: 'hint muted' }, '金额单位都是 USDT，三条链（TRON、以太坊、BSC）合在一起算。热钱包和冷钱包的余额实时查询链上，客户地址里没归集的钱按账本计算。以太坊、BSC 归集直接进冷钱包；开通了批量打款的链，热钱包余额也算进平台资产。'),
 
     // ① 资金

@@ -55,11 +55,16 @@ async function call(a: string, body?: unknown, qs = '') {
 const render: Record<string, (p: HTMLElement) => Promise<void>> = {};
 /** 合约钱包部分（admin-wallet.ts）用的工具：rerender 重画当前标签 */
 const wui = (tab: string): WalletUi => ({ call, dialog, say, errText, rerender: () => show(tab), go: (x) => root.querySelector<HTMLElement>(`[data-tab="${x}"]`)?.click() });
+/** 每个面板最近一次 show() 的编号：同一面板又加载了一次时，旧的那次的"加载中"计时不再生效 */
+const loadNo = new WeakMap<HTMLElement, number>();
 async function show(tab: string) {
   const p = $(`[data-panel="${tab}"]`);
+  const my = (loadNo.get(p) || 0) + 1;
+  loadNo.set(p, my);
   // 走查：接口慢时页面一片空白。0.3 秒还没好就显示"加载中"；出错时显示原因和"重试"
+  // 只在这次还是这个面板最近一次加载时才换成"加载中"：否则会把后来那次已经画好的内容冲掉（后来那次画完就不会再重画）
   const switching = p.dataset.shown !== '1';
-  const slow = switching ? window.setTimeout(() => p.replaceChildren(h('p', { class: 'muted', 'data-loading': '' }, '加载中……')), 300) : 0;
+  const slow = switching ? window.setTimeout(() => { if (loadNo.get(p) === my) p.replaceChildren(h('p', { class: 'muted', 'data-loading': '' }, '加载中……')); }, 300) : 0;
   try { await render[tab.slice(2)](p); p.dataset.shown = '1'; } catch (e) {
     p.dataset.shown = '';
     // 页面过期（部署后没刷新）：重试没用，按钮改成"刷新页面"
@@ -187,11 +192,12 @@ function signDialog(job: SignJob) {
 // ============ 商户 ============
 render.overview = async (p) => {
   const go = (tab: string, chain?: string) => { if (chain) pickSweepChain(chain); root.querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.click(); };
-  mountOverview(p, {
+  const ov = mountOverview(p, {
     db: async () => {
       try { return await call('overview'); } catch (e) {
-        // 收付款还没有配置（例如只用开户功能的环境）：概览退回"开户申请"
-        if ((e as WErr).code === 'not_configured') go('apps');
+        // 收付款还没有配置（例如只用开户功能的环境）：概览退回"开户申请"。这次加载已经作废（同一面板又打开了一次）时不跳转
+        // （这里在 await 之后，ov 已经赋值）
+        if ((e as WErr).code === 'not_configured' && ov.alive()) go('apps');
         throw e;
       }
     },
@@ -199,7 +205,8 @@ render.overview = async (p) => {
   }, go);
   // 第 1 批：最上面加"待处理"（按等了多久排，出错的排最前）；读取失败时显示"待处理读取失败 + 重试"，不显示"现在没事要做"
   const todo = await walletTodo(wui('p-overview')).catch(() => h('div', { class: 'alert', 'data-todo-error': '' }, '待处理读取失败。 ', h('button', { type: 'button', class: 'btn btn-outline btn-sm', onclick: () => show('p-overview') }, '重试')));
-  const head = p.querySelector('.toolbar'); if (head) head.after(todo); else p.prepend(todo);
+  // 交给概览放在标题栏下面：之后资金数据回来重画、点"刷新"都会保留。这次加载已经作废（同一面板又打开了一次）时不插入
+  ov.setTop(todo);
 };
 render.routes = (p) => renderRoutes(wui('p-routes'), p);
 render.merchants = async (p) => {
