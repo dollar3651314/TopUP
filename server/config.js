@@ -53,6 +53,9 @@ export function loadConfig(rawEnv = process.env) {
     bscRpcUrl: env.BSC_RPC_URL || '',
     ethConfirmations: int(env.ETH_CONFIRMATIONS, 12),
     bscConfirmations: int(env.BSC_CONFIRMATIONS, 15),
+    // ETH、BSC 扫块时一次 eth_getLogs 最多读几个区块（含两端，默认 10：不少节点的免费套餐只收 ≤ 10 个块；付费节点可以调大）；
+    // 空、不是数字、0、负数按 10。节点仍拒绝时扫块自动减半重试
+    evmLogsMaxBlocks: (() => { const n = int(env.EVM_LOGS_MAX_BLOCKS, 10); return n >= 1 ? n : 10; })(),
     // 归集发起账户的私钥（只在服务器的 .env；它只能调用批量合约，钱只能进冷钱包）。没有时只能分配地址、扫链，不能执行归集
     sweepOperatorKey: env.SWEEP_OPERATOR_KEY || '',
     // TRON 合约钱包（第 2 批）：节点地址（可选，默认按 TRON_NETWORK 用 TronGrid，带 TRONGRID_API_KEY）、确认数（默认 19）、

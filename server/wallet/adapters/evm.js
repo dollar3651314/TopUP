@@ -2,6 +2,9 @@
 //   - transfers：扫 USDT 的 Transfer 事件，只读到"最新区块 − 确认数"，按 to 主题过滤我们的地址
 //   - txStatus：连不上 / 出错 → unknown（不等于失败）；没回执 → pending；确认数不够 → pending；够了 → confirmed；回滚 → failed
 // 每个请求都有超时（默认 10 秒）；出错直接抛出，不返回空结果、不推进游标，由 worker 下一轮重试。
+//   - eth_getLogs 一次最多读 maxRange 个区块（含两端，默认 10：不少节点套餐只收 ≤ 10 个块的范围，超过回 HTTP 400）；
+//     节点拒绝这个范围（HTTP 400，或 JSON-RPC 错误说范围太大 / 结果太多）时同一次调用里减半重试，最少到 1 个块，
+//     1 个块也被拒才抛出；游标只推进到读成功的区块。别的故障（429 / 5xx、连不上、无关的 JSON-RPC 错误）只请求一次就抛出。
 import { toUnits } from '../units.js';
 import { toChecksumAddress, isEvmAddress } from '../create2.js';
 import { encodeBalanceOf, encodeAllowance, keccakHex } from '../evm-tx.js';
@@ -12,6 +15,15 @@ const hex = (n) => '0x' + BigInt(n).toString(16);
 const num = (h) => Number(BigInt(h));
 const topicOf = (addr) => '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
 const addrOfTopic = (t) => toChecksumAddress('0x' + t.slice(-40));
+
+// 节点因为区块范围太大 / 结果太多而拒绝 eth_getLogs 的说法（各家节点的原话不同；和范围无关的错误不在内）
+const RANGE_ERROR_PATTERNS = [/block range/i, /\brange (is )?(too|limit|exceed)/i, /limited to .*range/i, /response size/i, /more than \d+ (results|logs)/i, /too many (results|logs|blocks)/i];
+/** 这个错误是不是"范围太大"：HTTP 400，或 JSON-RPC 错误的说法对得上 */
+export function isRangeRejection(e) {
+  if (!(e instanceof RpcError)) return false;
+  if (e.code === 'rpc_http' && e.httpStatus === 400) return true;
+  return e.rpcCode !== undefined && RANGE_ERROR_PATTERNS.some((re) => re.test(e.message));
+}
 
 export class RpcError extends Error {
   constructor(message, { code = 'rpc_error', rpcCode, data, httpStatus } = {}) { super(message); this.code = code; this.rpcCode = rpcCode; if (data !== undefined) this.data = data; if (httpStatus !== undefined) this.httpStatus = httpStatus; }
@@ -56,9 +68,9 @@ export function createRpc({ rpcUrl, fetchImpl = fetch, timeoutMs = 10_000, label
 
 /**
  * chain：eth / bsc；usdt：USDT 合约地址；decimals：USDT 的小数位数（ETH 6、BSC 18）；
- * confirmations：确认数；maxRange：一次最多读多少个区块（节点对 eth_getLogs 的范围有限制）
+ * confirmations：确认数；maxRange：一次 eth_getLogs 最多读多少个区块（含两端，默认 10；节点对范围有限制，配置见 EVM_LOGS_MAX_BLOCKS）
  */
-export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decimals, confirmations = 12, maxRange = 1000, timeoutMs = 10_000 }) {
+export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decimals, confirmations = 12, maxRange = 10, timeoutMs = 10_000 }) {
   if (!['eth', 'bsc'].includes(chain)) throw new Error(`evm adapter: unsupported chain ${chain}`);
   if (!isEvmAddress(usdt)) throw new Error('evm adapter: usdt is not a valid address');
   const rpc = createRpc({ rpcUrl, fetchImpl, timeoutMs, label: chain });
@@ -70,15 +82,27 @@ export function createEvmAdapter({ chain, rpcUrl, fetchImpl = fetch, usdt, decim
     const start = cursor === null || cursor === undefined || cursor === '' ? safe : Number(cursor);
     if (!Number.isSafeInteger(start) || start < 0) throw new Error(`${chain}: bad cursor`);
     const from = start + 1;
-    const to = Math.min(safe, start + maxRange);
-    if (to < from) return { deposits: [], next: String(start) };
+    const last = Math.min(safe, start + maxRange);
+    if (last < from) return { deposits: [], next: String(start) };
     const wanted = [...new Set(addresses.map((a) => a.toLowerCase()))];
-    const logs = [];
-    for (let i = 0; i < wanted.length; i += TOPIC_GROUP) {
-      const group = wanted.slice(i, i + TOPIC_GROUP).map(topicOf);
-      const part = await rpc.call('eth_getLogs', [{ fromBlock: hex(from), toBlock: hex(to), address: usdt, topics: [TRANSFER_TOPIC, null, group] }]);
-      if (!Array.isArray(part)) throw new RpcError(`${chain}: eth_getLogs: unexpected response`);
-      logs.push(...part);
+    // 一次调用只读一个窗口 [from, to]：被节点以"范围太大"拒绝就减半重试（仍从 from 开始），1 个块也被拒才抛出（游标不动）
+    let span = last - from + 1;
+    let to, logs;
+    for (;;) {
+      to = from + span - 1;
+      try {
+        logs = [];
+        for (let i = 0; i < wanted.length; i += TOPIC_GROUP) {
+          const group = wanted.slice(i, i + TOPIC_GROUP).map(topicOf);
+          const part = await rpc.call('eth_getLogs', [{ fromBlock: hex(from), toBlock: hex(to), address: usdt, topics: [TRANSFER_TOPIC, null, group] }]);
+          if (!Array.isArray(part)) throw new RpcError(`${chain}: eth_getLogs: unexpected response`);
+          logs.push(...part);
+        }
+        break;
+      } catch (e) {
+        if (span <= 1 || !isRangeRejection(e)) throw e;
+        span = Math.max(1, Math.floor(span / 2));
+      }
     }
     const mine = logs.filter((l) => !l.removed && l.address?.toLowerCase() === usdt.toLowerCase() && l.topics?.length === 3 && l.topics[0]?.toLowerCase() === TRANSFER_TOPIC
       && wanted.includes(('0x' + l.topics[2].slice(-40)).toLowerCase()));
