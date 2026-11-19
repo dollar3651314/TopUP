@@ -57,7 +57,7 @@ export function createWalletLayer({ db, config, evm = {}, tron = null, tronFetch
     try {
       adapters[chain] = config.fakeEvm
         ? createFakeEvm({ chain, usdt: c.usdt, decimals: c.decimals, parent: c.scheme.parent })
-        : createEvmAdapter({ chain, rpcUrl: c.rpcUrl, usdt: c.usdt, decimals: c.decimals, confirmations: c.confirmations });
+        : createEvmAdapter({ chain, rpcUrl: c.rpcUrl, usdt: c.usdt, decimals: c.decimals, confirmations: c.confirmations, maxRange: config.evmLogsMaxBlocks || undefined });
       chains[chain] = { adapter: adapters[chain], scheme: c.scheme, usdt: c.usdt };
     } catch (e) { errors[chain] = e.message; }
   }
